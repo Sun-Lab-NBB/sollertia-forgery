@@ -1,5 +1,5 @@
-"""Contains tests for the local batch execution engine and the pipeline dispatch table both execution backends route
-jobs through.
+"""Contains tests for the local batch execution engine and the pipeline dispatch table through which both execution
+backends route jobs.
 """
 
 from __future__ import annotations
@@ -78,16 +78,16 @@ Notes:
 """
 
 _CORE_BUDGET: int = 64
-"""The cores every admission test in this module weighs its jobs against."""
+"""The cores against which every admission test in this module weighs its jobs."""
 
 _MEMORY_BUDGET_MB: int = 65536
-"""The memory every admission test in this module weighs its jobs against."""
+"""The memory against which every admission test in this module weighs its jobs."""
 
 _SESSION_UNIT_PATH: str = "/data/Project/305/2026-01-02-03-04-05-000006"
-"""The session directory the rendered command lines and the dispatched session jobs name."""
+"""The session directory named by the rendered command lines and the dispatched session jobs."""
 
 _DATASET_UNIT_PATH: str = "/data/Project/Dataset"
-"""The dataset directory the rendered forging command and the dispatched forging job name."""
+"""The dataset directory named by the rendered forging command and the dispatched forging job."""
 
 _SLOW_JOB_SECONDS: float = 0.25
 """How long the slow batch worker occupies its pool slot, which is long enough for the manager to observe it running
@@ -147,7 +147,7 @@ class RecordingPool:
     """Stands in for the shared process pool, recording each admitted job rather than running it.
 
     Attributes:
-        submitted: The jobs admission handed to the pool, in the order it handed them over.
+        submitted: The jobs that admission handed to the pool, in the order it handed them over.
     """
 
     def __init__(self) -> None:
@@ -157,7 +157,7 @@ class RecordingPool:
         """Records one admitted job and answers a future that stays unresolved.
 
         Args:
-            worker: The callable admission would have invoked.
+            worker: The callable that admission would have invoked.
             job: The admitted job.
 
         Returns:
@@ -179,13 +179,13 @@ def make_job(
     """Builds one pending job carrying explicit resource weights and prerequisite identifiers.
 
     Args:
-        job_id: The identifier the tracker records the job under.
+        job_id: The identifier under which the tracker records the job.
         job_name: The job type name, which keys every concurrency term.
         cores: The cores the job occupies while it runs.
         memory_mb: The memory the job occupies while it runs.
-        prerequisites: The identifiers of the jobs this one waits on.
-        tracker_path: The tracker the job records its outcome on.
-        unit_path: The processing unit the job operates on.
+        prerequisites: The identifiers of the jobs on which this one waits.
+        tracker_path: The tracker on which the job records its outcome.
+        unit_path: The processing unit on which the job operates.
 
     Returns:
         The pending job.
@@ -215,7 +215,7 @@ def build_state(
         core_budget: The cores the batch may commit at once.
         memory_budget_mb: The memory the batch may commit at once.
         limits: The concurrent-job ceilings the queued types declare.
-        reservations: The concurrency the queued types are held to while other work can use the room.
+        reservations: The concurrency to which the queued types are held while other work can use the room.
 
     Returns:
         The execution state.
@@ -250,7 +250,7 @@ def write_tracker_universe(tracker_path: Path, jobs: list[tuple[str, str]]) -> P
     """Creates one processing tracker holding the given job universe in the scheduled state.
 
     Args:
-        tracker_path: The path the tracker is written to.
+        tracker_path: The path to which the tracker is written.
         jobs: The job name and specifier pairs the tracker registers.
 
     Returns:
@@ -273,12 +273,12 @@ def descriptor(
     """Builds one job descriptor of the shape preparation emits.
 
     Args:
-        job_id: The identifier the tracker records the job under.
+        job_id: The identifier under which the tracker records the job.
         job_name: The job type name.
-        pipeline: The pipeline the job belongs to.
-        unit_path: The processing unit the job operates on.
-        cores: The cores the job was planned at.
-        options: The pipeline-specific parameters the job runs with.
+        pipeline: The pipeline to which the job belongs.
+        unit_path: The processing unit on which the job operates.
+        cores: The cores at which the job was planned.
+        options: The pipeline-specific parameters with which the job runs.
 
     Returns:
         The descriptor.
@@ -305,7 +305,7 @@ def pinned_thread_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
     """Restores every threading-layer setting the worker initializer writes once the test finishes.
 
     The initializer writes process-global environment variables and calls the numba and OpenCV runtime setters, so a
-    test that runs it has to hand the process back the counts it started with.
+    test that runs it has to hand the process back its original counts.
 
     Args:
         monkeypatch: The fixture used to record and restore each pinned environment variable.
@@ -324,7 +324,7 @@ def pinned_thread_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
 
 @pytest.fixture
 def restored_console() -> Iterator[None]:
-    """Hands the process back the console state it started with once the test finishes.
+    """Hands the process back its original console state once the test finishes.
 
     The console is a process-global singleton, so a test that silences it to stand in for the MCP server on the stdio
     transport would otherwise leave every later test running against a silent console.
@@ -341,15 +341,15 @@ def restored_console() -> Iterator[None]:
 
 @pytest.fixture
 def recorded_opencv_thread_counts(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Records the width the worker initializer pins the OpenCV core thread pool to.
+    """Records the width to which the worker initializer pins the OpenCV core thread pool.
 
-    OpenCV selects its parallel backend at build time, and the backend the macOS wheels ship accepts a pinned width
-    without reporting it back through the reader, so the request itself is what states that the pin happened on every
-    platform this package supports.
+    OpenCV selects its parallel backend at build time, and the backend shipped by the macOS wheels accepts a pinned
+    width without reporting it back through the reader, so the request itself is what states that the pin happened
+    on every platform this package supports.
 
     Args: monkeypatch: The fixture used to replace the OpenCV thread setter for the duration of one test.
 
-    Returns: The list every requested thread count is appended to, in request order.
+    Returns: The list to which every requested thread count is appended, in request order.
     """
     counts: list[int] = []
     monkeypatch.setattr(cv2, "setNumThreads", counts.append)
@@ -358,7 +358,7 @@ def recorded_opencv_thread_counts(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 @pytest.fixture
 def recorded_pipeline_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
-    """Replaces every pipeline entry point the dispatch workers call with a recorder.
+    """Stands a recorder in for every pipeline entry point the dispatch workers call.
 
     Each entry point runs a whole processing stage against acquired data, so the dispatch layer is exercised by
     recording the arguments it forwards rather than by running the stages themselves.
@@ -430,7 +430,7 @@ def test_an_unregistered_job_type_stops_the_whole_allocation() -> None:
 
 
 def test_admission_fills_both_budgets_and_defers_what_neither_can_hold() -> None:
-    """Verifies that cores and memory are weighed together, so whichever the batch's mix makes scarce is what bounds the
+    """Verifies that cores and memory are weighed together, so the batch's mix decides which of the two bounds the
     pass.
     """
     jobs = [make_job(job_id=f"job{index}", cores=16, memory_mb=1024) for index in range(6)]
@@ -448,7 +448,7 @@ def test_a_later_pass_counts_the_cores_the_already_running_jobs_committed() -> N
     reoffered.
 
     A pass that began its core tally at zero would see a full pool as an idle one and admit another budget's worth of
-    work on top of it, running twice the cores the batch was budgeted for.
+    work on top of it, running twice the cores budgeted for the batch.
     """
     jobs = [make_job(job_id=f"job{index}", cores=16, memory_mb=1024) for index in range(6)]
     state = build_state(jobs=jobs)
@@ -505,8 +505,8 @@ def test_a_satisfied_prerequisite_releases_the_job_waiting_on_it() -> None:
 
 
 def test_a_declared_ceiling_holds_a_type_while_the_budgets_stay_open() -> None:
-    """Verifies that a type held by its ceiling waits on a resource idle cores do not supply, so spare capacity never
-    lifts it.
+    """Verifies that a type held by its ceiling waits on a resource that idle cores do not supply, so spare capacity
+    never lifts it.
     """
     jobs = [make_job(job_id=f"stream{index}", job_name="streamed", cores=1, memory_mb=64) for index in range(5)]
     state = build_state(jobs=jobs, limits={"streamed": 2})
@@ -536,7 +536,7 @@ def test_a_reservation_offers_its_room_to_other_runnable_work_first() -> None:
     admitted = {job.job_id for job in admit(state).submitted}
 
     # The first pass admits one reserved job and hands the rest of the budget to the queue that has no reservation,
-    # which leaves the second pass no room to widen the reserved type into.
+    # which leaves the second pass no room for widening the reserved type.
     assert admitted == {"wide0", "light0", "light1", "light2"}
     assert [job.job_id for job in state.pending_jobs] == ["wide1", "wide2"]
 
@@ -799,7 +799,7 @@ def test_the_pool_hands_its_children_whatever_console_state_the_parent_holds(
     recorded: list[tuple[Any, ...]] = []
 
     class CapturingPool(RecordingPool):
-        """Stands in for the shared pool, recording the arguments its children would be initialized with."""
+        """Stands in for the shared pool, recording the arguments with which its children would be initialized."""
 
         def __init__(self, max_workers: int, initializer: Callable[..., None], initargs: tuple[Any, ...]) -> None:  # noqa: ARG002
             super().__init__()
@@ -826,8 +826,8 @@ def test_the_pool_hands_its_children_whatever_console_state_the_parent_holds(
 def test_the_pool_spawns_the_batchs_own_width_while_pinning_its_children_to_the_thread_ceiling(
     monkeypatch: pytest.MonkeyPatch, restored_console: None
 ) -> None:
-    """Verifies that the width the pool spawns at and the threads each child pins its libraries to are two unrelated
-    figures.
+    """Verifies that the width at which the pool spawns and the threads to which each child pins its libraries are
+    two unrelated figures.
 
     The batch tools size the pool from the host's cores and leave the thread ceiling at its default of one, so a pool
     spawned at the ceiling instead would run every local batch strictly serially with nothing reported about it.
@@ -835,7 +835,7 @@ def test_the_pool_spawns_the_batchs_own_width_while_pinning_its_children_to_the_
     recorded: list[tuple[int, tuple[Any, ...]]] = []
 
     class WidthCapturingPool(RecordingPool):
-        """Stands in for the shared pool, recording the width it spawns at and the arguments its children start with."""
+        """Stands in for the shared pool, recording its spawn width and the arguments handed to its children."""
 
         def __init__(self, max_workers: int, initializer: Callable[..., None], initargs: tuple[Any, ...]) -> None:  # noqa: ARG002
             super().__init__()
@@ -886,15 +886,15 @@ def test_an_identifier_outside_the_pipeline_enumeration_resolves_to_no_dispatch(
 
 
 def test_a_registered_job_type_reports_the_cores_it_declares() -> None:
-    """Verifies that the declared allocation is what a stage this package sizes for itself runs at, and what a stage a
-    library sizes per job falls back to, so it is reported unnarrowed either way.
+    """Verifies that a stage sized by this package itself runs at the declared allocation, while a stage sized per job
+    by a library falls back to it, so it is reported unnarrowed either way.
     """
     assert resolve_job_cores(job_name=CHECKSUM_JOB_NAME) == 8
     assert resolve_job_cores(job_name=FORGING_JOB_NAME) == 1
 
 
 def test_an_unregistered_job_type_has_no_declared_cores() -> None:
-    """Verifies every job type a pipeline resolves must declare its width before the batch tools may dispatch it."""
+    """Verifies every job type resolved by a pipeline must declare its width before the batch tools may dispatch it."""
     with pytest.raises(ValueError, match="Unable to resolve the cores for job type 'unregistered'"):
         resolve_job_cores(job_name="unregistered")
 
@@ -941,7 +941,7 @@ def test_the_microcontroller_command_names_the_job_the_allocation_runs() -> None
 
 
 def test_rendering_a_command_for_an_unsupported_pipeline_is_rejected() -> None:
-    """Verifies that a descriptor naming a pipeline the table does not hold names no command a host could run."""
+    """Verifies that a descriptor naming a pipeline absent from the table names no command a host could run."""
     job = build_pending_job(job=descriptor(pipeline="not_a_pipeline"))
 
     with pytest.raises(ValueError, match="Unable to render the command for job 'a_job'"):
@@ -1007,7 +1007,7 @@ def test_each_pipeline_worker_forwards_the_job_to_its_own_entry_point(
     recorded_pipeline_calls: dict[str, dict[str, Any]],
     pinned_thread_environment: None,
 ) -> None:
-    """Verifies that the pipeline a job names is what selects the stage it runs and the width that stage runs at."""
+    """Verifies that the pipeline a job names is what selects the stage it runs and that stage's width."""
     job = build_pending_job(job=descriptor(job_name=job_name, pipeline=pipeline, unit_path=unit_path))
 
     run_batch_job(job=job)
@@ -1070,8 +1070,8 @@ def test_the_forging_pipeline_loads_the_dataset_its_jobs_operate_on(project: Pro
 def test_the_dispatch_table_is_held_to_the_pipelines_the_batch_tools_advertise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verifies that a pipeline the tools advertise without a dispatch entry would fail at preparation rather than at
-    registration.
+    """Verifies that a pipeline advertised by the tools without a dispatch entry would fail at preparation rather
+    than at registration.
     """
     monkeypatch.setattr(dispatch_module, "_pipeline_dispatch", dict)
 

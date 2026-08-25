@@ -98,7 +98,7 @@ def plan_dataset_command(dataset_path: tuple[Path, ...], *, regenerate_plan: boo
     "--project-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
-    help="The absolute path to the project root directory whose plan caches to project.",
+    help="The absolute path to the project root directory whose plan caches are collected.",
 )
 def plan_project_command(project_path: Path) -> None:
     """Projects every plan cache under the project into one table at the project root.

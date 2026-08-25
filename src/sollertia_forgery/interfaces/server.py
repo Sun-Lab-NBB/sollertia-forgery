@@ -236,7 +236,7 @@ def _report_job_accounting(
     Raises:
         RuntimeError: If the 'sacct' command fails on the server.
     """
-    # A named job is reported on its own, which is what lets a caller bypass the user and date filtering.
+    # A named job is reported on its own, so a caller bypasses the user and date filtering.
     if job_id is not None:
         command = f'sacct -j {job_id} -o "{_SACCT_FORMAT}" --parsable2 --units=G'
         console.echo(message=f"Fetching job accounting data for job ID '{job_id}'...", level=LogLevel.INFO)

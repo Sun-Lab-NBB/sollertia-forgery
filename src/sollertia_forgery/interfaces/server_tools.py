@@ -50,8 +50,8 @@ def write_server_configuration_tool(
     Args:
         configuration_payload: The complete ServerConfiguration payload. Supply ``username``, ``password``, ``host``,
             ``root``, and ``environment``, since an omitted field is persisted as an empty string rather than rejected.
-            The ``password`` must be the account's real password, since the placeholder the read tool reports in its
-            place is refused rather than stored.
+            The ``password`` must be the account's real password, since the placeholder that the read tool reports in
+            its place is refused rather than stored.
         overwrite: Determines whether to overwrite an existing server configuration file.
 
     Returns:

@@ -37,7 +37,7 @@ from .host_resolution import (
 )
 
 _PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name")
-"""The axes a plan breakdown counts, each of which is also a column a caller may filter by."""
+"""The axes a plan breakdown counts, each of which is also a column by which a caller may filter."""
 
 _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "unit_kind",
@@ -53,7 +53,7 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
 """The job fields a semi-detail listing carries, which is the job's subject, its identity, and its figures."""
 
 _PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "prerequisite_ids")
-"""The job fields detail adds, which are the identifier a tracked job is recorded under and the jobs it waits for."""
+"""The job fields detail adds, which are the tracked job's identifier and its prerequisite jobs."""
 
 
 @mcp.tool()
@@ -110,7 +110,7 @@ def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[s
     """Projects every plan cache under a project into one table at the project root.
 
     Reads the caches alone and estimates nothing, so this is the cheap half of planning and the half that ships. Pull
-    the resulting file to size a remote submission without reading the data root it was planned against.
+    the resulting file to size a remote submission without reading the data root against which it was planned.
 
     A unit carrying no cache contributes no rows, so plan the units first and treat a job absent from the projection
     as unplanned rather than free.
@@ -167,10 +167,10 @@ def read_project_plan_tool(
 ) -> dict[str, Any]:
     """Reads the planned cores and memory of a project's jobs out of its stored projection, in three widening stages.
 
-    A bare call reports the figures a submission is sized against alongside a ``breakdown`` naming every unit kind,
-    animal, dataset, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs
-    carrying their subject and their figures. Opting into detail adds each job's tracked identifier and the jobs it
-    waits for.
+    A bare call reports the figures against which a submission is sized, alongside a ``breakdown`` naming every unit
+    kind, animal, dataset, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs
+    carrying their subject and their figures. Opting into detail adds each job's tracked identifier and its prerequisite
+    jobs.
 
     The totals and the breakdown span every planned job regardless of the filters, so narrowing what is listed never
     distorts what is reported. Reads the stored table rather than any unit's data, so the cost is independent of how
@@ -189,9 +189,9 @@ def read_project_plan_tool(
         job_names: Restricts the listing to these job type names.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match, which is how a caller reading under a tight filter takes the whole result at once.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report their tracked identifier and the jobs they wait for.
+        detailed: Determines whether the listed jobs report their tracked identifier and their prerequisite jobs.
 
     Returns:
         A response dict with ``project_path``, ``plan_path``, the whole-projection totals, and a ``breakdown`` per
@@ -297,7 +297,7 @@ def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_
 
 
 def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
-    """Summarizes a plan projection into the figures a submission is sized against.
+    """Summarizes a plan projection into the figures against which a submission is sized.
 
     Args:
         frame: The whole plan projection.

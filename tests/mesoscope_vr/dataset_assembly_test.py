@@ -38,7 +38,7 @@ def _stub_session_loader(session_type: SessionTypes) -> SimpleNamespace:
 
 
 def _patch_assemblers(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
-    """Replaces both sub-assemblers with recorders and returns the mapping the routing writes into."""
+    """Replaces both sub-assemblers with recorders and returns the mapping into which the routing writes."""
     calls: dict[str, dict[str, Any]] = {}
     monkeypatch.setattr(
         target=dispatcher_module,
@@ -57,7 +57,7 @@ def _write_state_streams(directory: Path, system_states: dict[int, int], runtime
     """Writes the system-state and runtime-state feathers the session-bounds clip reads.
 
     Args:
-        directory: The processed runtime-data directory to write both feathers into.
+        directory: The processed runtime-data directory that receives both feathers.
         system_states: The system state code to record at each timestamp, keyed by timestamp.
         runtime_times: The runtime-state entry timestamps, whose last value marks the end of the runtime.
     """
@@ -87,7 +87,7 @@ def _write_reward_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     session's first delivery, which is the case the cumulative-volume classifier could not reach.
 
     Args:
-        tmp_path: The temporary directory to build the three input directories under.
+        tmp_path: The temporary directory that receives the three input directories.
 
     Returns:
         A tuple of the microcontroller-data, runtime-data, and raw-data directories.
@@ -162,7 +162,7 @@ def test_resolve_slowest_camera_clock_errors_without_cameras(tmp_path: Path) -> 
 
 
 def test_multi_recording_dataset_name_is_qualified_by_animal() -> None:
-    """Verifies the multi-recording dataset name carries the animal identifier, which is what keeps one animal's
+    """Verifies the multi-recording dataset name carries the animal identifier. That identifier keeps one animal's
     tracked output separate from its peers when a forged dataset spans several animals.
     """
     assert multi_recording_dataset_name(animal_id="101", dataset_name="Learning") == "101_Learning"
@@ -272,7 +272,7 @@ def test_clip_to_session_bounds_keeps_a_dataset_inside_both_bounds(tmp_path: Pat
 def test_clip_to_session_bounds_keeps_the_head_when_the_session_never_leaves_idle(tmp_path: Path) -> None:
     """Verifies that a session with no non-idle state keeps its head.
 
-    A session terminated during setup never leaves idle, so there is no session start to anchor the head on.
+    A session terminated during setup never leaves idle, so no session start anchors the head.
     """
     _write_state_streams(
         directory=tmp_path, system_states={0: 0, 1_000: 0}, runtime_times=np.array([0, 3_000], dtype=np.uint64)

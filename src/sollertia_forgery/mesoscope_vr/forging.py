@@ -47,7 +47,7 @@ dataset.
 
 Notes:
     Every pipeline resolves its own job universe from the acquisition manifests, so a completed tracker already means
-    every source the session recorded was processed. Admission therefore checks which pipelines completed rather than
+    every source recorded by the session was processed. Admission therefore checks which pipelines completed rather than
     counting sources.
 
     A training session records no imaging, so the two-photon pipeline is absent from its requirement. A session type

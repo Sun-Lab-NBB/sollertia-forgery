@@ -47,7 +47,7 @@ dependencies = [
 
     # Acquisition and Processing Pipelines (called in-process by the video, microcontroller, two-photon, and forging
     # pipelines)
-    "ataraxis-video-system>=5.1,<6",  # 5.1 first exports the OutputLayout the video pipeline resolves against
+    "ataraxis-video-system>=5.1,<6",  # 5.1 first exports the OutputLayout against which the video pipeline resolves
     "ataraxis-communication-interface>=7.1,<8",  # 7.1 first exports the serial protocol and prototype enums
     "cindra>=2.0.0rc6,<3",  # rc6 first exports the pipeline data records, including the combined recording metadata
 
@@ -58,7 +58,7 @@ dependencies = [
     # System Introspection (reads the host's physical memory when sizing a processing batch)
     "psutil>=7,<8",
 
-    # Thread-Pool Control (holds the native BLAS and OpenMP pools at the cores each batch job was admitted at)
+    # Thread-Pool Control (holds the native BLAS and OpenMP pools at the cores each batch job occupies)
     "threadpoolctl>=3,<4",
 
     # Data Processing
@@ -260,7 +260,7 @@ addopts = "--import-mode=importlib"
 # Places the repository root on sys.path, so that the 'tests' package is importable from the subprocesses the parallel
 # pipeline tests spawn. The import mode above resolves test modules without touching sys.path, and a spawned worker
 # inherits the parent's sys.path to import the module defining the callable it unpickles. The src layout keeps this
-# entry from shadowing the installed distribution the tests measure coverage against.
+# entry from shadowing the installed distribution against which the tests measure coverage.
 pythonpath = ["."]
 
 # Configures the coverage data the '{py}-test' tox task collects. Most of the interface layer is excluded from

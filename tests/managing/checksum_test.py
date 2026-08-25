@@ -33,7 +33,7 @@ def reported_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         monkeypatch: The fixture used to replace the console's echo method for the duration of one test.
 
     Returns:
-        The list the recorder appends each echoed message to, in the order they were emitted.
+        The list to which the recorder appends each echoed message, in the order they were emitted.
     """
     messages: list[str] = []
     monkeypatch.setattr(console, "echo", lambda message, **_keywords: messages.append(message))
@@ -56,7 +56,7 @@ def read_job_state(session: SessionData) -> tuple[str, str | None]:
 
 @pytest.mark.xdist_group(name="worker_pool")
 def test_regeneration_establishes_the_stored_checksum(training_session: SessionData) -> None:
-    """Verifies a session that was never checksummed gets its baseline written and its job recorded as succeeded."""
+    """Verifies that a never-checksummed session gets its baseline written and its job recorded as succeeded."""
     assert not training_session.raw_data.checksum_path.is_file()
 
     run_checksum_processing_pipeline(session_path=training_session.raw_data_path.parent, regenerate_checksum=True)
@@ -81,7 +81,7 @@ def test_verification_confirms_untouched_raw_data(training_session: SessionData)
 
 
 def test_verification_condemns_raw_data_that_changed(training_session: SessionData) -> None:
-    """Verifies a mismatch is recorded as a job failure naming both checksums, which is how corruption is surfaced."""
+    """Verifies that a mismatch is recorded as a job failure naming both checksums, which surfaces the corruption."""
     session_path = training_session.raw_data_path.parent
     run_checksum_processing_pipeline(session_path=session_path, regenerate_checksum=True, workers=1)
     stored = training_session.raw_data.checksum_path.read_text().strip()
@@ -125,7 +125,7 @@ def test_a_verified_session_announces_its_outcome(training_session: SessionData,
 
 
 def test_verification_without_a_stored_value_reports_how_to_establish_one(training_session: SessionData) -> None:
-    """Verifies verification needs a baseline, so its absence names regeneration rather than reading as a mismatch."""
+    """Verifies that verification needs a baseline, so its absence names regeneration rather than a mismatch."""
     with pytest.raises(FileNotFoundError, match="No checksum file exists at"):
         run_checksum_processing_pipeline(session_path=training_session.raw_data_path.parent, workers=1)
 
@@ -151,7 +151,7 @@ def test_a_write_fault_marks_the_job_failed_before_it_propagates(training_sessio
 
 
 def test_discovery_reports_the_single_job_the_pipeline_owns(training_session: SessionData) -> None:
-    """Verifies the universe is one job specified by the session, and an acquired session makes that job possible."""
+    """Verifies that the universe is the one job the session specifies, and an acquired session makes it possible."""
     session, universe, possible = discover_checksum_jobs(session_path=training_session.raw_data_path.parent)
 
     assert session.session_name == training_session.session_name

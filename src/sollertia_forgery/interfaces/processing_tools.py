@@ -93,11 +93,11 @@ _MEMORY_BUDGET_FRACTION: float = 0.85
 """The share of the host's memory a batch commits when the caller does not name one."""
 
 _MINIMUM_MEMORY_BUDGET_MB: int = 1024
-"""The floor an auto-resolved memory budget never falls below, so a small host still admits one job at a time. A budget
-the caller names explicitly is honored as given."""
+"""The floor below which an auto-resolved memory budget never falls, so a small host still admits one job at a time. A
+budget the caller names explicitly is honored as given."""
 
 _STATUS_AXES: tuple[str, ...] = ("pipeline", "job_name", "status", "session_path")
-"""The job attributes a caller may filter a batch by, and the axes a status breakdown counts."""
+"""The job attributes by which a caller may filter a batch, and the axes a status breakdown counts."""
 
 _STATUS_SEMI_FIELDS: tuple[str, ...] = ("job_id", "pipeline", "job_name", "specifier", "status", "session_path")
 """The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset
@@ -115,8 +115,8 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
     "prerequisite_ids",
     "tracker_path",
 )
-"""The job fields detail adds, which are the resources the job was admitted at, its timing and provenance, the
-parameters it ran with, and the jobs it waited for."""
+"""The job fields detail adds, which are the resources the job occupies, its timing and provenance, its runtime
+parameters, and its prerequisite jobs."""
 
 _RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "cores", "memory_mb")
 """The job fields a semi-detail resource listing carries, which is the job's identity and its planned figures. The unit
@@ -124,12 +124,11 @@ path is left off a semi-detail row because the unit entry already names it, and 
 reading one job closely."""
 
 _RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "unit_path", "options")
-"""The job fields detail adds, naming the unit the job reads, which jobs it waits for, and the parameters it would run
-with."""
+"""The job fields detail adds, naming the unit the job reads, its prerequisite jobs, and the parameters it would use."""
 
 _STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in ProcessingStatus)
-"""The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the
-values a caller filters the listing by, and the keys a tracker summary counts under."""
+"""The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the values
+by which a caller filters the listing, and the keys under which a tracker summary counts."""
 
 
 @mcp.tool()
@@ -148,9 +147,9 @@ def prepare_batch_tool(
     and builds the batch from them. One path serves both hosts, so a local batch and a remote one are the same
     document and differ only in where their jobs will run.
 
-    A job the unit cannot run never reaches its processing tracker, so its absence from the project's state artifact is
-    what rules it out. A job whose upstream stage this run can neither dispatch nor find already succeeded is reported
-    under ``blocked_jobs`` rather than dispatched.
+    A job that the unit cannot run never reaches its processing tracker, so its absence from the project's state
+    artifact is what rules it out. A job whose upstream stage this run can neither dispatch nor find already succeeded
+    is reported under ``blocked_jobs`` rather than dispatched.
 
     Pass the returned ``batch_id`` to ``execute_jobs_tool``. A batch runs where it was prepared, so execution reads the
     host from the batch itself. Identifiers are recorded on disk and outlive the server that issued them.
@@ -158,15 +157,14 @@ def prepare_batch_tool(
     Args:
         pipeline: The batch pipeline to prepare, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``, ``forging``.
-        session_paths: The processing unit directories to prepare jobs for, which are session roots for every session
+        session_paths: The processing unit directories whose jobs to prepare, which are session roots for every session
             pipeline and dataset roots for ``forging``. For ``remote`` these are paths ON THE SERVER. Every unit must
-            belong to one project, since the artifacts a batch is resolved from are written per project.
-        options: The pipeline-specific parameters to run the prepared jobs with, carried on every descriptor this call
-            registers. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting re-baselining of
-            the stored value over verification against it, which defaults to verification. Every other pipeline,
-            including ``forging``, takes no parameters. Build or extend a dataset hierarchy with
-            ``define_forging_dataset_tool``, which takes ``session_names``, ``force_recreate``, and
-            ``recreate_animals`` directly.
+            belong to one project, since the artifacts from which a batch is resolved are written per project.
+        options: The pipeline-specific parameters for the prepared jobs, carried on every descriptor this call
+            registers. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting re-baselining of the
+            stored value over verification against it, which defaults to verification. Every other pipeline, including
+            ``forging``, takes no parameters. Build or extend a dataset hierarchy with ``define_forging_dataset_tool``,
+            which takes ``session_names``, ``force_recreate``, and ``recreate_animals`` directly.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         replan: Determines whether to re-estimate the cores and memory the units' plan caches already hold. Leave False
             unless a deliberate retune should be adopted, since a submission may already have been sized against the
@@ -178,7 +176,7 @@ def prepare_batch_tool(
         A response dict with ``batch_id``, ``pipeline``, ``host``, ``total_units``, ``total_jobs``,
         ``total_blocked_jobs``, a ``units`` list carrying each unit's ``unit_path``, ``unit_name``, ``job_count``, and
         ``blocked_count``, or its ``unit_path`` and an ``error``, and a ``blocked_jobs`` list naming what each blocked
-        job waits on. Carries a ``jobs`` list when the descriptors are asked for.
+        job awaits. Carries a ``jobs`` list when the caller requests the descriptors.
     """
     if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
@@ -228,32 +226,32 @@ def inspect_job_resources_tool(
 ) -> dict[str, Any]:
     """Reports the cores and memory a pipeline's outstanding jobs will need, in three widening stages, running none.
 
-    A bare call reports the figures a batch is planned against alongside a ``breakdown`` naming every job type and how
-    many of each the named sessions still have to run. A job the units already recorded as succeeded, and a job this
-    run could not unblock, are both absent, so this reports what a batch would dispatch rather than the whole universe.
-    Naming a filter adds a page of jobs carrying their figures, and opting into detail adds the unit each job reads,
-    the jobs it waits for, and the parameters it would run with.
+    A bare call reports the figures against which a batch is planned, alongside a ``breakdown`` naming every job type
+    and how many of each the named sessions still have to run. A job that the units already recorded as succeeded, and a
+    job that this run could not unblock, are both absent, so this reports what a batch would dispatch rather than the
+    whole universe. Naming a filter adds a page of jobs carrying their figures, and opting into detail adds the unit
+    each job reads, its prerequisite jobs, and the parameters it would use.
 
     Estimates each job's memory from the data it will process, so a long recording is not charged the same as a short
-    one. The figures already carry the shared tolerance, so they are the values to plan a local batch against or to
-    request from a remote scheduler. Discovery runs as it does for a batch, so each session's tracker is created and
-    aligned to its job universe.
+    one. The figures already carry the shared tolerance, so a caller plans a local batch against them or requests them
+    from a remote scheduler. Discovery runs as it does for a batch, so each session's tracker is created and aligned to
+    its job universe.
 
     Args:
         pipeline: The pipeline to inspect, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``, ``forging``.
         session_paths: The processing unit directories to inspect, which are session roots for every session
             pipeline and dataset roots for ``forging``. For ``remote`` these are paths ON THE SERVER.
-        options: The pipeline-specific parameters the inspected jobs would run with, forwarded to preparation. See
+        options: The pipeline-specific parameters for the inspected jobs, forwarded to preparation. See
             ``prepare_batch_tool`` for the keys each pipeline reads.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         job_names: Restricts the listing to these job type names.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report the unit they read, the jobs they wait for, and the
-            parameters they would run with.
+        detailed: Determines whether the listed jobs report the unit they read, their prerequisite jobs, and the
+            parameters they would use.
 
     Returns:
         A response dict with a ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``,
@@ -285,8 +283,8 @@ def inspect_job_resources_tool(
         breakdown={"job_name": count_values(values=[job["job_name"] for job in jobs])},
     )
 
-    # Both figures read the machine this process runs on, so they describe the host only when the data sits here. A
-    # remote batch is submitted with the budgets its caller names and the scheduler enforces its own limits, so
+    # Both figures read the machine on which this process runs, so they describe the host only when the data sits here.
+    # A remote batch is submitted with the budgets its caller names and the scheduler enforces its own limits, so
     # reporting this workstation's cores and memory against a server project would describe the wrong machine.
     if host == LOCAL_HOST_LABEL:
         response["total_cores"] = resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES)
@@ -319,11 +317,11 @@ def execute_jobs_tool(
     A batch runs where it was prepared, so the host is read from the batch itself rather than named again. Batches
     prepared against different hosts are rejected rather than mixed.
 
-    Before anything is dispatched, every job the trackers already record as running is reconciled. Locally that record
-    describes a pool that died, so the job is rerun. Remotely the submission ledger and the tracker's executor
+    Before anything is dispatched, every job that the trackers already record as running is reconciled. Locally that
+    record describes a pool that died, so the job is rerun. Remotely the submission ledger and the tracker's executor
     identifier are consulted, and a job whose allocation is still live is adopted rather than submitted twice, with its
     dependents wired to wait on the allocation already running it. Every job that is dispatched has its recorded state
-    cleared first, which is what keeps a status read honest across the window before it starts.
+    cleared first, so a status read stays honest across the window before it starts.
 
     Locally one pool serves every pipeline, so several batches may be dispatched together and the engine packs them
     against one pair of budgets. Remotely the scheduler sequences the dependency graph, so nothing has to stay running
@@ -339,15 +337,15 @@ def execute_jobs_tool(
             default, which exists to stop a run that has stopped progressing. Ignored for a local batch.
 
     Returns:
-        A response dict with ``started``, the ``host`` it dispatched to, ``total_jobs``, the ``pipelines`` the batch
-        holds, and any ``adopted_jobs`` it left to an allocation already running them. A local dispatch adds the
+        A response dict with ``started``, the ``host`` that received the dispatch, ``total_jobs``, the ``pipelines`` the
+        batch holds, and any ``adopted_jobs`` it left to an allocation already running them. A local dispatch adds the
         resolved ``core_budget``, ``memory_budget_mb``, ``pool_size``, and a ``job_allocations`` entry per job type. A
-        remote dispatch adds the ``batch_id`` its scripts and logs are filed under, the ``batch_ids`` the submission
-        covered, ``walltime_minutes``, the ``batch_directory`` on the server, and a ``submissions`` list pairing each
-        job with the allocation it runs as. Either host adds an ``invalid_jobs`` list when a recorded descriptor could
-        not be built into a job. Returns an error when an identifier resolves to no prepared batch, when no batch is
-        named, when the named batches mix hosts, when every prepared job is blocked or already succeeded, or when no
-        recorded descriptor builds into a job.
+        remote dispatch adds the ``batch_id`` under which its scripts and logs are filed, the ``batch_ids`` the
+        submission covered, ``walltime_minutes``, the ``batch_directory`` on the server, and a ``submissions`` list
+        pairing each job with the allocation that runs it. Either host adds an ``invalid_jobs`` list when a recorded
+        descriptor could not be built into a job. Returns an error when an identifier resolves to no prepared batch,
+        when no batch is named, when the named batches mix hosts, when every prepared job is blocked or already
+        succeeded, or when no recorded descriptor builds into a job.
     """
     documents, missing = read_prepared_batches(batch_ids=batch_ids)
     if missing:
@@ -425,20 +423,20 @@ def get_processing_status_tool(
     ``breakdown`` naming every pipeline, job type, status, and session in the batch. That is what tracks a run at a size
     a response can always carry, however many jobs it holds, and the counts are where a failure first shows. The counts
     cover the batch's own jobs alone, so their total is the number of jobs the batch dispatched and a job of the same
-    tracker that this batch did not dispatch is left out of them. The ``status`` label the response carries is what
-    those same counts resolve to, so the label and the counts describe one set.
+    tracker that this batch did not dispatch is left out of them. Those same counts resolve to the ``status`` label the
+    response carries, so the label and the counts describe one set.
 
     Naming a filter adds a page of jobs carrying identity and status. Filtering to ``failed`` is how a caller reads
-    which jobs failed, and opting into detail adds each one's error text, timing, and the resources it was admitted at.
+    which jobs failed, and opting into detail adds each one's error text, timing, and the resources it occupies.
 
     A ``remote`` call carries an ``outcomes`` entry for any batch that settled and closed on it. A ``local`` call
     carries one only when no batch state is held in this process and ``batch_ids`` names the closed batch. The entry is
-    the durable snapshot closure took of what the batch's jobs recorded. Read ``complete``, ``succeeded``,
+    the durable snapshot that closure took of what the batch's jobs recorded. Read ``complete``, ``succeeded``,
     ``failed``, ``blocked``, and ``outstanding`` from it to decide whether the run needs anything further, and
     ``failed_jobs`` for the error text each failure recorded.
 
     Args:
-        host: Which batch to report on, either ``local`` for this machine's pool or ``remote`` for the outstanding
+        host: Which batch to report, either ``local`` for this machine's pool or ``remote`` for the outstanding
             allocations on the server's scheduler.
         batch_ids: Restricts a ``remote`` report to these outstanding batches. Omit to cover all of them. Naming any
             batch also counts as a filter, so the response carries a page of jobs. For ``local`` it names the closed
@@ -452,7 +450,7 @@ def get_processing_status_tool(
         pipelines: Restricts the listing to these pipelines.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
         detailed: Determines whether the listed jobs carry their resources, timing, provenance, and error text.
 
@@ -461,11 +459,11 @@ def get_processing_status_tool(
         by scheduler state, a ``breakdown`` per axis, and the ``outcomes`` of any batch that closed on this call. For
         ``local``, a response dict with ``active`` (whether the manager thread is still running), ``canceled``, a
         ``summary`` counting the batch's succeeded, failed, running, and scheduled jobs alongside their total, the
-        ``status`` label those counts resolve to, and a ``breakdown`` per axis. Carries a ``jobs`` list with ``rows``,
-        ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
-        A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count with a ``blocked_reason``,
-        and those jobs are listed by filtering to ``scheduled``. If no batch has run, ``active`` is False with an
-        explanatory ``message``.
+        ``status`` label resolved from those counts, and a ``breakdown`` per axis. Carries a ``jobs`` list with
+        ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is
+        requested. A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count with a
+        ``blocked_reason``, and those jobs are listed by filtering to ``scheduled``. If no batch has run, ``active`` is
+        False with an explanatory ``message``.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -637,11 +635,11 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
 
     Returns each unit to an unprocessed state, so a later preparation rediscovers every job from the acquired data
     rather than resuming a partial run. Removal reports the bytes each path held either way, since the host runs the
-    same removal whichever side of the connection it sits on.
+    same removal on whichever side of the connection it sits.
 
     The ``checksum`` pipeline owns no directory, because it writes its stored value into the acquired data itself.
-    Cleaning it removes its tracker and leaves that stored value in place, so the unit keeps the baseline a later
-    verification compares against. The ``forging`` pipeline owns its whole dataset hierarchy, so cleaning it removes
+    Cleaning it removes its tracker and leaves that stored value in place, so the unit keeps the baseline against which
+    a later verification compares. The ``forging`` pipeline owns its whole dataset hierarchy, so cleaning it removes
     every assembled feather in that dataset alongside the tracker.
 
     Args:
@@ -720,7 +718,7 @@ def _run_and_close_local_batch(
         and recorded their outcomes.
 
     Args:
-        state: The batch execution state the manager dispatches from.
+        state: The batch execution state from which the manager dispatches.
         host: The host holding the data the batch's jobs read.
         batch_ids: The identifiers of the batches this run dispatched.
     """
@@ -744,9 +742,9 @@ def _execute_local_batch(
     """Reconciles a local batch and dispatches it onto the shared process pool.
 
     Args:
-        host: The host holding the trackers, which the reset is applied through.
+        host: The host holding the trackers, through which the reset is applied.
         pending: The batch's jobs.
-        batch_ids: The identifiers of the batches this run dispatches, which closure records its outcome onto.
+        batch_ids: The identifiers of the batches this run dispatches, onto which closure records its outcome.
         core_budget_override: The cores the batch may use in total, or a non-positive value to auto-resolve.
         memory_budget_mb: The memory the batch may use in total, or a non-positive value to auto-resolve.
 
@@ -780,11 +778,11 @@ def _execute_local_batch(
     concurrency_reservations = resolve_concurrency_reservations(job_names={job.job_name for job in dispatchable})
 
     # Represents each type by the widest job carrying its name. Sizing is per-job rather than per-type, so one type
-    # holds jobs of several widths, and the resolved figure serves as the cap those jobs are held to below and as the
-    # divisor the reported concurrency follows from. Taking the widest is what leaves every library-chosen width
-    # intact, since a narrower representative would cap a type's own wide jobs down to a sibling's figure, and it
-    # settles on one representative whatever order the batch holds its jobs in. Admission reads neither figure and
-    # weighs each job's own width against the budget, so this governs the cap and the report rather than what runs.
+    # holds jobs of several widths, and the resolved figure serves as the cap to which those jobs are held below and as
+    # the divisor from which the reported concurrency follows. Taking the widest is what leaves every library-chosen
+    # width intact, since a narrower representative would cap a type's own wide jobs down to a sibling's figure, and it
+    # settles on one representative however the batch orders its jobs. Admission reads neither figure and weighs each
+    # job's own width against the budget, so this governs the cap and the report rather than what runs.
     type_cores: dict[str, int] = {}
     for job in dispatchable:
         type_cores[job.job_name] = max(type_cores.get(job.job_name, 0), job.core_weight)
@@ -798,8 +796,8 @@ def _execute_local_batch(
     )
 
     # Caps each job at what the host can supply for its type rather than replacing its width with that figure, which
-    # preserves the width the owning library sized this particular job at. A job the library read a small archive for
-    # and sized at one core stays at one core, and only a job wider than the host allows is brought down.
+    # preserves the width at which the owning library sized this particular job. A job the library sized at one core
+    # from a small archive stays at one core, and only a job wider than the host allows is brought down.
     for pending_job in dispatchable:
         pending_job.core_weight = max(1, min(pending_job.core_weight, allocations[pending_job.job_name].cores_per_job))
 
@@ -856,8 +854,8 @@ def _execute_remote_batch(
 
     Args:
         pending: The batch's jobs.
-        batch_ids: The prepared batches being dispatched. The first names the directory the scripts and logs are
-            written into.
+        batch_ids: The prepared batches being dispatched. The first names the directory into which the scripts and logs
+            are written.
         walltime_minutes: The wall-time every allocation requests, or a non-positive value to take the shared default.
 
     Returns:
@@ -953,7 +951,7 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
     """Re-reads the trackers of an execution state's jobs and returns per-job status entries and aggregate counts.
 
     Notes:
-        Every entry names the unit it belongs to, because a job identifier is derived from the job name and the
+        Every entry names the unit to which it belongs, because a job identifier is derived from the job name and the
         specifier alone. A pipeline whose specifier does not vary by session therefore gives every session's copy of
         that stage one identifier, and the entries would be indistinguishable without the unit that separates them.
 
@@ -963,9 +961,9 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
         the aggregates would report a total the batch's job count does not match.
 
         A tracker's record carries the executor that ran the job, when it started, and when it finished, because a
-        caller asking about one job wants all three. A job the tracker does not know yet reports empty timing rather
-        than absent keys, so every entry carries the same fields. Only the error text is conditional, because a job
-        that recorded none has nothing to report.
+        caller asking about one job wants all three. A job that the tracker does not know yet reports empty timing
+        rather than absent keys, so every entry carries the same fields. Only the error text is conditional, because a
+        job that recorded none has nothing to report.
 
     Args:
         state: The batch execution state whose jobs to report.
@@ -1013,17 +1011,17 @@ def _elapsed_seconds(started_at: int | None, completed_at: int | None) -> float 
     """Resolves how long a job has run, measuring a finished job to its completion and a running one to now.
 
     Args:
-        started_at: The microsecond-precision epoch the tracker recorded the job as starting at, or None when the job
-            has not started.
-        completed_at: The microsecond-precision epoch the tracker recorded the job as finishing at, or None when the
-            job is still running.
+        started_at: The microsecond-precision epoch the tracker recorded as the job's start, or None when the job has
+            not started.
+        completed_at: The microsecond-precision epoch the tracker recorded as the job's completion, or None when the job
+            is still running.
 
     Returns:
         The elapsed seconds, or None when the job has not started.
     """
     if started_at is None:
         return None
-    # A running job is measured to now on the same clock the tracker stamps its own timestamps with, so the two are
+    # A running job is measured to now on the same clock that stamps the tracker's own timestamps, so the two are
     # directly subtractable.
     end = completed_at if completed_at is not None else current_timestamp()
     seconds = convert_time(

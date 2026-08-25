@@ -32,7 +32,7 @@ def _build_job(working_directory: Path, **overrides: Any) -> Job:
     """Builds one job whose script, log, and working paths all sit under the given server-side directory.
 
     Args:
-        working_directory: The server-side directory the job's script is uploaded into.
+        working_directory: The server-side directory into which the job's script is uploaded.
         overrides: The job arguments replacing the defaults this helper supplies.
 
     Returns:
@@ -53,7 +53,7 @@ def _fail_inside_the_block(server: Server) -> None:
     """Raises inside the server's context block, so the exit path runs on a failure rather than on a clean end.
 
     Args:
-        server: The connected server the block is entered on.
+        server: The connected server on which the block is entered.
 
     Raises:
         RuntimeError: Always, from inside the context block.
@@ -283,8 +283,8 @@ def test_server_raises_permission_error_when_credentials_are_rejected(
         Server(configuration=server_configuration)
 
     assert unreachable_transport.attempts == 1
-    # The transport an authenticated-then-rejected handshake leaves running is unreachable through close(), whose
-    # guard never clears, so the constructor has to release it itself.
+    # The transport that an authenticated-then-rejected handshake leaves running is unreachable through close(),
+    # whose guard never clears, so the constructor has to release it itself.
     assert unreachable_transport.closes == 1
 
 
@@ -391,7 +391,7 @@ def test_submit_job_raises_when_the_scheduler_rejects_the_script(
 
 
 def test_abort_job_cancels_a_running_allocation(connected_server: Server, stub_ssh_transport: StubSSHTransport) -> None:
-    """Verifies that an allocation the scheduler still holds is cancelled."""
+    """Verifies that an allocation that the scheduler still holds is cancelled."""
     stub_ssh_transport.job_statuses["1000"] = "RUNNING"
 
     connected_server.abort_job(slurm_job_id="1000")
@@ -402,7 +402,7 @@ def test_abort_job_cancels_a_running_allocation(connected_server: Server, stub_s
 def test_abort_job_leaves_a_settled_allocation_alone(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that an allocation the scheduler has already finished is not cancelled again."""
+    """Verifies that an allocation that the scheduler has already finished is not cancelled again."""
     stub_ssh_transport.job_statuses["1000"] = "COMPLETED"
 
     connected_server.abort_job(slurm_job_id="1000")
@@ -460,11 +460,11 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
 def test_get_job_statuses_reports_a_pending_allocation_the_queue_calls_blocked(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that an allocation accounting calls pending and the queue calls unsatisfiable reports as blocked.
+    """Verifies that an allocation called pending by accounting and unsatisfiable by the queue reports as blocked.
 
     Accounting reports a permanently blocked allocation as pending, so the queue's reason field is the only thing
-    that retires it. Every identifier of an ordinary batch is one accounting knows, so the queue has to be read for
-    that batch rather than only for one holding an allocation accounting cannot place.
+    that retires it. Every identifier of an ordinary batch is one that accounting knows, so the queue has to be read
+    for that batch rather than only for one holding an allocation that accounting cannot place.
     """
     stub_ssh_transport.job_statuses.update({"1000": "PENDING", "1001": "RUNNING"})
     stub_ssh_transport.blocked_job_ids.add("1000")
@@ -528,7 +528,7 @@ def test_parse_job_status_normalizes_decorated_accounting_states(state: str, exp
 
 
 def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
-    """Verifies that the terminal set holds every settled state and neither of the two a job still leaves."""
+    """Verifies that the terminal set holds every settled state and neither of the two that a job still leaves."""
     settled = frozenset(
         {
             JobStatus.COMPLETED,
@@ -555,7 +555,7 @@ def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
 
 
 def test_pull_raises_for_an_absent_remote_path(connected_server: Server, tmp_path: Path) -> None:
-    """Verifies that downloading a path the server does not hold names the missing path."""
+    """Verifies that downloading a path that the server does not hold names the missing path."""
     with pytest.raises(FileNotFoundError, match=re.escape("/data/sollertia/absent does not exist on the server")):
         connected_server.pull(local_path=tmp_path.joinpath("unused"), remote_path=Path("/data/sollertia/absent"))
 
@@ -579,7 +579,7 @@ def test_pull_downloads_a_directory_tree(
 def test_pull_downloads_a_single_file_and_creates_its_parent(
     connected_server: Server, stub_ssh_transport: StubSSHTransport, tmp_path: Path
 ) -> None:
-    """Verifies that a file download creates the local directory the file is placed into."""
+    """Verifies that a file download creates the local directory into which the file is placed."""
     source = stub_ssh_transport.local_path("/data/sollertia/outputs/manifest.txt")
     source.parent.mkdir(parents=True)
     source.write_text("manifest")
@@ -592,7 +592,7 @@ def test_pull_downloads_a_single_file_and_creates_its_parent(
 
 
 def test_push_raises_for_an_absent_local_path(connected_server: Server, tmp_path: Path) -> None:
-    """Verifies that uploading a path this host does not hold names the missing path."""
+    """Verifies that uploading a path that this host does not hold names the missing path."""
     missing = tmp_path.joinpath("absent.txt")
 
     # The console wraps the rendered message at a width that depends on the temporary path length, so the full
@@ -622,7 +622,7 @@ def test_push_uploads_a_directory_tree(
 def test_push_uploads_a_single_file_into_a_created_directory(
     connected_server: Server, stub_ssh_transport: StubSSHTransport, tmp_path: Path
 ) -> None:
-    """Verifies that a file upload creates the server-side directory the file is placed into."""
+    """Verifies that a file upload creates the server-side directory into which the file is placed."""
     source = tmp_path.joinpath("plan.txt")
     source.write_text("plan")
 
@@ -834,8 +834,8 @@ def test_find_paths_passes_the_searched_path_as_a_start_point_rather_than_a_patt
 def test_find_paths_rejects_a_record_the_search_did_not_produce(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that a login shell that greets the connection writes into the stream the answer arrives on, which is not
-    an answer.
+    """Verifies that a login shell that greets the connection writes into the stream on which the answer arrives,
+    which is not an answer.
     """
     stub_ssh_transport.local_path("/data/sollertia/TestProject").mkdir(parents=True)
     stub_ssh_transport.respond(

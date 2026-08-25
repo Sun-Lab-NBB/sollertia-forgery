@@ -71,16 +71,17 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
     Notes:
         Two records can show that a job already has an allocation, and they cover different windows. The submission
         ledger names allocations this host submitted, including ones still queued, but it knows nothing about a batch
-        submitted from another machine. The executor identifier a job's tracker recorded travels with the data and so
-        covers every submitter, but it only appears once the allocation starts running. Both are therefore consulted,
-        the second through the batch's own descriptors, which preparation filled from the host's state artifact.
+        submitted from another machine. The executor identifier that a job's tracker recorded travels with the data
+        and so covers every submitter, but it only appears once the allocation starts running. Both are therefore
+        consulted, the second through the batch's own descriptors, which preparation filled from the host's state
+        artifact.
 
         Whichever allocation the two sources name is then queried. A job whose allocation has yet to reach a terminal
         state is adopted rather than submitted again. A job is dispatched with its record cleared when its allocation
         has finished, and when its record names an executor that was never a scheduler allocation at all.
 
     Args:
-        server: The connected server the batch runs on.
+        server: The connected server that runs the batch.
         jobs: The batch's jobs.
 
     Returns:
@@ -104,17 +105,17 @@ def _resolve_claimed_allocations(jobs: Sequence[GenericPendingJob]) -> dict[tupl
     """Resolves the scheduler allocation already claiming each job, from the ledger and from the batch's own records.
 
     Notes:
-        The executor a job's tracker recorded is read off the job descriptor rather than out of the tracker itself.
-        Preparation regenerates the host's state artifact from its trackers and reads that artifact, so every recorded
-        executor has already crossed into the batch. Opening a tracker here would read the same fact a second time,
-        and for a remote batch it would have to cross the transport while the batch runs.
+        The executor that a job's tracker recorded is read off the job descriptor rather than out of the tracker
+        itself. Preparation regenerates the host's state artifact from its trackers and reads that artifact, so every
+        recorded executor has already crossed into the batch. Opening a tracker here would read the same fact a second
+        time, and for a remote batch it would have to cross the transport while the batch runs.
 
-        Where both sources name an allocation the tracker's wins, since an executor appears only once the allocation
-        starts and therefore describes a later moment than the ledger's record of submitting it. That is what lets an
-        allocation another machine submitted be found, since this host's ledger knows nothing about it.
+        Where both sources name an allocation, the tracker's wins, since an executor appears only once the allocation
+        starts and therefore describes a later moment than the ledger's record of submitting it. That finds an
+        allocation another machine submitted, since this host's ledger knows nothing about it.
 
     Args:
-        jobs: The jobs to resolve claims for.
+        jobs: The jobs whose claims to resolve.
 
     Returns:
         The identifier of the allocation claiming each job, keyed by dispatch key. Only the jobs that carry a claim

@@ -399,6 +399,6 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
 
 
 MESOSCOPE_COLUMN_DESCRIPTIONS: dict[str, str] = {column.value: _COLUMN_DESCRIPTIONS[column] for column in DatasetColumn}
-"""The Mesoscope-VR column-description binding donated to the forging pipeline. Maps every column name the
+"""The Mesoscope-VR column-description binding donated to the forging pipeline. Maps every column name that the
 Mesoscope-VR assembly worker can emit into ``data.feather`` to its human-readable description, baked into each forged
 dataset's ``data_descriptions.feather``. Derived from ``DatasetColumn`` and ``_COLUMN_DESCRIPTIONS``."""

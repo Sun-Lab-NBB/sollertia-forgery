@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _PUPIL_CENTER: tuple[float, float] = (100.0, 80.0)
-"""The center every synthetic pupil ellipse is generated around, in face-camera pixels."""
+"""The center around which every synthetic pupil ellipse is generated, in face-camera pixels."""
 
 _PUPIL_SEMI_A: tuple[float, float] = (10.0, 0.0)
 """The horizontal conjugate semi-diameter of the synthetic pupil, making the pupil a circle of radius ten."""
@@ -40,7 +40,7 @@ _PUPIL_SEMI_B: tuple[float, float] = (0.0, 10.0)
 """The vertical conjugate semi-diameter of the synthetic pupil."""
 
 _EYE_CENTER: tuple[float, float] = (104.0, 82.0)
-"""The center every synthetic eye ellipse is generated around, offset from the pupil so the in-eye columns are
+"""The center around which every synthetic eye ellipse is generated, offset from the pupil so the in-eye columns are
 non-zero."""
 
 _EYE_SEMI_A: tuple[float, float] = (40.0, 0.0)
@@ -53,10 +53,10 @@ _REFLECTION_POSITION: tuple[float, float] = (97.0, 77.0)
 """The corneal reflection position every synthetic frame records."""
 
 _CONFIDENT: float = 0.99
-"""The DeepLabCut likelihood a point that clears the tracking gate is generated with."""
+"""The DeepLabCut likelihood generated for a point that clears the tracking gate."""
 
 _UNCONFIDENT: float = 0.10
-"""The DeepLabCut likelihood a point that fails the tracking gate is generated with."""
+"""The DeepLabCut likelihood generated for a point that fails the tracking gate."""
 
 _OUTPUT_FILENAME: str = f"{PUPIL_CAMERA_NAME}_pupil.feather"
 """The name of the feather the tracking worker writes into the processed video-data directory."""
@@ -74,7 +74,7 @@ def _ring_positions(
         count: The number of evenly spaced ring points to generate.
 
     Returns:
-        The ``(count, 2)`` array of ring point positions, in the ring order the worker assigns angles in.
+        The ``(count, 2)`` array of ring point positions, in the ring order in which the worker assigns angles.
     """
     angles = 2.0 * np.pi * np.arange(count, dtype=np.float64) / count
     return (
@@ -152,7 +152,7 @@ def _build_points(specifications: Sequence[dict[str, object]]) -> dict[str, NDAr
 
 @pytest.fixture
 def tracking_session(experiment_session: SessionData) -> SessionData:
-    """Prepares the acquired session's raw camera and processed video directories the tracking worker reads and writes.
+    """Prepares the session's raw camera and processed video directories that the tracking worker reads and writes.
 
     Args:
         experiment_session: The acquired Mesoscope-VR experiment session.

@@ -24,7 +24,7 @@ def _refuse(_name: str) -> None:
     """Stands in for a dynamic loader that resolves no runtime at all.
 
     Args:
-        _name: The library name the loader was asked for, which this stand-in never resolves.
+        _name: The library name requested from the loader, which this stand-in never resolves.
 
     Raises:
         OSError: Always, which is what ctypes raises for a library the loader cannot find.
@@ -112,7 +112,7 @@ def test_an_unset_conda_prefix_contributes_no_candidate(monkeypatch: pytest.Monk
 
 
 def test_discovery_answers_with_the_first_existing_runtime(tmp_path: Path) -> None:
-    """Verifies the candidates are ordered by how durable each installation is, so the first hit is the one to link."""
+    """Verifies that candidates are ordered by how durable each installation is, so the first hit is the one to link."""
     present = tmp_path.joinpath(openmp_module._OPENMP_LIBRARY_NAME)
     present.touch()
 
@@ -147,7 +147,7 @@ def test_a_loadable_runtime_is_left_alone(darwin: None, loadable: None) -> None:
 def test_forcing_relinks_a_host_whose_runtime_already_loads(
     monkeypatch: pytest.MonkeyPatch, darwin: None, loadable: None, tmp_path: Path
 ) -> None:
-    """Verifies forcing is what repoints the link at a chosen runtime on a host the discovery would otherwise skip."""
+    """Verifies that forcing is what repoints the link at a chosen runtime on a host discovery would otherwise skip."""
     runtime = tmp_path.joinpath(openmp_module._OPENMP_LIBRARY_NAME)
     runtime.touch()
     link = tmp_path.joinpath("link", openmp_module._OPENMP_LIBRARY_NAME)
@@ -163,7 +163,7 @@ def test_forcing_relinks_a_host_whose_runtime_already_loads(
 def test_an_undiscoverable_runtime_is_reported_rather_than_linked(
     monkeypatch: pytest.MonkeyPatch, darwin: None, unloadable: None, tmp_path: Path
 ) -> None:
-    """Verifies a host carrying no runtime is told to install one, and the paths it examined are reported alongside."""
+    """Verifies that a host with no runtime is told to install one, and the examined paths are reported alongside."""
     monkeypatch.delenv(openmp_module._CONDA_PREFIX_VARIABLE, raising=False)
     monkeypatch.setattr(openmp_module.sysconfig, "get_path", lambda _name: str(tmp_path))
     monkeypatch.setattr(openmp_module.Path, "is_file", lambda _self: False)
@@ -272,7 +272,7 @@ def test_a_failed_link_leaves_the_previous_one_in_place(tmp_path: Path, monkeypa
 
     assert link.is_symlink()
     assert link.resolve() == previous_target
-    # The temporary the publication would have renamed is cleaned up rather than left beside the destination.
+    # The temporary that the publication would have renamed is cleaned up rather than left beside the destination.
     assert sorted(entry.name for entry in link.parent.iterdir()) == ["libomp.dylib"]
 
 

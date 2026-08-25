@@ -104,16 +104,16 @@ def assemble_cindra_dataset(
             missing, its frame count disagrees with the cindra frame count, or the produced alignment does not
             contain exactly the expected number of rows.
     """
-    # Queries the number of frames processed by cindra via a memory-mapped header read. This count is the
-    # authoritative target the pulse alignment below is reconciled against.
+    # Queries the number of frames processed by cindra via a memory-mapped header read. This count is the authoritative
+    # target against which the pulse alignment below is reconciled.
     _, frame_count = np.load(
         file=resolve_array_path(root_path=cindra_data_path, array=RecordingArrays.CELL_FLUORESCENCE), mmap_mode="r"
     ).shape
 
-    # Reads the per-plane sampling rate in Hz from the combined metadata cindra's combination stage wrote. The reader
-    # is cindra's own, which loads the metadata alone and no array, so the archive's layout is stated once by the
-    # library that writes it. The scanning rate derives the expected scan pulse duration window in milliseconds used
-    # to filter the logged scan pulses.
+    # Reads the per-plane sampling rate in Hz from the combined metadata written by cindra's combination stage. The
+    # reader is cindra's own, which loads the metadata alone and no array, so the archive's layout is stated once by the
+    # library that writes it. The scanning rate derives the expected scan pulse duration window in milliseconds used to
+    # filter the logged scan pulses.
     scanning_frequency = CombinedData.load(root_path=cindra_data_path).sampling_rate
     expected_duration_ms = rate_to_interval(rate=scanning_frequency, to_units=TimeUnits.MILLISECOND, as_float=True)
     minimum_duration = expected_duration_ms - _SCAN_PULSE_TOLERANCE_MS

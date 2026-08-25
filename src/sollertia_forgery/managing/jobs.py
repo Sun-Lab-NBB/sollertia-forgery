@@ -29,8 +29,8 @@ _PROJECT_JOBS_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType
 
 Notes:
     Carries every ``ataraxis_data_structures.JobState`` field alongside its registry ``job_id`` and the ``pipeline``
-    that produced it. The subject columns name the session the job belongs to, so a reader joins the artifact against
-    the manifest on the animal and session pair.
+    that produced it. The subject columns name the session to which the job belongs, so a reader joins the artifact
+    against the manifest on the animal and session pair.
 """
 
 
@@ -55,8 +55,8 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, str | i
         published by two separate renames. The writer lands this one first, so a reader at worst holds job rows
         for a session the manifest does not list yet.
 
-        Stored uncompressed so a reader memory-maps it rather than decoding it, which is what puts opening it a page
-        fault away from the reader instead of a full decode of every row.
+        Stored uncompressed so a reader memory-maps it rather than decoding it. Opening it then costs a page fault
+        rather than a full decode of every row.
 
         Published through a temporary file renamed over the destination, since the readers that memory-map the
         artifact take no lock of their own. Rewriting the destination in place would let such a reader map a file
@@ -67,7 +67,7 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, str | i
         job_rows: The job rows to record, each carrying the animal and session that recorded it.
 
     Returns:
-        The path the artifact was written to.
+        The path to which the artifact was written.
     """
     jobs_path = project_jobs_path(project_directory=project_directory)
     frame = natural_sort(

@@ -30,8 +30,8 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
     """Assembles a single Mesoscope-VR experiment session's unified data feather.
 
     Combines the session's fluorescence, behavior, runtime, and video sub-datasets into a single time-aligned Polars
-    DataFrame, written as an uncompressed ``data.feather`` at ``output_path``. The fluorescence sub-dataset is
-    assembled first because its ``time_us`` column is the reference clock the other sub-datasets align to. The video
+    DataFrame, written as an uncompressed ``data.feather`` at ``output_path``. The fluorescence sub-dataset is assembled
+    first because its ``time_us`` column is the reference clock to which the other sub-datasets align. The video
     sub-dataset is optional and contributes columns only when the session carries processed camera feathers.
 
     Args:
@@ -80,9 +80,9 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # The forging pipeline qualifies the dataset name with the animal identifier, so an animal's multi-recording
-    # output stays separate when a dataset spans several animals. cindra owns the directory that name resolves to, so
-    # its own resolver locates it here rather than this module respelling the layout.
+    # The forging pipeline qualifies the dataset name with the animal identifier, so an animal's multi-recording output
+    # stays separate when a dataset spans several animals. cindra owns the directory to which that name resolves, so its
+    # own resolver locates it here rather than this module respelling the layout.
     multiday_data_path = resolve_dataset_path(
         output_root=session.processed_data_path,
         dataset_name=multi_recording_dataset_name(animal_id=str(session.animal_id), dataset_name=dataset_name),
@@ -96,8 +96,8 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
     )
 
-    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock the other
-    # sub-datasets align to.
+    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock to which the other
+    # sub-datasets align.
     fluorescence_data = assemble_cindra_dataset(
         cindra_data_path=cindra_data_path,
         microcontroller_data_path=microcontroller_data_path,

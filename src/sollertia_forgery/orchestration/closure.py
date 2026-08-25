@@ -39,7 +39,7 @@ class _BatchOutcome:
     pipeline: str = ""
     """The pipeline the batch dispatched."""
     host: str = ""
-    """The host the batch ran on."""
+    """The host that ran the batch."""
     total: int = 0
     """The jobs the batch held, counting the ones it dispatched and the ones it reported blocked."""
     succeeded: int = 0
@@ -50,19 +50,19 @@ class _BatchOutcome:
     """The jobs that never ran because an upstream job could not supply their input, counting the ones preparation
     reported and the ones whose prerequisite failed during the run."""
     outstanding: int = 0
-    """The dispatched jobs that neither succeeded nor failed and wait on nothing that failed, which is what a batch cut
-    short leaves behind."""
+    """The dispatched jobs that neither succeeded nor failed and wait on nothing that failed. A batch cut short leaves
+    these behind."""
     complete: bool = False
-    """Determines whether every job the batch held succeeded."""
+    """Determines whether every job held by the batch succeeded."""
     failed_jobs: list[dict[str, Any]] = field(default_factory=list)
     """The failed jobs, each naming its unit and carrying the error text its worker recorded."""
     blocked_jobs: list[dict[str, Any]] = field(default_factory=list)
-    """The blocked jobs, each naming its unit and the upstream jobs it waited on."""
+    """The blocked jobs, each naming its unit and the upstream jobs on which it waited."""
     snapshot_paths: list[str] = field(default_factory=list)
-    """Where this machine holds the state artifacts the outcome was read from, so a caller can inspect them after the
-    run without reaching back to the host."""
+    """Where this machine holds the state artifacts from which the outcome was read, so a caller can inspect them
+    after the run without reaching back to the host."""
     verified_at: int = 0
-    """The UTC timestamp (microsecond-precision epoch) the outcome was read at."""
+    """The UTC timestamp (microsecond-precision epoch) at which the outcome was read."""
 
 
 def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
@@ -71,7 +71,7 @@ def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
     Notes:
         Rewrites the project's artifacts on the host, reads each of the batch's jobs out of them where the host holds
         them, and delivers a copy of each artifact to this machine. Regenerating first is what makes the snapshot
-        describe the state after the run rather than the state the run was prepared against.
+        describe the state after the run rather than the state against which the run was prepared.
 
         The outcome is written onto the batch's own record, so a finished batch stays answerable once nothing is
         running and nothing is queued.
@@ -104,20 +104,20 @@ def _verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -
         against its own filesystem and a delivered copy sits on this machine instead. The delivery is taken separately,
         so the outcome and the snapshot it cites come from the same regeneration.
 
-        Each artifact is delivered under the directory it sits in on the host, because a dataset batch reads one
+        Each artifact is delivered under the directory in which it sits on the host, because a dataset batch reads one
         same-named table per dataset and a shared destination would leave only the last one.
 
         A job absent from the state artifact counts as outstanding rather than missing, since a tracker that lost an
         entry describes a job that never ran.
 
         A job that neither succeeded nor failed is reported as blocked when any of its prerequisites failed, because
-        no rerun of it alone can succeed. That is what separates work a batch was cut short of from work it can never
-        reach.
+        no rerun of it alone can succeed. That is what separates work a stopped batch leaves behind from work it can
+        never reach.
 
     Args:
         host: The host that holds the data the batch's jobs read.
         document: The prepared batch to verify.
-        batch_id: The identifier the outcome is recorded under.
+        batch_id: The identifier under which the outcome is recorded.
 
     Returns:
         The batch's outcome.
@@ -155,11 +155,11 @@ def close_settled_batches(
 
     Notes:
         Retirement is issued per batch identifier, and only for a batch whose own closure completed. A batch that
-        fails to close therefore stays in the submission ledger however its siblings fared, which leaves it answerable
-        and lets the next query try again.
+        fails to close therefore stays in the submission ledger however its siblings fared. The entry keeps it
+        answerable and lets the next query try again.
 
-        An allocation the query did not cover counts as unfinished, so a partial query never closes a batch it did not
-        fully observe.
+        An allocation that the query did not cover counts as unfinished, so a partial query never closes a batch it
+        did not fully observe.
 
     Args:
         host: The host that holds the data the batches' jobs read.
@@ -167,7 +167,7 @@ def close_settled_batches(
         statuses: The observed state of each allocation, keyed by its scheduler identifier.
 
     Returns:
-        The outcomes of the batches that were closed. A settled batch this host holds no prepared record of is retired
+        The outcomes of the batches that were closed. A settled batch with no prepared record on this host is retired
         without producing one.
     """
     settled = [batch for batch in batches if batch_is_settled(batch=batch, statuses=statuses)]
@@ -177,7 +177,7 @@ def close_settled_batches(
     for batch in settled:
         try:
             # One submission may dispatch several prepared batches, and each carries its own document, so each is
-            # snapshotted separately rather than folded into the identifier the ledger is keyed by.
+            # snapshotted separately rather than folded into the identifier that keys the ledger.
             outcomes = [close_batch(host=host, batch_id=covered) for covered in batch.covered_batch_ids]
         except Exception as exception:
             console.echo(
@@ -206,9 +206,9 @@ def _resolve_outcome(
 
     Args:
         document: The prepared batch being verified.
-        batch_id: The identifier the outcome is recorded under.
+        batch_id: The identifier under which the outcome is recorded.
         recorded: The refreshed state rows, keyed by unit name and then by job identifier.
-        snapshots: Where this machine holds the artifacts the rows were read from.
+        snapshots: Where this machine holds the artifacts from which the rows were read.
 
     Returns:
         The batch's outcome.

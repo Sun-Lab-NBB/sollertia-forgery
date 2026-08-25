@@ -57,9 +57,9 @@ Notes:
     The subject columns mirror the dataset state artifact, so a reader joins a job's figures against its recorded
     state on the same keys. A session row carries no dataset and a dataset row carries neither animal nor session.
 
-    ``job_id`` is what the project job artifact keys its own rows by, so the two tables join on it directly. Carrying
-    the ordering here as well is what lets a scheduler build a job's dependency graph from this table alone, without
-    resolving the unit the jobs belong to.
+    The project job artifact keys its own rows by ``job_id``, so the two tables join on it directly. Carrying the
+    ordering here as well lets a scheduler build a job's dependency graph from this table alone, without resolving
+    the unit that owns the jobs.
 """
 
 
@@ -74,8 +74,9 @@ class _JobPlanEntry:
     specifier: str = ""
     """The specifier that differentiates this job from others of its stage within the same unit."""
     cores: int = 1
-    """The cores this job occupies, as its own sizing pass resolved them. A stage a dependency owns answers with the
-    width that dependency picked for this job's input, and every other stage takes its type's declared allocation."""
+    """The cores this job occupies, as its own sizing pass resolved them. A stage that a dependency owns answers with
+    the width that dependency picked for this job's input, and every other stage takes its type's declared
+    allocation."""
     memory_mb: int = 0
     """The memory this job occupies, as its own sizing pass modeled it from the data the job will read."""
     prerequisite_ids: list[str] = field(default_factory=list)
@@ -88,7 +89,7 @@ class _JobPlanEntry:
 
     @property
     def job_id(self) -> str:
-        """Returns the identifier the processing tracker records this job under."""
+        """Returns the identifier under which the processing tracker records this job."""
         return ProcessingTracker.generate_job_id(job_name=self.job_name, specifier=self.specifier)
 
 
@@ -102,7 +103,7 @@ class _JobPlan(YamlConfig):
         path through this module that changes them.
 
         Each write to a plan file takes that file's own lock, and the lock spans a single write, so a run reading a
-        plan assumes it is the plan its submissions were sized against.
+        plan assumes it is the plan against which its submissions were sized.
     """
 
     unit_name: str = ""
@@ -239,7 +240,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
         display_progress: Determines whether to report what the projection covered once it is written.
 
     Returns:
-        The path the projection was written to.
+        Where the projection was written.
 
     Raises:
         FileNotFoundError: If the project directory does not exist, since a projection has nowhere to be written and
@@ -251,7 +252,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     if not project_directory.is_dir():
         message = (
             f"Unable to project the job plans of '{project_directory}'. The path does not name an existing "
-            f"directory, so the project holds neither a unit to read nor a location to write the projection to."
+            f"directory, so the project holds neither a readable unit nor a destination for the projection."
         )
         console.error(message=message, error=FileNotFoundError)
 
@@ -322,17 +323,17 @@ def _resolve_unit_plan(
 
         Sizing takes the same path. Every job is modeled from the data it will read, so a job whose input cannot be
         read is refused rather than planned at a figure nothing measured. That refusal names the input, and it drops
-        the whole pipeline it belongs to out of this unit's plan, because a pipeline that cannot size one of its
-        stages cannot state what the unit costs to run. The reason lands in the same skip report a rejected resolver
-        writes into, so a caller reads one account of everything this unit did not plan and why.
+        the job's whole pipeline out of this unit's plan, because a pipeline that cannot size one of its stages
+        cannot state what the unit costs to run. The reason lands in the same skip report a rejected resolver fills,
+        so a caller reads one account of everything this unit did not plan and why.
 
-        Sizing therefore runs before a pipeline's tracker is aligned, which is what keeps a dropped pipeline from
-        registering jobs the plan does not cover. Each surviving pipeline's processing tracker is aligned with the
-        jobs the unit can actually run, so a unit that has never been processed still carries a job registry once it
-        is planned. That registry is what the project job artifact is built from, which is how a scheduler on another
-        host learns which jobs exist. A job the unit cannot run never reaches the tracker, so its absence there is the
-        statement that it is not possible. A pipeline that resolves a universe but no runnable job therefore writes no
-        tracker rather than failing the plan, since its figures still belong in the cache the plan records.
+        Sizing therefore runs before a pipeline's tracker is aligned, so a dropped pipeline registers no job the plan
+        does not cover. Each surviving pipeline's processing tracker is aligned with the jobs the unit can actually
+        run, so a unit that has never been processed still carries a job registry once it is planned. The project job
+        artifact is built from that registry, which is how a scheduler on another host learns which jobs exist. A job
+        the unit cannot run never reaches the tracker, so its absence there is the statement that it is not possible.
+        A pipeline that resolves a universe but no runnable job therefore writes no tracker rather than failing the
+        plan, since its figures still belong in the cache the plan records.
 
         The recorded figures cover the whole universe while the tracker holds the possible subset, so a plan describes
         every job the pipeline defines and the job artifact states which of them this unit supports.
@@ -380,8 +381,8 @@ def _resolve_unit_plan(
 
     planned_pipelines = 0
     for dispatch, unit, universe, possible in resolved:
-        # The declared allocation reaches the sizing pass as the width a stage holding one width whatever data it
-        # reads answers with, and a stage a dependency sizes overrides it with the width that dependency picked.
+        # The declared allocation reaches the sizing pass as the answer for a stage that holds one width whatever
+        # data it reads, and a stage that a dependency sizes overrides it with the width that dependency picked.
         declared = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
         outstanding = [
             (job_name, specifier)
@@ -450,8 +451,8 @@ def _discover_unit(
 
     Args:
         dispatch: The pipeline's dispatch entry.
-        unit_path: The path to the unit to resolve jobs for.
-        skipped: The mapping this call records its pipeline's reason into when resolution does not succeed.
+        unit_path: The path to the unit whose jobs to resolve.
+        skipped: The mapping into which this call records its pipeline's reason when resolution does not succeed.
 
     Returns:
         The loaded unit, its job universe, and the subset it can run, or None when this pipeline resolves no job for
@@ -480,16 +481,16 @@ def _size_unit(
         Every job is modeled from the data it will process, so the sizing pass refuses a job whose input is absent,
         ambiguous, or unparsable rather than answering with a flat allowance. That refusal is the statement that the
         pipeline cannot say what this unit costs, so the whole pipeline drops out of the plan and its reason joins the
-        reasons the resolvers gave. Reporting through the same map is what keeps a dropped pipeline visible to a
-        caller instead of silently absent.
+        reasons the resolvers gave. Reporting through the same map keeps a dropped pipeline visible to a caller
+        instead of silently absent.
 
     Args:
         dispatch: The pipeline's dispatch entry.
-        unit: The loaded unit the jobs operate on.
+        unit: The loaded unit on which the jobs operate.
         jobs: The jobs to size, as ``(job_name, specifier)`` pairs.
-        declared: The cores each job type declares, which a stage holding one width whatever data it reads answers
-            with.
-        skipped: The mapping this call records its pipeline's reason into when sizing does not succeed.
+        declared: The cores each job type declares, which answer for a stage that holds one width whatever data it
+            reads.
+        skipped: The mapping into which this call records its pipeline's reason when sizing does not succeed.
 
     Returns:
         The footprint of every job this call was handed, or None when the pipeline cannot size one of them.
@@ -518,8 +519,8 @@ def _reject_unit(unit_path: Path, unit_kind: str, skipped: dict[str, str]) -> No
     """
     message = (
         f"Unable to plan the jobs of '{unit_path}'. No pipeline planned any job for it, so the unit either carries "
-        f"none of the data the pipelines that operate on a {unit_kind} consume, or carries it in a state none of "
-        f"them can read. Each pipeline reported: {skipped}."
+        f"none of the data consumed by the pipelines that operate on a {unit_kind}, or carries it in a state that "
+        f"none of them can read. Each pipeline reported: {skipped}."
     )
     console.error(message=message, error=ValueError)
 
@@ -543,7 +544,7 @@ def _save_plan(plan: _JobPlan, plan_path: Path) -> None:
 
     Args:
         plan: The plan to record.
-        plan_path: The path to write it to.
+        plan_path: Where to write it.
 
     Raises:
         Timeout: If the plan file's lock cannot be acquired within the timeout period.
@@ -561,9 +562,9 @@ def _projection_row(
 
     Args:
         entry: The planned job to render.
-        animal: The animal the job's session belongs to, or None for a dataset job.
+        animal: The animal that owns the job's session, or None for a dataset job.
         session: The session the job processes, or None for a dataset job.
-        dataset: The dataset the job belongs to, or None for a session job.
+        dataset: The dataset that owns the job, or None for a session job.
 
     Returns:
         The projection row for this entry.

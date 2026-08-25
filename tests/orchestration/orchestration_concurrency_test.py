@@ -1,5 +1,5 @@
-"""Contains tests for the shared batch engine: core allocation, two-dimensional admission, and the graph a batch is
-dispatched as.
+"""Contains tests for the shared batch engine: core allocation, two-dimensional admission, and the graph a dispatched
+batch forms.
 """
 
 from __future__ import annotations
@@ -60,28 +60,28 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 _BYTES_PER_MEGABYTE: int = 1024 * 1024
-"""The divisor that converts the byte figure the host reports into the megabytes the probe answers with."""
+"""The divisor that converts the byte figure the host reports into the megabytes the probe returns."""
 
 _CORE_BUDGET: int = 64
-"""The core budget the admission tests weigh their jobs against, pinned so a retune is adopted deliberately."""
+"""The core budget against which the admission tests weigh their jobs, pinned so a retune is adopted deliberately."""
 
 _MEMORY_BUDGET_MB: int = 65536
-"""The memory budget the admission tests weigh their jobs against, pinned so a retune is adopted deliberately."""
+"""The memory budget against which the admission tests weigh their jobs, pinned so a retune is adopted deliberately."""
 
 _TRACKER: Path = Path("/nonexistent/tracker.yaml")
-"""The tracker path the admission tests attach their jobs to."""
+"""The tracker path to which the admission tests attach their jobs."""
 
 _OTHER_TRACKER: Path = Path("/nonexistent/other_tracker.yaml")
 """A second tracker path, used where a test must show that two units keep separate tracker state."""
 
 _UNIT: Path = Path("/nonexistent/session")
-"""The processing unit the admission tests place their jobs under, which is what scopes a job identifier."""
+"""The processing unit under which the admission tests place their jobs, which is what scopes a job identifier."""
 
 _OTHER_UNIT: Path = Path("/nonexistent/other_session")
 """A second processing unit, used where a test must show that two units' identical identifiers stay separate."""
 
 _PREPARED_PROJECT_ROOT: Path = Path("/nonexistent/project")
-"""The project root the preparation tests resolve their units against, which is where their artifacts are read from."""
+"""The project root against which the preparation tests resolve their units and where their artifacts are read."""
 
 
 @dataclass
@@ -302,9 +302,9 @@ def test_estimates_carry_the_shared_tolerance() -> None:
     margin = int(1000 * MEMORY_ESTIMATE_TOLERANCE) + 1
     reportable = _apply_tolerance(memory_mb=1000)
 
-    # The reported figure is the smallest whole gigabyte the margin fits inside, so the margin clears the gigabyte
-    # below it and does not clear the figure itself. Bounding it from both sides is what separates this rounding from
-    # any larger figure that would also cover the margin.
+    # The reported figure is the smallest whole gigabyte inside which the margin fits, so the margin clears the
+    # gigabyte below it and does not clear the figure itself. Bounding it from both sides is what separates this
+    # rounding from any larger figure that would also cover the margin.
     assert reportable % _MEGABYTES_PER_GIGABYTE == 0
     assert reportable - _MEGABYTES_PER_GIGABYTE < margin <= reportable
 
@@ -335,7 +335,7 @@ def test_every_dispatched_job_type_declares_a_core_allocation() -> None:
 
 
 def test_checksum_is_a_registered_batch_pipeline() -> None:
-    """Verifies that the checksum pipeline is dispatchable and declares the quartet the batch tools drive it with."""
+    """Verifies the checksum pipeline is dispatchable and declares the quartet with which the batch tools drive it."""
     assert ProcessingPipelines.CHECKSUM in BATCH_PIPELINES
 
     dispatch = resolve_dispatch(pipeline="checksum")
@@ -371,8 +371,8 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     """Verifies that the checksum estimate tracks the cores a job holds rather than the bytes it reads.
 
     Most other estimators scale a per-byte ratio off an input file, and the rename estimator is the only other one
-    that reads none. A checksum worker streams its file in fixed
-    chunks, so the session's size does not enter the estimate and only the reader count does.
+    that reads none. A checksum worker streams its file in fixed chunks, so the session's size does not enter the
+    estimate and only the reader count does.
     """
     single = _size_checksum_job(cores=1).memory_mb
     # Reportable figures land on whole gigabytes, so the per-reader growth shows across a wide core spread rather
@@ -381,7 +381,7 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     assert many - single >= 15 * _CHECKSUM_READER_MEMORY_MB
     assert _size_checksum_job(cores=8).memory_mb > single
     assert _size_checksum_job(cores=2).memory_mb >= single
-    # The sizing pass answers both halves, so the width the job is dispatched at comes back beside its memory.
+    # The sizing pass answers both halves, so the width at which the job is dispatched comes back beside its memory.
     assert _size_checksum_job(cores=16).cores == 16
 
 
@@ -449,7 +449,7 @@ def test_only_assembly_carries_a_forging_concurrency_limit() -> None:
     """Verifies that the storage-bound forging stage is capped while the compute-bound stages are budget-bound.
 
     cindra treats its own cross-recording discovery and extraction as compute-bound and runs them at a wide core
-    allocation, so a ceiling on top of the core budget would hold them below the concurrency they gain from.
+    allocation, so a ceiling on top of the core budget would hold them below the concurrency they gain.
     """
     limits = resolve_concurrency_limits(
         job_names={MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME}
@@ -466,7 +466,7 @@ _PIPELINE: str = ProcessingPipelines.CHECKSUM.value
 
 
 def identifier(job_name: str, specifier: str = "") -> str:
-    """Returns the identifier the processing tracker records the named job under."""
+    """Returns the identifier under which the processing tracker records the named job."""
     return ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
 
 
@@ -569,7 +569,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
         # _Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
-        # leaving a later stage to reopen the tracker the state artifact was regenerated from.
+        # leaving a later stage to reopen the tracker from which the state artifact was regenerated.
         "status": "SCHEDULED",
         "executor_id": "",
     }
@@ -626,7 +626,7 @@ def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
     """Verifies that a prerequisite the unit can never produce is dropped rather than left waiting on it.
 
     The planned figures cover the whole universe of a pipeline's jobs while a tracker registers only the subset the
-    unit can actually produce, so a stage that is planned but untracked is exactly the shape this drop exists for.
+    unit can actually produce, so a stage that is planned but untracked is exactly the shape that this drop targets.
     """
     unit = Path("/nonexistent/project/305/a_session")
     document = build_batch_document(
@@ -758,8 +758,8 @@ class _StubPreparationHost:
     Args: plan_rows: The rows the project's plan table holds. state_rows: The rows the project's state table holds.
 
     Attributes: _plan_rows: The rows the project's plan table holds. _state_rows: The rows the project's state table
-    holds. materialized: The project root, unit kind, and replan choice of every materialization this host was asked
-    for.
+    holds. materialized: The project root, unit kind, and replan choice of every materialization requested from this
+    host.
     """
 
     def __init__(self, plan_rows: list[dict[str, Any]], state_rows: list[dict[str, Any]]) -> None:
@@ -769,7 +769,7 @@ class _StubPreparationHost:
 
     @property
     def label(self) -> str:
-        """Returns the name this host is reported under."""
+        """Returns the name under which this host is reported."""
         return "workstation"
 
     def materialize(
@@ -783,8 +783,8 @@ class _StubPreparationHost:
         """Records what the batch asked to be rewritten, since this stub's tables already hold their rows.
 
         Args:
-            project_root: The project the artifacts are rewritten for.
-            unit_paths: The processing units the artifacts are rewritten for.
+            project_root: The project for which the artifacts are rewritten.
+            unit_paths: The processing units for which the artifacts are rewritten.
             unit_kind: The kind of processing unit the paths name.
             replan: Determines whether the recorded figures are re-estimated.
         """
@@ -794,7 +794,7 @@ class _StubPreparationHost:
         """Answers the plan table for the project's plan artifact and the state table for every other path.
 
         Args:
-            path: The artifact the rows are read from.
+            path: The artifact from which the rows are read.
 
         Returns:
             The rows that artifact holds.
@@ -807,7 +807,7 @@ class _StubPreparationHost:
 
         Args:
             pipeline: The pipeline whose tracker is located.
-            unit_paths: The unit root directories to locate trackers for.
+            unit_paths: The unit root directories whose trackers are located.
 
         Returns:
             The tracker path of each unit, keyed by the unit path as a string.
@@ -910,7 +910,7 @@ def test_submission_ignores_a_prerequisite_outside_the_batch() -> None:
 
 
 def test_a_cyclic_ordering_resolves_to_a_finite_submission_depth() -> None:
-    """Verifies that a cycle is ordered poorly rather than stalling the submission it belongs to."""
+    """Verifies that a cycle is ordered poorly rather than stalling its own submission."""
     first = make_pending_job(job_id="first", prerequisites=("second",))
     second = make_pending_job(job_id="second", prerequisites=("first",))
 

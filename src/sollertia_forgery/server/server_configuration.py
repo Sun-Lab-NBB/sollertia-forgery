@@ -32,7 +32,7 @@ class ServerConfiguration(YamlConfig):
     password: str = ""
     """The password to use for server authentication."""
     host: str = ""
-    """The hostname or IP address of the server to connect to."""
+    """The hostname or IP address used to reach the server."""
     root: str = ""
     """The absolute path, on the remote compute server, to the single root directory that stores all Sollertia data
     (raw and processed). All server-side data operations resolve their paths relative to this root."""
@@ -55,7 +55,7 @@ def create_server_configuration_file(
     Args:
         username: The username to use for server authentication.
         password: The password to use for server authentication.
-        host: The hostname or IP address of the server to connect to.
+        host: The hostname or IP address used to reach the server.
         root: The absolute path, on the remote compute server, to the root directory that stores all Sollertia data.
         environment: The name of the shared conda environment, on the remote compute server, in which
             sollertia-forgery and all of its processing dependencies are installed.

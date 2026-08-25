@@ -63,9 +63,9 @@ _THREAD_LIMIT_VARIABLES: tuple[str, ...] = (
     "OPENCV_FFMPEG_THREADS",
     "TIFFFILE_NUM_THREADS",
 )
-"""The threading-layer environment variables the motion-energy decode pool relies on being capped for it. Naming them
-here rather than reading the library's own tuple keeps a rename loud, since a variable that silently stops being
-capped leaves each decode worker opening a pool sized to the whole machine."""
+"""The threading-layer environment variables capped for the motion-energy decode pool. Naming them here rather than
+reading the library's own tuple keeps a rename loud, since a variable that silently stops being capped leaves each
+decode worker opening a pool sized to the whole machine."""
 
 
 def _write_video(path: Path, frames: NDArray[np.uint8], fps: int = 30) -> Path:
@@ -192,8 +192,8 @@ def test_binning_crops_partial_blocks(static_video: Path) -> None:
 def test_chunked_result_is_bit_identical_to_sequential(moving_video: Path) -> None:
     """Verifies splitting a recording into decode chunks changes nothing about the result.
 
-    The seam invariant the whole parallel design rests on: each chunk beyond the first decodes a priming frame so the
-    difference spanning its leading boundary is computed rather than lost or duplicated.
+    The seam invariant on which the whole parallel design rests: each chunk beyond the first decodes a priming frame
+    so the difference spanning its leading boundary is computed rather than lost or duplicated.
     """
     sequential_energy, sequential_luminance = _energy_chunk(
         video_path=str(moving_video), start_frame=0, frame_count=_FIXTURE_FRAME_COUNT
@@ -405,7 +405,7 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
     """Verifies every registered camera contributes an energy job to the tracker-alignment universe.
 
     The universe must cover every registered camera rather than only those the invocation runs, so that a partial
-    invocation aligns the tracker without wiping the sibling job an earlier run already completed.
+    invocation aligns the tracker without wiping the sibling job that an earlier run already completed.
     """
     frames = np.zeros((20, _FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
     _record_cameras(session=patched_session, names=("face_camera", "body_camera"), frames=frames)
@@ -421,7 +421,7 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
     energy_jobs = [
         ProcessingTracker.generate_job_id(job_name=ENERGY_JOB_NAME, specifier=str(source_id)) for source_id in (51, 62)
     ]
-    # The camera the second invocation passed over keeps its completed record, rather than losing it or falling back
+    # The camera skipped by the second invocation keeps its completed record, rather than losing it or falling back
     # to a scheduled one.
     for job_id in energy_jobs:
         assert tracker.get_job_status(job_id=job_id) == ProcessingStatus.SUCCEEDED
@@ -434,8 +434,8 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
 def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies the thread caps are set inside the block and the prior environment is restored on exit.
 
-    The caps must not leak past the pool they were set for. Every caller outside a decode pool relies on the numeric
-    backends opening their full thread pool, so a leaked cap would silently narrow them for the rest of the process.
+    The caps must not leak past their own pool. Every caller outside a decode pool relies on the numeric backends
+    opening their full thread pool, so a leaked cap would silently narrow them for the rest of the process.
     """
     sentinel = "OMP_NUM_THREADS"
     monkeypatch.setenv(name=sentinel, value="13")
@@ -516,7 +516,7 @@ def test_shared_pool_decodes_the_chunks_and_reports_progress(tmp_path: Path, chu
 
 
 def test_non_positive_reported_frame_count_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies a container that opens but reports no frames errors instead of writing an empty feather."""
+    """Verifies a container that opens but reports no frames raises instead of writing an empty feather."""
 
     class _EmptyCapture:
         """Stands in for a decoder whose container reports no frames at all."""
@@ -544,7 +544,7 @@ def test_non_positive_reported_frame_count_errors(tmp_path: Path, monkeypatch: p
 
 
 def test_early_end_before_the_last_chunk_errors() -> None:
-    """Verifies a chunk other than the last running out of frames is reported as a truncated recording."""
+    """Verifies any chunk except the last one is reported as a truncated recording when it runs out of frames."""
     results = [
         (np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32)),
         (np.zeros(5, dtype=np.float32), np.zeros(5, dtype=np.float32)),
@@ -569,7 +569,7 @@ def test_short_final_chunk_is_joined_and_announced() -> None:
 
 
 def test_chunk_decode_rejects_an_unopenable_recording(tmp_path: Path) -> None:
-    """Verifies a chunk worker handed a file it cannot open names the recording it failed on."""
+    """Verifies a chunk worker that cannot open its file names that recording when it fails."""
     broken_path = tmp_path.joinpath("broken.mp4")
     broken_path.write_bytes(b"not a video")
 
@@ -578,7 +578,7 @@ def test_chunk_decode_rejects_an_unopenable_recording(tmp_path: Path) -> None:
 
 
 def test_chunk_decode_rejects_an_undecodable_priming_frame(moving_video: Path) -> None:
-    """Verifies a chunk whose priming frame lies past the end of the recording errors rather than skipping it."""
+    """Verifies a chunk errors when its priming frame lies past the end of the recording, rather than skipping it."""
     with pytest.raises(ValueError, match="Unable to decode the frame preceding"):
         _energy_chunk(video_path=str(moving_video), start_frame=5000, frame_count=_CHUNK_FRAMES)
 

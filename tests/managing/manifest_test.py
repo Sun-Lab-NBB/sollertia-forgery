@@ -49,7 +49,7 @@ def reported_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         monkeypatch: The fixture used to replace the console's echo method for the duration of one test.
 
     Returns:
-        The list the recorder appends each echoed message to, in the order they were emitted.
+        The list to which the recorder appends each echoed message, in the order they were emitted.
     """
     messages: list[str] = []
     monkeypatch.setattr(console, "echo", lambda message, **_keywords: messages.append(message))
@@ -74,7 +74,7 @@ def numbered_animal_manifest(project_root: Path, session_factory: Callable[..., 
     """Generates the manifest of a project whose animal identifiers order differently as text than as numbers.
 
     Args:
-        project_root: The project the manifest is generated for.
+        project_root: The project for which the manifest is generated.
         session_factory: The builder that creates one acquired session for each of the two animals.
 
     Returns:
@@ -119,8 +119,8 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
     this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
 
-    Args: _frame: The frame the writer was called on, which this stand-in never serializes. file: The open file object
-    the artifact is written to. **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args: _frame: The frame handed to the writer, which this stand-in never serializes. file: The open file object
+    receiving the artifact. **_keywords: The serialization options the caller passed, which this stand-in ignores.
 
     Raises: RuntimeError: Always, standing in for a writer that dies partway through.
     """
@@ -136,7 +136,7 @@ def write_second_partial_then_fail(calls: list[int]) -> Any:
     manifest is ever opened. Letting that call through puts the failure on the manifest's own publication.
 
     Args:
-        calls: The list the stand-in appends to once per invocation, which is what sequences the two writes.
+        calls: The list to which the stand-in appends once per invocation, which is what sequences the two writes.
 
     Returns:
         The stand-in, which serializes the first frame it is handed and raises on every later one.
@@ -197,7 +197,7 @@ def test_a_pipeline_holding_a_failed_or_a_running_job_is_not_recorded_as_finishe
     """Verifies that a pipeline column reports 1 only when every one of that pipeline's jobs succeeded.
 
     A crashed pipeline and a pipeline still running both leave work to be done, so recording either as finished would
-    read as a session nothing needs re-running.
+    read as a session that needs no re-running.
     """
     mark_session_processed(experiment_session)
     failed_job = (f"{ProcessingPipelines.VIDEO.value}_stage", "")
@@ -229,7 +229,7 @@ def test_a_pipeline_holding_a_failed_or_a_running_job_is_not_recorded_as_finishe
 
 
 def test_the_recorded_date_is_the_session_name_read_as_utc(project_root: Path, training_session: SessionData) -> None:
-    """Verifies the session name is a UTC acquisition timestamp, so the date column reproduces it to the microsecond."""
+    """Verifies that the session name is a UTC acquisition timestamp. The date column reproduces every microsecond."""
     generate_project_manifest(project_directory=project_root)
 
     components = [int(part) for part in training_session.session_name.split("-")]
@@ -274,7 +274,7 @@ def test_generation_announces_its_start_and_its_completion(
     training_session: SessionData,
     reported_messages: list[str],
 ) -> None:
-    """Verifies requesting progress brackets the run with a preamble and a completion message naming the project."""
+    """Verifies that requesting progress wraps the run in a preamble and a completion message naming the project."""
     generate_project_manifest(project_directory=project_root, display_progress=True)
 
     assert reported_messages == [
@@ -320,9 +320,7 @@ def test_a_session_type_without_a_descriptor_names_the_supported_types(
     training_session: SessionData,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verifies that a session type the descriptor registry does not cover cannot be snapshotted, so the run names what
-    is.
-    """
+    """Verifies that a session type outside the descriptor registry cannot be snapshotted, so the run names what is."""
     monkeypatch.delitem(DESCRIPTOR_REGISTRY, SessionTypes.RUN_TRAINING)
 
     with pytest.raises(ValueError, match="An unsupported session type 'run training' was"):
@@ -431,7 +429,7 @@ def test_every_session_pipeline_declares_a_status_column(monkeypatch: pytest.Mon
 
 
 def test_the_reader_reports_how_many_sessions_it_holds(manifest: ProjectManifest) -> None:
-    """Verifies that the representation is the row count, which is what a caller checks a loaded manifest against."""
+    """Verifies that the representation is the row count, which is what a caller checks against a loaded manifest."""
     assert repr(manifest) == "ProjectManifest(sessions=2)"
 
 
@@ -446,8 +444,8 @@ def test_the_animal_roster_is_ordered_the_way_the_identifiers_are_written(
 ) -> None:
     """Verifies that animal identifiers are numbers held as text, so the roster reports animal 2 before animal 10.
 
-    Ordering them as plain text puts 10 first, which disagrees with the order the same identifiers are read and written
-    in everywhere else.
+    Ordering them as plain text puts 10 first, which disagrees with the order in which the same identifiers are read
+    and written everywhere else.
     """
     assert numbered_animal_manifest.animals == ("2", "10")
 
@@ -462,7 +460,7 @@ def test_every_session_is_listed_for_the_whole_project(
 def test_an_animal_filter_narrows_the_listing_to_its_sessions(
     manifest: ProjectManifest, experiment_session: SessionData
 ) -> None:
-    """Verifies that naming an animal returns only the sessions that animal participated in."""
+    """Verifies that naming an animal returns only the sessions in which that animal participated."""
     assert manifest.get_sessions(animal="305") == (experiment_session.session_name,)
 
 
@@ -509,7 +507,7 @@ def test_a_session_resolves_to_the_animal_that_recorded_it(
 
 
 def test_an_unknown_session_lookup_names_the_available_sessions(manifest: ProjectManifest) -> None:
-    """Verifies that a session the manifest does not hold reports what it does hold, including the incomplete ones."""
+    """Verifies that a session that the manifest does not hold reports what it does hold, including incomplete ones."""
     with pytest.raises(ValueError, match="Unable to look up the participating animal using session ID 'absent'"):
         manifest.get_animal_for_session(session="absent")
 
@@ -517,7 +515,7 @@ def test_an_unknown_session_lookup_names_the_available_sessions(manifest: Projec
 def test_a_session_resolves_to_the_system_that_acquired_it(
     manifest: ProjectManifest, training_session: SessionData
 ) -> None:
-    """Verifies the acquisition system decides which pipelines a session supports, so it is queryable on its own."""
+    """Verifies that the acquisition system decides the pipelines a session supports, so it is queryable on its own."""
     assert manifest.get_system_for_session(session=training_session.session_name) == training_session.acquisition_system
 
 
@@ -530,7 +528,7 @@ def test_an_unknown_system_lookup_names_the_available_sessions(manifest: Project
 def test_the_summary_counts_what_each_pipeline_finished(
     manifest: ProjectManifest, training_session: SessionData
 ) -> None:
-    """Verifies one processed session beside one untouched session gives every pipeline the same one-and-one split."""
+    """Verifies that one processed session beside one untouched one gives every pipeline the same one-and-one split."""
     summary = manifest.summarize()
 
     assert summary["total_sessions"] == 2
@@ -547,7 +545,7 @@ def test_the_summary_counts_what_each_pipeline_finished(
 
 
 def test_the_summary_skips_a_pipeline_the_artifact_holds_no_column_for(tmp_path: Path) -> None:
-    """Verifies a manifest written before a pipeline existed reports the pipelines it does carry rather than failing."""
+    """Verifies that a manifest predating a pipeline reports the pipelines it carries rather than failing."""
     columns: dict[str, Any] = {name: [] for name in _PROJECT_MANIFEST_SCHEMA if name != "video"}
     schema = {name: dtype for name, dtype in _PROJECT_MANIFEST_SCHEMA.items() if name != "video"}
     path = tmp_path.joinpath("Legacy_manifest.feather")
@@ -610,7 +608,7 @@ def test_the_summary_view_prints_the_animals_in_natural_order(
 
 
 def test_the_notes_view_reports_the_experimenter_text(manifest: ProjectManifest, reported_messages: list[str]) -> None:
-    """Verifies that the notes view is identity plus notes, which is what an operator reviews a run's outcome from."""
+    """Verifies that the notes view is identity plus notes, which is how an operator reviews a run's outcome."""
     manifest.print_notes()
 
     printed = reported_messages[0]

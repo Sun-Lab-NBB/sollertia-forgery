@@ -26,7 +26,7 @@ class _PageWindow:
     """Describes the slice of a matched item set one response carries."""
 
     start: int
-    """The index the page begins at, counted from the first matching item."""
+    """The index at which the page begins, counted from the first matching item."""
     length: int | None
     """The items the page carries, or None when the page runs to the end of the matches."""
     next_start_row: int | None
@@ -35,7 +35,7 @@ class _PageWindow:
 
     @property
     def stop(self) -> int | None:
-        """Returns the index the page ends before, or None when it runs to the end of the matches."""
+        """Returns the index before which the page ends, or None when it runs to the end of the matches."""
         return None if self.length is None else self.start + self.length
 
 
@@ -53,7 +53,7 @@ def resolve_page(total: int, limit: int, start_row: int) -> _PageWindow:
     Args:
         total: The items matching the caller's filters, before any cap.
         limit: The items to carry, or a value at or below zero to carry every match.
-        start_row: The index to begin at, counted from the first matching item. A negative value starts at the
+        start_row: The index at which to begin, counted from the first matching item. A negative value starts at the
             beginning.
 
     Returns:
@@ -93,8 +93,8 @@ def count_values(values: Iterable[Any]) -> dict[str, int]:
     """Counts how often each value occurs, which is one axis of a breakdown.
 
     Notes:
-        Values are keyed by their string form, so an enumeration member and its value count as one. A null counts
-        under ``none``, since an absent subject is itself a category a caller filters on.
+        Values are keyed by their string form, so an enumeration member and its value count as one. A null counts under
+        ``none``, since an absent subject is itself a category on which a caller filters.
 
     Args:
         values: The column of values to count.
@@ -113,12 +113,12 @@ def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dic
     """Counts how many rows of a stored table carry each value of every filterable axis.
 
     Notes:
-        This is what a bare call reports in place of a listing. It names the values a caller can filter on and how much
-        each would match, so an agent orients itself on one response rather than paging a whole artifact.
+        This is what a bare call reports in place of a listing. It names the values on which a caller can filter and how
+        much each would match, so an agent orients itself on one response rather than paging a whole artifact.
 
     Args:
         frame: The whole stored table.
-        axes: The columns to count, which are the columns a caller may filter by.
+        axes: The columns to count, which are the columns by which a caller may filter.
 
     Returns:
         A dictionary mapping each present axis to its value counts.
@@ -127,7 +127,7 @@ def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dic
 
 
 def resolve_elapsed_seconds(timer: PrecisionTimer) -> float:
-    """Resolves how long an operation ran as the seconds a response reports it in.
+    """Resolves how long an operation ran as the seconds in which a response reports it.
 
     Args:
         timer: The millisecond-precision timer instantiated when the operation began.

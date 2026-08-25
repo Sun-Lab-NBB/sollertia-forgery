@@ -31,8 +31,8 @@ _EXPECTED_SESSION_PIPELINES: tuple[ProcessingPipelines, ...] = (
     ProcessingPipelines.VIDEO,
     ProcessingPipelines.TWO_PHOTON,
 )
-"""The pipelines a session carries a tracker for, in the order the manifest presents them. Pinned explicitly, because
-the order of the manifest's status columns follows it."""
+"""The pipelines for which a session carries a tracker, in the order the manifest presents them. Pinned explicitly,
+because the order of the manifest's status columns follows it."""
 
 _NON_SESSION_PIPELINES: tuple[ProcessingPipelines, ...] = (
     ProcessingPipelines.MANIFEST,
@@ -42,7 +42,7 @@ _NON_SESSION_PIPELINES: tuple[ProcessingPipelines, ...] = (
 
 
 def _make_session() -> SimpleNamespace:
-    """Builds a stand-in session whose tracker properties report which accessor the resolver reached for."""
+    """Builds a stand-in session whose tracker properties report which accessor the resolver reached."""
     return SimpleNamespace(
         session_name="2026-01-02-03-04-05-000006",
         raw_data=SimpleNamespace(checksum_tracker_path="raw/checksum"),
@@ -147,7 +147,7 @@ def test_a_window_checking_session_joins_no_dataset() -> None:
 def test_dispatch_rejects_a_window_checking_session(
     session_factory: Callable[..., SessionData], tmp_path: Path
 ) -> None:
-    """Verifies that the dispatcher refuses a session type it has no assembler for and names the supported types."""
+    """Verifies that the dispatcher refuses a session type it cannot assemble and names the supported types."""
     session = session_factory(animal_id="404", session_type=SessionTypes.WINDOW_CHECKING)
     output_path = tmp_path.joinpath("forged", "data.feather")
 

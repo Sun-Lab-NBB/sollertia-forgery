@@ -37,7 +37,7 @@ class _PreparedBatch(YamlConfig):
     pipeline: str = ""
     """The pipeline the batch dispatches, recorded so a listing names it without parsing the document."""
     host: str = ""
-    """The host the batch was prepared against, recorded for the same reason."""
+    """The host against which the batch was prepared, recorded for the same reason."""
     document: dict[str, Any] = field(default_factory=dict)
     """The batch document's fields, held as a plain mapping so it serializes without a nested dataclass schema."""
     outcome: dict[str, Any] = field(default_factory=dict)
@@ -45,7 +45,7 @@ class _PreparedBatch(YamlConfig):
     caller reads after the run, so a finished batch stays answerable once nothing is running and nothing is queued."""
 
     def as_document(self) -> BatchDocument:
-        """Returns the recorded batch as the document both execution backends dispatch."""
+        """Returns the recorded batch as the document that both execution backends dispatch."""
         return BatchDocument(**self.document)
 
 
@@ -79,7 +79,7 @@ def record_prepared_batch(document: BatchDocument) -> str:
         document: The prepared batch to record.
 
     Returns:
-        The identifier the batch was recorded under.
+        The identifier under which the batch was recorded.
 
     Raises:
         Timeout: If the batch file's lock cannot be acquired within the timeout period.
@@ -131,17 +131,17 @@ def read_prepared_batches(batch_ids: list[str]) -> tuple[list[BatchDocument], li
 
 
 def resolve_batch_host(documents: list[BatchDocument]) -> str:
-    """Resolves the single host a set of prepared batches runs on.
+    """Resolves the single host on which a set of prepared batches runs.
 
     Notes:
         A batch runs where it was prepared, because its jobs read data that host holds. Executing batches prepared
         against different hosts together is therefore rejected rather than resolved to one of them.
 
     Args:
-        documents: The prepared batches to resolve the host of.
+        documents: The prepared batches whose host is resolved.
 
     Returns:
-        The name of the host every named batch was prepared against.
+        The name of the host against which every named batch was prepared.
 
     Raises:
         ValueError: If no batch is named, or if the named batches were prepared against different hosts.
@@ -188,7 +188,7 @@ def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
         that tracks it as outstanding.
 
     Args:
-        batch_id: The identifier of the batch to record against.
+        batch_id: The identifier of the batch that receives the outcome.
         outcome: The rendered outcome to store.
 
     Returns:

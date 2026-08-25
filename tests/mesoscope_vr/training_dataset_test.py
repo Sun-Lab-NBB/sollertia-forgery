@@ -78,8 +78,8 @@ def _body_clock() -> NDArray[np.uint64]:
 
 
 def _write_behavior_sources(session: SessionData) -> None:
-    """Writes the module-parsed and runtime-parsed feathers a run-training session's behavior assembly and
-    session-bounds clip read.
+    """Writes the module-parsed and runtime-parsed feathers read by a run-training session's behavior assembly and
+    session-bounds clip.
 
     The valve stream plays one reward tone that dispenses water, the encoder advances at a constant rate, and the
     system leaves idle at the session start before settling into rest.
@@ -130,7 +130,7 @@ def _write_behavior_sources(session: SessionData) -> None:
 
 
 def _write_camera_clocks(session: SessionData) -> None:
-    """Writes both camera timestamp feathers, which is what the slowest-camera clock resolver reads.
+    """Writes both camera timestamp feathers, which the slowest-camera clock resolver reads.
 
     Args:
         session: The loaded training session whose processed video directory receives the feathers.
@@ -171,7 +171,7 @@ def prepared_training_session(training_session: SessionData) -> SessionData:
     """Builds a fully processed run-training session carrying its behavior, camera clock, and camera energy feathers.
 
     Args:
-        training_session: The acquired run-training session the processed feathers are written under.
+        training_session: The acquired run-training session that receives the processed feathers.
 
     Returns:
         The same session, now holding every input the training assembler reads.

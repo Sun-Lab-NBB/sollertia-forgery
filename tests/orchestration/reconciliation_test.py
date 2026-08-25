@@ -32,10 +32,10 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_working_directory")
 
 _UNIT_PATH: str = "/data/Project/305/2024_11_04"
-"""The path to the processing unit the reconciliation tests place their jobs under."""
+"""The path to the processing unit under which the reconciliation tests place their jobs."""
 
 _TRACKER_JOB: tuple[str, str] = ("motion_energy", "1")
-"""The job name and specifier every tracker these tests write is aligned against."""
+"""The job name and specifier against which every tracker written by these tests is aligned."""
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def running_job(
     """Returns a builder that writes a tracker recording one job as running and points a pending job at it.
 
     Args:
-        tmp_path: The temporary directory the tracker is written under.
+        tmp_path: The temporary directory under which the tracker is written.
         write_tracker: The builder that writes the tracker.
 
     Returns:
@@ -70,7 +70,7 @@ def scheduled_job(tmp_path: Path, write_tracker: Callable[..., ProcessingTracker
     """Builds a pending job whose tracker holds it in the scheduled state, so the record names no executor.
 
     Args:
-        tmp_path: The temporary directory the tracker is written under.
+        tmp_path: The temporary directory under which the tracker is written.
         write_tracker: The builder that writes the tracker.
 
     Returns:
@@ -100,17 +100,17 @@ class _StubServer:
         """Records the queried allocations and answers the fixed state of each.
 
         Args:
-            slurm_job_ids: The allocation identifiers the caller asked about.
+            slurm_job_ids: The allocation identifiers about which the caller asked.
 
         Returns:
-            The state of each queried allocation this server holds one for.
+            The state of each queried allocation for which this server holds one.
         """
         self.queried = list(slurm_job_ids)
         return {allocation: self._statuses[allocation] for allocation in slurm_job_ids if allocation in self._statuses}
 
 
 def _tracker_job_id() -> str:
-    """Returns the identifier the tracker registers the shared job name and specifier under."""
+    """Returns the identifier under which the tracker registers the shared job name and specifier."""
     return ProcessingTracker.generate_job_id(job_name=_TRACKER_JOB[0], specifier=_TRACKER_JOB[1])
 
 
@@ -121,12 +121,12 @@ def _make_job(
     status: str = "",
     executor_id: str = "",
 ) -> GenericPendingJob:
-    """Builds a pending job carrying the outcome preparation read out of the host's state artifact.
+    """Builds a pending job carrying the outcome that preparation read out of the host's state artifact.
 
     Args:
-        job_id: The identifier the job is registered under in the tracker.
-        tracker_path: The path to the tracker the job is recorded on.
-        unit_path: The processing unit the job runs against.
+        job_id: The identifier under which the job is registered in the tracker.
+        tracker_path: The path to the tracker on which the job is recorded.
+        unit_path: The processing unit against which the job runs.
         status: The status the state artifact recorded for the job.
         executor_id: The executor the same record named.
 
@@ -185,7 +185,7 @@ def test_a_live_allocation_named_by_the_tracker_is_adopted(
 def test_the_allocation_the_tracker_names_outranks_the_one_the_ledger_recorded(
     running_job: Callable[[str | None], GenericPendingJob],
 ) -> None:
-    """Verifies that a job both sources claim is adopted onto the allocation its tracker names, not the ledger's.
+    """Verifies that a job claimed by both sources is adopted onto the allocation its tracker names, not the ledger's.
 
     An executor identifier appears only once an allocation starts running, so it describes a later moment than this
     host's record of submitting one. Preferring the ledger's stale identifier would query an allocation that has already
@@ -216,9 +216,9 @@ def test_an_executor_naming_the_scheduler_but_no_allocation_is_submitted_again(
 ) -> None:
     """Verifies that a truncated executor identifier is treated as naming no allocation at all.
 
-    A record carrying the scheme without an allocation names nothing the scheduler can be asked about. Treating it as a
-    claim would adopt the job forever, since an allocation the scheduler reports nothing for reads as one that has not
-    yet reached a terminal state.
+    A record carrying the scheme without an allocation names nothing about which the scheduler can be asked. Treating
+    it as a claim would adopt the job forever, since an allocation for which the scheduler reports nothing reads as
+    one that has not yet reached a terminal state.
     """
     job = running_job("slurm:")
     server = _StubServer(statuses={})
@@ -314,7 +314,7 @@ def test_batches_prepared_against_different_hosts_are_not_dispatched_together() 
 
 
 def test_a_job_no_allocation_ever_started_is_submitted(scheduled_job: GenericPendingJob) -> None:
-    """Verifies that a job no allocation ever started is submitted without a scheduler query."""
+    """Verifies that a job never started by any allocation is submitted without a scheduler query."""
     server = _StubServer(statuses={})
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])

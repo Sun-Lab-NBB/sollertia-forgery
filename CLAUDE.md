@@ -109,7 +109,7 @@ repositories.
 - A new per-session pipeline needs an upstream tracker filename in `ProcessingTrackers` and an upstream output directory
   in `ProcessedData`, before `shared_assets/pipelines.py` is able to resolve the tracker location.
 - `sollertia-experiment` has to acquire the data before anything here can process it, so confirm that the acquisition
-  side writes the artifacts a new pipeline reads and creates sessions of a new session type.
+  side creates sessions of a new session type and writes the artifacts a new pipeline reads.
 
 ## Distribution model
 
@@ -152,10 +152,10 @@ because a per-system package never imports an agnostic category package. A categ
 preference.
 
 Work reaches a host as a **job**, and every pipeline models its jobs the same way. `slf plan` reads a unit's acquisition
-data, registers every job that unit is able to run on the unit's processing tracker, and records each job's cores,
-memory, and upstream jobs. Preparation joins the tracker state to those records into one descriptor per job under a
-batch identifier, and dispatch runs the batch either on this machine's process pool or as one SLURM allocation per job.
-Each job holds a `ProcessingStatus` on the tracker, one of `SCHEDULED`, `RUNNING`, `SUCCEEDED`, or `FAILED`. A rerun
+data, registers on its processing tracker every job that unit is able to run, and records each job's cores, memory, and
+upstream jobs. Preparation joins the tracker state to those records into one descriptor per job under a batch
+identifier, and dispatch runs the batch either on this machine's process pool or as one SLURM allocation per job. Each
+job holds a `ProcessingStatus` on the tracker, one of `SCHEDULED`, `RUNNING`, `SUCCEEDED`, or `FAILED`. A rerun
 therefore resolves only the work still outstanding. The run reports a job as blocked rather than dispatched when it can
 neither queue that job's upstream stage nor confirm that the stage already succeeded.
 

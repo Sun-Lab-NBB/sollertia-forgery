@@ -60,7 +60,7 @@ _SERVER_PROJECT_ROOT: Path = Path("/data/sollertia/TestProject")
 """The project directory every server-side preparation test addresses on the stubbed compute server."""
 
 pytestmark: pytest.MarkDecorator = pytest.mark.usefixtures("isolated_working_directory")
-"""Points every test in this module at an isolated platform working directory, which the ledger is written under."""
+"""Points every test in this module at an isolated platform working directory, under which the ledger is written."""
 
 
 @dataclass
@@ -209,11 +209,11 @@ def place_server_table(transport: Any, remote_path: Path, frame: pl.DataFrame) -
 
     Args:
         transport: The stubbed transport whose temporary tree stands in for the server.
-        remote_path: The absolute server path the table sits at.
+        remote_path: The absolute server path at which the table sits.
         frame: The table to write.
 
     Returns:
-        The local path the table was written to.
+        The local path to which the table was written.
     """
     local_path = transport.local_path(remote_path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,7 +341,7 @@ def test_a_submission_names_the_allocations_of_the_upstream_jobs_the_batch_holds
 
 def test_a_submission_waits_on_every_upstream_allocation_rather_than_the_first_of_them() -> None:
     """Verifies that a stage assembled from several upstream stages has to name them all, since starting once the first
-    finishes reads an input another prerequisite is still writing.
+    finishes reads an input that another prerequisite is still writing.
     """
     server = StubServer()
     jobs = [
@@ -376,7 +376,7 @@ def test_a_submission_requests_the_cores_and_memory_the_job_was_prepared_at() ->
 
 def test_a_submission_requests_the_wall_time_the_caller_asked_for() -> None:
     """Verifies that the wall-time is the caller's own knob for a batch of long jobs, so the scheduler and the record
-    both have to carry the figure it named rather than the default the caller raised it above.
+    both have to carry the figure it named rather than the default above which the caller raised it.
     """
     server = StubServer()
     jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
@@ -400,7 +400,7 @@ def test_an_adopted_allocation_seeds_a_dependency_without_being_recorded_or_muta
 
     submissions = submit_batch(server=server, jobs=jobs, batch_id="batch01", adopted=adopted)
 
-    # The adopted allocation is what the dependent waits on, and it is not itself a submission of this batch.
+    # The dependent waits on the adopted allocation, which is not itself a submission of this batch.
     assert "#SBATCH --dependency=afterok:900" in server.submitted[0].command_script
     assert [submission.job_id for submission in submissions] == ["rename"]
     assert adopted == {("/data/Project/Animal/Session", "timestamp"): "900"}
@@ -448,7 +448,7 @@ def test_each_pipeline_renders_the_command_that_runs_one_of_its_jobs(
 
 
 def test_the_checksum_command_carries_the_mode_the_job_was_prepared_with() -> None:
-    """Verifies that a pipeline's options reach its command line, so a batch runs the mode it was prepared for."""
+    """Verifies that a pipeline's options reach its command line, so a batch runs the mode for which it was prepared."""
     prepared = build_descriptor(job_id="job", job_name="checksum", pipeline="checksum")
     prepared["options"] = {"regenerate_checksum": True}
 
@@ -563,7 +563,7 @@ def test_a_command_runs_inside_the_shared_server_environment() -> None:
 
 
 def test_the_ledger_round_trips_through_yaml() -> None:
-    """Verifies that a recorded batch reads back with every field it was written with, two dataclass levels deep."""
+    """Verifies that a recorded batch reads back with every field it carried at the write, two dataclass levels deep."""
     record_batch(batch=build_batch(batch_id="batch01", submissions=[build_submission(slurm_job_id="1000")]))
 
     recorded = read_ledger().resolve_batch(batch_id="batch01")
@@ -588,7 +588,7 @@ def test_a_submitted_batch_is_recorded_so_it_outlives_the_process_that_submitted
 
 
 def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
-    """Verifies that the record is the only description of a queued allocation this host keeps, and a later dispatch
+    """Verifies that the record is the only description this host keeps of a queued allocation, and a later dispatch
     matches an already-queued job by the unit and job the record names, so every field has to describe that job
     rather than a neighboring one.
     """
@@ -663,9 +663,9 @@ def test_allocations_accepted_before_a_rejection_are_still_recorded() -> None:
 
 
 def test_re_submitting_a_batch_keeps_the_allocations_its_first_attempt_queued() -> None:
-    """Verifies that the allocations a rejected attempt already queued stay queued, so re-running the batch merges into
-    the record rather than replacing it. An allocation dropped from the record is reachable by no status read, no
-    cancellation and no closure, and runs to completion unobserved.
+    """Verifies that the allocations already queued by a rejected attempt stay queued, so re-running the batch merges
+    into the record rather than replacing it. An allocation dropped from the record is reachable by no status read,
+    no cancellation and no closure, and runs to completion unobserved.
     """
     record_batch(
         batch=build_batch(
@@ -830,7 +830,7 @@ def test_a_dataset_unit_resolves_the_project_one_level_up() -> None:
 
 
 def test_units_spanning_two_projects_are_rejected() -> None:
-    """Verifies that the tables a batch is resolved from are written per project, so one batch reads one project."""
+    """Verifies the tables from which a batch is resolved are written per project, so one batch reads one project."""
     with pytest.raises(ValueError, match="belong to the same project"):
         resolve_project_root(
             unit_paths=[Path("/root/ProjectA/305/2024_11_04"), Path("/root/ProjectB/306/2024_11_05")],
@@ -939,8 +939,8 @@ def test_the_planned_ordering_reaches_the_descriptor() -> None:
 
 
 def test_options_are_stamped_onto_every_descriptor() -> None:
-    """Verifies that a pipeline's mode rides on the descriptor, so every job of the batch runs the mode it was prepared
-    for.
+    """Verifies that a pipeline's mode rides on the descriptor, so every job of the batch runs the mode for which it
+    was prepared.
     """
     document = build_document(
         pipeline="checksum",
@@ -1091,14 +1091,14 @@ def test_preparing_a_batch_the_host_holds_no_plan_for_is_rejected(connected_serv
 
 
 def test_preparing_a_batch_covering_no_unit_is_rejected() -> None:
-    """Verifies that every artifact a batch is resolved from is written per project, so a batch has to name the project
-    it reads.
+    """Verifies that every artifact from which a batch is resolved is written per project, so a batch has to name the
+    project it reads.
     """
     with pytest.raises(ValueError, match="No processing unit was named"):
         resolve_project_root(unit_paths=[], unit_kind="session")
 
 
-# Tests for the scheduler operations a submitted batch is followed and stopped through
+# Tests for the scheduler operations through which a submitted batch is followed and stopped
 
 
 def test_a_batch_that_queued_nothing_is_never_recorded(connected_server: Server) -> None:
@@ -1170,9 +1170,7 @@ def test_the_configured_server_is_what_a_connection_opens(
     server_configuration: ServerConfiguration,
     stub_ssh_transport: Any,
 ) -> None:
-    """Verifies that a caller never names the host, so the recorded configuration is what every remote operation runs
-    against.
-    """
+    """Verifies a caller never names the host, so every remote operation runs against the recorded configuration."""
     with connect_to_server() as server:
         assert server.host == server_configuration.host
         assert server.root == Path(server_configuration.root)
@@ -1183,8 +1181,8 @@ def test_the_configured_server_is_what_a_connection_opens(
 
 
 def test_mirroring_a_project_the_server_does_not_hold_is_rejected(connected_server: Server, tmp_path: Path) -> None:
-    """Verifies that a mirror answers from the server's own artifacts, so a project it holds no directory for mirrors
-    nothing.
+    """Verifies that a mirror answers from the server's own artifacts, so a project for which it holds no directory
+    mirrors nothing.
     """
     with pytest.raises(FileNotFoundError, match=r"Unable to mirror the state of project 'Absent'"):
         sync_project_state(server=connected_server, project="Absent", local_directory=tmp_path)

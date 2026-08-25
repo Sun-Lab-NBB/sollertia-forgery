@@ -41,11 +41,11 @@ _SECOND_SESSION: str = "2026-01-03-03-04-05-000006"
 def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
     """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
 
-    Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
-    this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
+    Publishing through a temporary file hands the writer an open handle rather than a destination path, so this
+    stand-in leaves its partial bytes in the temporary that the publication discards rather than in the destination.
 
-    Args: _frame: The frame the writer was called on, which this stand-in never serializes. file: The open file object
-    the artifact is written to. **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args: _frame: The frame passed to the writer, which this stand-in never serializes. file: The open file object that
+    receives the artifact. **_keywords: The serialization options passed by the caller, which this stand-in ignores.
 
     Raises: RuntimeError: Always, standing in for a writer that dies partway through.
     """
@@ -58,9 +58,9 @@ def build_dataset(dataset_root: Path, first_animal: str, second_animal: str) -> 
     """Builds a stand-in dataset whose root and session list drive the state artifact.
 
     Args:
-        dataset_root: The directory the dataset's tracker and state artifact are written into.
-        first_animal: The identifier of the animal the first session belongs to.
-        second_animal: The identifier of the animal the second session belongs to.
+        dataset_root: The directory that receives the dataset's tracker and state artifact.
+        first_animal: The identifier of the animal that owns the first session.
+        second_animal: The identifier of the animal that owns the second session.
 
     Returns:
         The stand-in dataset, carrying the attributes the state artifact reads.
@@ -97,7 +97,7 @@ def _align_tracker(dataset: SimpleNamespace, jobs: list[tuple[str, str]]) -> Pro
 
 
 def test_every_forging_job_name_declares_a_scope() -> None:
-    """Verifies that each of the three job names the forging universe emits declares the unit its specifier names."""
+    """Verifies that each of the three job names in the forging universe declares the unit its specifier names."""
     assert set(_DATASET_JOB_SCOPES) == {
         MULTIDAY_DISCOVERY_JOB_NAME,
         MULTIDAY_EXTRACTION_JOB_NAME,
@@ -158,7 +158,7 @@ def reported_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         monkeypatch: The fixture used to replace the console's echo method for the duration of one test.
 
     Returns:
-        The list the recorder appends each echoed message to, in the order they were emitted.
+        The list into which the recorder appends each echoed message, in the order they were emitted.
     """
     messages: list[str] = []
     monkeypatch.setattr(console, "echo", lambda message, **_keywords: messages.append(message))
@@ -292,7 +292,7 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
 def test_the_written_artifact_orders_its_animals_the_way_a_reader_reads_them(tmp_path: Path) -> None:
     """Verifies that the published rows are ordered naturally, so animal 9 precedes animal 10 rather than following it.
 
-    Animal identifiers are numbers held as text, and every other listing this stack produces reads them in numeric
+    Animal identifiers are numbers held as text, and every other listing produced by this stack reads them in numeric
     order, so ordering the snapshot as plain text would disagree with all of them.
     """
     numbered = build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="10", second_animal="9")

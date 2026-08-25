@@ -40,28 +40,28 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _PLANE_COUNT: int = 2
-"""The number of physical imaging planes the synthetic acquisition parameters declare, which is also the number of
-virtual planes cindra resolves for this single-ROI recording."""
+"""The number of physical imaging planes declared by the synthetic acquisition parameters, which is also the number
+of virtual planes cindra resolves for this single-ROI recording."""
 
 _GENOTYPE: str = "GP5.17"
-"""The genotype the synthetic surgery metadata records, which the Mesoscope-VR resolver maps to a GCaMP6f
+"""The genotype recorded by the synthetic surgery metadata, which the Mesoscope-VR resolver maps to a GCaMP6f
 configuration."""
 
 _CONFIGURATION_FILENAME: str = SINGLE_RECORDING_CONFIGURATION_FILENAME
-"""The name the session's shared cindra configuration is materialized under, inside its cindra directory. cindra owns
-the name, and the pipeline writes the file where cindra's own priming step would."""
+"""The name under which the session's shared cindra configuration is materialized, inside its cindra directory. cindra
+owns the name, and the pipeline writes the file where cindra's own priming step would."""
 
 _STUB_SESSION_NAME: str = "2024_11_04"
-"""The directory name every stand-in session is built under, which is also the name the pipeline reads from it."""
+"""The directory name under which every stand-in session is built, and the name the pipeline reads from it."""
 
 
 def _session_path(session: SessionData) -> Path:
-    """Resolves the root session directory every pipeline entry point takes as its argument."""
+    """Resolves the root session directory that every pipeline entry point takes as its argument."""
     return session.raw_data_path.parent
 
 
 def _write_surgery_metadata(session: SessionData) -> None:
-    """Writes the surgery metadata the Mesoscope-VR configuration resolver reads the animal's genotype from."""
+    """Writes the surgery metadata from which the Mesoscope-VR configuration resolver reads the animal's genotype."""
     SurgeryData(
         subject=SubjectData(
             id=int(session.animal_id),
@@ -102,8 +102,8 @@ def _write_acquisition_parameters(session: SessionData, *, plane_number: int = _
 
 @pytest.fixture
 def imaging_session(experiment_session: SessionData) -> SessionData:
-    """Builds an acquired experiment session carrying the surgery metadata and the raw imaging data cindra resolves a
-    recording from.
+    """Builds an acquired experiment session carrying the surgery metadata and the raw imaging data from which cindra
+    resolves a recording.
     """
     _write_surgery_metadata(session=experiment_session)
     _write_acquisition_parameters(session=experiment_session)
@@ -221,7 +221,7 @@ def stubbed_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callab
                 universe=tuple(_expected_universe(plane_count=plane_count or 0)),
             ),
         )
-        # Priming still asks whether the bootstrap this session carries is complete, which is the guard that keeps a
+        # Priming still asks whether the bootstrap carried by this session is complete, which is the guard that keeps a
         # second preparation pass from rewriting it.
         monkeypatch.setattr(
             two_photon_pipeline,
@@ -351,7 +351,7 @@ def test_only_the_two_photon_pipeline_declares_a_priming_step() -> None:
 def test_resolving_jobs_reads_the_bootstrap_and_writes_nothing(
     monkeypatch: pytest.MonkeyPatch, stubbed_recording: Callable[..., SimpleNamespace]
 ) -> None:
-    """Verifies resolution shapes the universe from the plane count cindra's own resolver reports, without
+    """Verifies resolution shapes the universe from the plane count reported by cindra's own resolver, without
     materializing the bootstrap.
     """
     session = stubbed_recording(plane_count=3)
@@ -408,7 +408,7 @@ def test_priming_an_unprimed_recording_persists_both_halves(
         return None, configuration_path
 
     def _record_priming(configuration_path: Path) -> SimpleNamespace:
-        """Records the configuration the pipeline handed cindra's own single-threaded priming step."""
+        """Records the configuration handed by the pipeline to cindra's own single-threaded priming step."""
         primed.append(configuration_path)
         return SimpleNamespace(plane_count=_PLANE_COUNT)
 
@@ -417,7 +417,7 @@ def test_priming_an_unprimed_recording_persists_both_halves(
 
     prime_two_photon_recording(session_path=_session_path(session))
 
-    # Both halves of the bootstrap are written, which is what an unprimed recording needs before its jobs dispatch.
+    # Both halves of the bootstrap are written. An unprimed recording needs both before its jobs dispatch.
     # The configuration is persisted first, then handed to cindra, which writes each plane's runtime data from it.
     assert persisted == [True]
     assert primed == [configuration_path]
@@ -486,8 +486,8 @@ def test_naming_any_one_stage_dispatches_that_stage_alone(
 ) -> None:
     """Verifies naming any single stage runs that stage alone, rather than falling into the run-everything default.
 
-    An invocation naming no stage runs all four, so a stage the request does not recognize would silently re-run the
-    whole recording and overwrite the outputs the operator asked to leave alone.
+    An invocation naming no stage runs all four, so a stage that the request does not recognize would silently re-run
+    the whole recording and overwrite the outputs the operator asked to leave alone.
     """
     run_two_photon_processing_pipeline(session_path=_session_path(primed_session), **stage_flags)
 
@@ -514,7 +514,7 @@ def test_a_per_plane_stage_on_a_recording_holding_no_plane_dispatches_nothing(
     primed_session: SessionData,
     dispatched_jobs: list[dict[str, Any]],
 ) -> None:
-    """Verifies a per-plane stage requested for a recording that holds no plane resolves no job and aligns nothing.
+    """Verifies a per-plane stage resolves no job and aligns nothing when its recording holds no plane.
 
     The tracker refuses an empty alignment request, so the run has to skip the alignment rather than offer it one.
     """
@@ -574,7 +574,7 @@ def test_a_job_identifier_runs_that_job_alone(
 def test_a_remote_job_keeps_the_recorded_state_of_its_sibling_jobs(
     primed_session: SessionData, dispatched_jobs: list[dict[str, Any]]
 ) -> None:
-    """Verifies a scheduler-dispatched job leaves the state its sibling jobs recorded in the shared tracker intact.
+    """Verifies a scheduler-dispatched job preserves the state its sibling jobs recorded in the shared tracker.
 
     The scheduler dispatches each job of the universe separately against one tracker, so a job that treated its
     siblings as foreign entries would erase their completion and have every finished stage dispatched again.

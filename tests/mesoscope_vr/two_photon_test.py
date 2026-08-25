@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _FIXTURES_DIRECTORY: Path = FIXTURES_DIRECTORY / "cindra"
-"""The directory holding the reference mesoscope-vr cindra configuration YAMLs the golden regression pins against."""
+"""The directory holding the reference mesoscope-vr cindra configuration YAMLs that anchor the golden regression."""
 
 
 def _neutralize_single(configuration: dict[str, Any]) -> dict[str, Any]:

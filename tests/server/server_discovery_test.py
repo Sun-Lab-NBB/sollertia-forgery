@@ -37,7 +37,7 @@ def _build_remote_project(transport: StubSSHTransport) -> Path:
     file.
 
     Args:
-        transport: The transport whose temporary server-side filesystem the hierarchy is created inside.
+        transport: The transport whose temporary server-side filesystem holds the created hierarchy.
 
     Returns:
         The path to the created project directory, as it is laid out on the stubbed server.
@@ -156,8 +156,8 @@ def test_discover_project_sessions_orders_the_sessions_naturally(
 
 
 def test_discover_project_sessions_rejects_a_project_the_server_does_not_hold(connected_server: Server) -> None:
-    """Verifies that a project the server holds no directory for is an absent project rather than a project holding no
-    sessions.
+    """Verifies that a project for which the server holds no directory is an absent project rather than a project
+    holding no sessions.
     """
     with pytest.raises(FileNotFoundError, match=r"holds no directory at that path"):
         _discover_project_sessions(project="Absent", server=connected_server)
@@ -166,8 +166,8 @@ def test_discover_project_sessions_rejects_a_project_the_server_does_not_hold(co
 def test_discover_project_sessions_rejects_a_search_that_covered_part_of_the_tree(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that a search the server could not complete would answer for the part of the tree it read, which is not
-    an answer.
+    """Verifies that a search that the server could not complete would answer for the part of the tree it read, which
+    is not an answer.
     """
     _build_remote_project(transport=stub_ssh_transport)
     stub_ssh_transport.respond(
@@ -230,7 +230,7 @@ def test_discover_project_markers_reads_both_marker_names_in_one_search(
 def test_discover_project_markers_reads_only_the_dataset_depth_when_sessions_are_excluded(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that a caller needing the datasets alone leaves the session and output directories every animal holds
+    """Verifies that a caller needing the datasets alone leaves every animal's session and output directories
     unread.
     """
     _build_remote_project(transport=stub_ssh_transport)
@@ -247,8 +247,8 @@ def test_discover_project_markers_reads_only_the_dataset_depth_when_sessions_are
 def test_discover_project_sessions_orders_a_name_ahead_of_the_sibling_that_extends_it(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that the order is taken over the names each session is reported by rather than over the paths they were
-    found at.
+    """Verifies that the order is taken over the names by which each session is reported rather than over the paths
+    at which they were found.
     """
     project_path = stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}")
     for animal, session in (("305", "S2"), ("305", "S10"), ("305-repeat", "S1"), ("305", "S1")):

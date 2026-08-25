@@ -112,7 +112,7 @@ def _patch_parser_map(monkeypatch: pytest.MonkeyPatch, parsers: dict[tuple[int, 
     """Replaces the central parser lookup with one returning exactly the supplied parser mapping.
 
     Args:
-        monkeypatch: The patching fixture the replacement is registered on.
+        monkeypatch: The patching fixture on which the replacement is registered.
         parsers: The module parsers the pipeline resolves for the session's acquisition system.
     """
     monkeypatch.setattr(pipeline_module, "resolve_microcontroller_parsers", lambda system: dict(parsers))  # noqa: ARG005
@@ -122,7 +122,7 @@ def _make_session(tmp_path: Path, **hardware_overrides: object) -> SimpleNamespa
     """Builds a lightweight stand-in for SessionData exposing only the attributes the pipeline reads.
 
     Args:
-        tmp_path: The temporary directory the session's raw and processed hierarchies are built under.
+        tmp_path: The temporary directory under which the session's raw and processed hierarchies are built.
         hardware_overrides: The hardware state field values recorded in place of the all-modules-used defaults, so a
             test can stage a session that did not use one of the modules its manifest declares.
     """
@@ -130,7 +130,7 @@ def _make_session(tmp_path: Path, **hardware_overrides: object) -> SimpleNamespa
     raw_behavior.mkdir(parents=True)
 
     # Job discovery narrows the extraction filter to the modules the session configured, so the stand-in carries a
-    # hardware state that marks every module the tests exercise as used.
+    # hardware state that marks every module that the tests exercise as used.
     hardware_state_path = tmp_path / "raw_data" / "hardware_state.yaml"
     _make_hardware_state(**hardware_overrides).to_yaml(file_path=hardware_state_path)
 
@@ -145,7 +145,7 @@ def _make_session(tmp_path: Path, **hardware_overrides: object) -> SimpleNamespa
 
 
 def _make_hardware_state(**overrides: object) -> MesoscopeHardwareState:
-    """Builds a hardware state marking every module the microcontroller tests exercise as configured and used.
+    """Builds a hardware state marking every module that the microcontroller tests exercise as configured and used.
 
     Args:
         overrides: The hardware state field values recorded in place of the defaults.
@@ -229,7 +229,7 @@ def _stage_controllers(
 
     Args:
         session: The session stand-in whose raw behavior data directory receives the manifest and the archives.
-        monkeypatch: The patching fixture the stubbed session loader is registered on.
+        monkeypatch: The patching fixture on which the stubbed session loader is registered.
         controllers: The declared ``(module_type, module_id)`` pairs, keyed by controller identifier.
         archives: The identifiers of the controllers whose log archive is staged beside the manifest.
     """
@@ -495,7 +495,7 @@ def test_materialize_extraction_config_writes_every_derived_controller(tmp_path:
     """Verifies that the materialized extraction configuration carries every controller the manifest derived.
 
     Every extraction job, local or remotely dispatched into a fresh process, reads its own targets out of this one
-    file, so a controller the file omits cannot be extracted at all.
+    file, so a controller that the file omits cannot be extracted at all.
     """
     controllers = {
         "101": ControllerExtractionConfig(
@@ -626,8 +626,8 @@ def test_local_pipeline_tracks_only_the_jobs_a_staged_archive_supports(
 ) -> None:
     """Verifies that a manifest controller that staged no log archive contributes no processing tracker entry.
 
-    A job this unit cannot run must never reach the tracker, since its absence from the state artifact is what stops
-    the orchestration layer from dispatching an allocation for an archive that is not on disk.
+    A job that this unit cannot run must never reach the tracker, since its absence from the state artifact is what
+    stops the orchestration layer from dispatching an allocation for an archive that is not on disk.
     """
     session = _make_session(tmp_path)
     # Controller 101 staged its archive and controller 102 did not, so only 101's three jobs may be dispatched.
@@ -679,7 +679,7 @@ def test_a_rerun_preserves_the_outcome_of_a_controller_whose_archive_no_longer_r
 ) -> None:
     """Verifies that a second run keeps the recorded outcome of a controller it can no longer dispatch.
 
-    Foreign entries are detected against every job the manifest could produce rather than against the subset one
+    Foreign entries are detected against every job the manifest could produce rather than against the subset that one
     invocation can run, so a controller whose archive was moved away keeps the outcome it already recorded instead
     of being discarded from the state artifact.
     """
@@ -873,9 +873,9 @@ def test_a_manifest_controller_the_system_does_not_extract_contributes_no_job(
     """Verifies that a registered controller left out of the eligibility filter contributes neither job.
 
     The acquisition library locates every controller the manifest registers, while the eligibility rule that decides
-    which of them are worth extracting is this package's own. A controller declaring only modules the acquisition
-    system does not parse therefore reaches discovery without a configuration behind it, and it must drop out
-    silently rather than being requested, even though its archive is staged beside the eligible one's.
+    which of them are worth extracting is this package's own. A controller declaring only modules that the acquisition
+    system does not parse therefore reaches discovery without a configuration behind it, and it must drop out silently
+    rather than being requested, even though its archive is staged beside the eligible one's.
     """
     session = _make_session(tmp_path)
     # Module (9, 9) is registered for no acquisition system, so controller 102 declares nothing slf extracts.
@@ -895,10 +895,10 @@ def test_a_manifest_controller_the_system_does_not_extract_contributes_no_job(
 def test_a_module_the_session_did_not_use_contributes_no_discovered_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a registered module the session's hardware state marks unused is reported by neither set.
+    """Verifies that a registered module that the session's hardware state marks unused is reported by neither set.
 
-    Discovery is what the scheduler dispatches from, so a job it reports that the pipeline's own run path would
-    never list aborts on arrival instead of processing anything.
+    The scheduler dispatches from discovery, so a reported job that the pipeline's own run path would never list
+    aborts on arrival instead of processing anything.
     """
     session = _make_session(tmp_path, delivered_gas_puffs=False)
     _stage_controllers(session=session, monkeypatch=monkeypatch, controllers={101: ((2, 1), (5, 2))}, archives=(101,))
@@ -1099,7 +1099,7 @@ def test_local_pipeline_reports_progress_for_both_stages(
 def test_local_pipeline_leaves_a_disabled_console_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_session: SimpleNamespace
 ) -> None:
-    """Verifies that a local run restores the disabled console it started from."""
+    """Verifies that a local run restores the disabled console that it inherited."""
     output_directory = staged_session.processed_data.microcontroller_data_path
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())

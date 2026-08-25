@@ -84,7 +84,7 @@ class _ModuleSpecification:
             explicit usage flag are skipped when that flag is not set.
 
         Args:
-            hardware_state: The session hardware configuration to validate against.
+            hardware_state: The session hardware configuration against which to validate.
 
         Returns:
             True if the module was used and all of its required fields are configured.
@@ -144,8 +144,8 @@ _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
 hardware state fields, usage flags, and extracted event codes for a specific hardware module instance."""
 
 
-# Public parser entry points wired into the microcontroller parser registry ('registries.py'). The uniform
-# (event_partition, output_directory, session) signature is what the registry dispatches on.
+# Public parser entry points wired into the microcontroller parser registry ('registries.py'). The registry dispatches
+# on the uniform (event_partition, output_directory, session) signature.
 def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the wheel-encoder module (type 2, id 1) into the session's encoder behavior feather.
 
@@ -375,7 +375,7 @@ def _is_module_eligible(module_key: tuple[int, int], hardware_state: MesoscopeHa
 
     Args:
         module_key: The ``(module_type, module_id)`` pair identifying the hardware module.
-        hardware_state: The session hardware configuration to check against.
+        hardware_state: The session hardware configuration against which to check.
 
     Returns:
         True if the module is eligible for processing, False otherwise.

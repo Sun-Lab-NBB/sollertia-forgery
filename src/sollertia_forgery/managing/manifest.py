@@ -50,8 +50,8 @@ Notes:
     Each column holds 1 when every job of that pipeline succeeded and 0 otherwise, matching the numeric ``complete``
     column. The manifest answers whether a pipeline is done, and nothing finer.
 
-    Every pipeline in ``SESSION_PIPELINES`` declares a column here, since the manifest reports one per pipeline a
-    session carries a tracker for.
+    Every pipeline in ``SESSION_PIPELINES`` declares a column here, since the manifest reports one column for every
+    pipeline whose tracker a session carries.
 """
 
 _PROJECT_MANIFEST_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
@@ -157,7 +157,7 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "session": [],
                 # The session's location relative to the project root, as '<animal_id>/<session_name>'. Stored
                 # relative rather than absolute so a manifest generated on one machine resolves against any data
-                # root, which is what lets an orchestrator map a manifest row back to a directory to process.
+                # root. An orchestrator therefore maps a manifest row back to a directory to process.
                 "session_path": [],
                 # Session acquisition time as a timezone-aware UTC datetime, matching the UTC session name.
                 "date": [],
@@ -474,7 +474,7 @@ class ProjectManifest:
         1-based session index and the acquisition date truncated to the second as a timezone-aware UTC datetime.
 
         The stored ``session`` and ``date`` columns are left untouched on the underlying data, so this transformation
-        only affects the printed views and never the identifiers the other query methods resolve against.
+        only affects the printed views and never the identifiers against which the other query methods resolve.
         """
         return natural_sort(frame=self._data, by=["animal", "session"]).with_columns(
             pl.int_range(1, pl.len() + 1).over("animal").alias("session"),
@@ -559,7 +559,7 @@ def _build_session_row(
         )
         console.error(message=message, error=ValueError)
 
-    # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields the manifest
+    # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields that the manifest
     # reads (every registered descriptor declares them) need an attribute-defined ignore.
     descriptor = descriptor_class.from_yaml(file_path=session_data.raw_data.session_descriptor_path)
 
@@ -592,8 +592,8 @@ def _read_pipeline_state(
     """Reads one pipeline's processing tracker into a rolled-up status label and its per-job entries.
 
     Notes:
-        A tracker holding no jobs is reported as not started, rather than through the label the tracker resolves an
-        empty registry to, which is in progress and would read as a pipeline that has already begun.
+        A tracker holding no jobs is reported as not started, rather than through the label to which the tracker
+        resolves an empty registry, which is in progress and would read as a pipeline that has already begun.
 
     Args:
         pipeline: The pipeline whose identifier is recorded on each emitted job entry.
@@ -614,15 +614,15 @@ def _read_pipeline_state(
 
 
 def _assert_status_column_coverage() -> None:
-    """Verifies that every pipeline a session carries a tracker for declares a manifest status column.
+    """Verifies that every pipeline whose tracker a session carries declares a manifest status column.
 
     Notes:
         Runs at import, so a pipeline added to ``SESSION_PIPELINES`` without a status column here fails the moment
         this module loads rather than partway through a generation pass over a project.
 
     Raises:
-        RuntimeError: If a per-session pipeline declares no status column, or a column names a pipeline that no
-            session carries a tracker for.
+        RuntimeError: If a per-session pipeline declares no status column, or a column names a pipeline for which
+            no session carries a tracker.
     """
     declared = frozenset(_PIPELINE_STATUS_COLUMNS)
     carried = frozenset(SESSION_PIPELINES)

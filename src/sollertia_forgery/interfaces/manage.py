@@ -32,7 +32,7 @@ class _SharedManifestParameters:
     """
 
     project_path: Path | None
-    """The path to the project root data directory both subcommands operate on."""
+    """The path to the project root data directory on which both subcommands operate."""
 
     def require_project_path(self) -> Path:
         """Returns the project root path, raising a Click usage error when ``--project-path`` was not supplied."""
@@ -208,8 +208,8 @@ def print_project_manifest_data(
 def checksum_command(session_path: Path, workers: int, *, regenerate_checksum: bool, no_progress: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
-    Verifies the stored checksum by default, and recalculates it to absorb expected changes when
-    --regenerate-checksum is given.
+    Verifies the stored checksum by default, and recalculates it to absorb expected changes when --regenerate-checksum
+    is given.
     """
     run_checksum_processing_pipeline(
         session_path=session_path,
@@ -272,8 +272,8 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
 def reset_command(pipeline: str, unit_path: tuple[Path, ...], job_id: tuple[str, ...]) -> None:
     """Returns tracked jobs of the named units to the scheduled state, leaving every untargeted job's record intact.
 
-    One invocation covers every named unit, and each unit resets only the
-    identifiers it actually tracks, so a batch spanning many units costs a single call.
+    One invocation covers every named unit, and each unit resets only the identifiers it actually tracks, so a batch
+    spanning many units costs a single call.
     """
     reset = reset_tracked_jobs(pipeline=pipeline, unit_paths=unit_path, job_ids=job_id)
     console.echo(message=f"Reset {len(reset)} job(s) across {len(unit_path)} unit(s).")

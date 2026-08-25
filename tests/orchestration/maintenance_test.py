@@ -23,17 +23,17 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _VIDEO_JOBS: list[tuple[str, str]] = [("motion_energy", "face_camera"), ("camera_timestamps", "face_camera")]
-"""The video jobs every video tracker these tests write is aligned against."""
+"""The video jobs against which every video tracker written by these tests is aligned."""
 
 
 def job_identifier(job: tuple[str, str]) -> str:
     """Resolves the tracker identifier of one named job.
 
     Args:
-        job: The job name and specifier pair the tracker records the job under.
+        job: The job name and specifier pair under which the tracker records the job.
 
     Returns:
-        The hexadecimal identifier the tracker keys the job by.
+        The hexadecimal identifier by which the tracker keys the job.
     """
     return ProcessingTracker.generate_job_id(job_name=job[0], specifier=job[1])
 
@@ -69,7 +69,7 @@ def video_tracker(
     """Writes the session's video tracker holding both video jobs in the succeeded state.
 
     Args:
-        experiment_session: The session the tracker is written for.
+        experiment_session: The session for which the tracker is written.
         write_tracker: The builder that writes the tracker.
 
     Returns:

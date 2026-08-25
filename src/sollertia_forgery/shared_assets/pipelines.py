@@ -1,5 +1,5 @@
-"""Provides the pipeline-identity enumeration and resolves the processing tracker each per-session pipeline records its
-jobs on.
+"""Provides the pipeline-identity enumeration and resolves the processing tracker on which each per-session pipeline
+records its jobs.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ Notes:
 
 
 def resolve_session_tracker_path(session: SessionData, pipeline: ProcessingPipelines) -> Path:
-    """Resolves the processing tracker one per-session pipeline records its jobs on.
+    """Resolves the processing tracker on which one per-session pipeline records its jobs.
 
     Args:
         session: The loaded session whose tracker location to resolve.

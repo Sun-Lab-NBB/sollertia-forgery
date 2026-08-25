@@ -312,7 +312,7 @@ def _decompose_multiple_cue_sequences_into_trials(
 
     Args:
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session, which
-            defines the canonical trial ordering that trial_type_index refers to.
+            defines the canonical trial ordering to which trial_type_index refers.
         task_template: The VR task template supplying each trial's cue motif and length, joined by trial name.
         cue_sequences: The Virtual Reality environment cue sequences in the order they were used during runtime.
         distance_breakpoints: The cumulative distances, in centimeters, at which each sequence ends. It holds one
@@ -341,7 +341,7 @@ def _decompose_multiple_cue_sequences_into_trials(
         )
         console.error(message=message, error=ValueError)
 
-    # The experiment configuration defines the canonical trial ordering that trial_type_index refers to, and the VR
+    # The experiment configuration defines the canonical trial ordering to which trial_type_index refers, and the VR
     # task template supplies each trial's spatial geometry. The two are joined by trial name.
     trial_names = list(experiment_configuration.trial_structures.keys())
     trial_geometries = _resolve_trial_geometries(task_template=task_template, trial_names=trial_names)
@@ -365,9 +365,9 @@ def _decompose_multiple_cue_sequences_into_trials(
     maximum_trials = total_cue_length // minimum_motif_length + 1
 
     # The animal enters each corridor already 'cue_offset_cm' into its first cue, so it completes a trial after
-    # traveling that much less than the trial's corridor length. Opening the accumulator at minus the offset makes
-    # every distance below a distance traveled, which is the frame the encoder reports and the frame the corridor
-    # swap snapshots compared against below are recorded in.
+    # traveling that much less than the trial's corridor length. Opening the accumulator at minus the offset makes every
+    # distance below a distance traveled. The encoder reports that frame, and the corridor swap snapshots used in the
+    # comparison below are recorded in it.
     cue_offset = float(task_template.vr_environment.cue_offset_cm)
 
     all_trial_indices: list[int] = []
@@ -460,7 +460,7 @@ def _prepare_motif_data(
         motif_indices[index] = original_index
         current_position += length
 
-    # Holds the width the cumulative trial distance is declared and persisted at, since the accumulator that sums
+    # Holds the width at which the cumulative trial distance is declared and persisted, since the accumulator that sums
     # these lengths adopts their dtype and a narrower one drifts off the recorded value over a session's trials.
     distances_array: NDArray[np.float64] = np.array(trial_distances, dtype=np.float64)
 
@@ -539,7 +539,7 @@ def _process_trial_sequence(
 
     Args:
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session, which
-            defines the canonical trial ordering the trial_types indices refer to.
+            defines the canonical trial ordering to which the trial_types indices refer.
         task_template: The VR task template supplying each trial's cue sequence and trigger zone, the cue catalog,
             and the corridor cue offset, joined by trial name.
         trial_types: The indices used to query the trial data for each trial experienced by the animal during runtime.
@@ -580,8 +580,8 @@ def _process_trial_sequence(
         trial_geometry = trial_geometries[trial]
         trial_start_distances_list.append(previous_trial_end_distance)
 
-        # Captures the flag before the cue walk below consumes it, since the trigger zone is placed against the
-        # corridor this trial was entered into rather than against the one the walk leaves behind.
+        # Captures the flag before the cue walk below consumes it, since the trigger zone is placed against the corridor
+        # into which this trial was entered rather than against the one the walk leaves behind.
         entered_mid_cue = apply_offset_to_next_cue
 
         actual_trial_distance = trial_distances[index] - previous_trial_end_distance
@@ -613,7 +613,7 @@ def _process_trial_sequence(
 
         trigger_start_relative = trial_geometry.stimulus_trigger_zone_start_cm
         trigger_end_relative = trial_geometry.stimulus_trigger_zone_end_cm
-        # A trial entered partway into its first cue is shorter than its corridor by that offset, so every position
+        # A trial entered partway into its first cue is shorter than its corridor by that offset, so every position that
         # the template declares against the corridor is reached that much earlier in the distance traveled.
         entry_offset = cue_offset if entered_mid_cue else np.float64(0)
         trigger_start_absolute = previous_trial_end_distance + trigger_start_relative - entry_offset

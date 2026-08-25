@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _CONFIGURATION_RELATIVE_PATH: tuple[str, str] = ("configuration", "server_configuration.yaml")
-"""The working-directory-relative location the server configuration file is written to."""
+"""The working-directory-relative location to which the server configuration file is written."""
 
 
 # Tests for ServerConfiguration dataclass
@@ -130,7 +130,7 @@ def test_get_server_configuration_rejects_a_configuration_missing_one_field(
     """Verifies that a configuration filling in every field but one is refused rather than partially used.
 
     A blank root builds every server-side path relative to the login account's home directory, and a blank
-    environment runs every allocation under whatever the login shell defaults to, so a configuration missing one
+    environment runs every allocation under the login shell's own default, so a configuration missing one
     field is as unusable as one missing all of them.
     """
     fields = {

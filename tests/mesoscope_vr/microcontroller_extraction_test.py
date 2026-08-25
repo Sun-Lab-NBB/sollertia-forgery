@@ -112,7 +112,7 @@ def _data_rows(
         event_code: The axci event code every built row records.
         timestamps: The acquisition timestamps, in microseconds, of the recorded events.
         values: The per-message payload values, one for each timestamp.
-        dtype_name: The numpy dtype name the payload bytes are serialized with.
+        dtype_name: The numpy dtype name with which the payload bytes are serialized.
 
     Returns:
         The built message rows.
@@ -154,7 +154,7 @@ def _read(output_directory: Path, data_file: BehaviorDataFiles) -> pl.DataFrame:
     """Reads back one behavior feather a Mesoscope-VR module parser wrote.
 
     Args:
-        output_directory: The processed microcontroller-data directory the parser wrote into.
+        output_directory: The processed microcontroller-data directory into which the parser wrote.
         data_file: The canonical filename of the behavior feather to read.
 
     Returns:
@@ -168,10 +168,10 @@ def output_directory(experiment_session: SessionData) -> Path:
     """Creates and returns the session's processed microcontroller-data directory.
 
     Args:
-        experiment_session: The acquired Mesoscope-VR session the parsers run against.
+        experiment_session: The acquired Mesoscope-VR session against which the parsers run.
 
     Returns:
-        The created output directory every module parser writes its behavior feather into.
+        The created output directory into which every module parser writes its behavior feather.
     """
     path = experiment_session.processed_data.microcontroller_data_path
     path.mkdir(parents=True, exist_ok=True)
@@ -360,7 +360,7 @@ def test_parse_mesoscope_frame_appends_a_trailing_low_sample(
     assert result["time_us"].to_list() == [10, 20, 30, 31]
     assert result["ttl_state"].to_list() == [1, 0, 1, 0]
     # The appended sample has to carry the state column's own width, or the whole column widens to a signed 64-bit
-    # integer and the feather no longer matches the schema the pulse train is written with when it ends low.
+    # integer and the feather no longer matches the schema the pulse train carries when it ends low.
     assert result.schema["ttl_state"] == pl.UInt8
 
 
@@ -462,9 +462,8 @@ def test_parse_valve_appends_a_trailing_tone_off_sample(
     assert result["time_us"].to_list() == [5, 15, 16, 20]
     assert result["tone_state"].to_list() == [1, 1, 0, 0]
     assert result["dispensed_water_volume_uL"].to_list() == [0.0, 0.0, 0.0, pulse_volume]
-    # The appended closing sample has to carry the tone column's own width. A wider sample widens the whole column
-    # to a signed 64-bit integer, so the feather stops matching the schema a session whose tone ended on its own
-    # is written with.
+    # The appended closing sample has to carry the tone column's own width. A wider sample widens the whole column to a
+    # signed 64-bit integer, so the feather stops matching the schema of a session whose tone ended on its own.
     assert result.schema["tone_state"] == pl.UInt8
 
 

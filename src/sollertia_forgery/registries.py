@@ -105,7 +105,7 @@ class _ForgingAssemblyAsset:
     pipeline invokes it once per session.
     """
     column_descriptions: dict[str, str]
-    """The mapping from each column name the assembler can emit into ``data.feather`` to its human-readable
+    """The mapping from each column name that the assembler can emit into ``data.feather`` to its human-readable
     description. The agnostic forging pipeline bakes it into the dataset's ``data_descriptions.feather`` once, at
     dataset-definition time.
     """
@@ -174,8 +174,8 @@ _FORGING_ADMISSION_REGISTRY: dict[AcquisitionSystems, dict[SessionTypes, frozens
 }
 """Maps each acquisition system to the pipelines each of its session types must have completed before a session may
 join a forged dataset. Every pipeline resolves its own job universe from the acquisition manifests, so a completed
-tracker already accounts for every source a session recorded, which is why a system declares pipelines rather than
-source counts. A session type a system does not list joins no dataset.
+tracker already accounts for every source a session recorded. A system therefore declares pipelines rather than
+source counts. A session type absent from a system's mapping joins no dataset.
 """
 
 _CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, _CindraConfigurationAsset] = {
@@ -197,7 +197,7 @@ _MULTI_RECORDING_SESSION_TYPE_REGISTRY: dict[AcquisitionSystems, frozenset[Sessi
 Notes:
     The multi-recording resolver decides the same question per session, but answering it needs a loaded session and
     therefore the source data. Declaring the session types separately lets the forging pipeline read the answer from a
-    dataset's own recorded type, which is what keeps a dataset growing while part of its source data lives elsewhere.
+    dataset's own recorded type. A dataset therefore keeps growing while part of its source data lives elsewhere.
     A system that tracks nothing across recordings declares an empty set.
 """
 
@@ -271,7 +271,7 @@ def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dic
             ``DatasetData.acquisition_system``.
 
     Returns:
-        The mapping from each column name the system's assembly worker can emit into ``data.feather`` to its
+        The mapping from each column name that the system's assembly worker can emit into ``data.feather`` to its
         human-readable description. The agnostic forging pipeline bakes it into the dataset's
         ``data_descriptions.feather`` at dataset-definition time.
 
@@ -323,8 +323,8 @@ def resolve_multi_recording_session_types(system: str | AcquisitionSystems) -> f
     """Resolves the session types the target acquisition system tracks across recordings.
 
     Notes:
-        Answers whether a session type carries cross-recording tracking without loading a session, which the
-        multi-recording configuration resolver needs one for. A caller holding a dataset therefore reads the answer
+        Answers whether a session type carries cross-recording tracking without the loaded session that the
+        multi-recording configuration resolver requires. A caller holding a dataset therefore reads the answer
         from the dataset's own recorded session type rather than from its animals' source data.
 
     Args:
@@ -349,8 +349,9 @@ def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dic
             ``SessionData.acquisition_system``.
 
     Returns:
-        A mapping from each ``(module_type, module_id)`` pair the system parses to the tuple of event codes its parser
-        reads. The agnostic microcontroller pipeline builds every controller's extraction filter from this mapping.
+        A mapping from each ``(module_type, module_id)`` pair that the system parses to the tuple of event codes its
+        parser reads. The agnostic microcontroller pipeline builds every controller's extraction filter from this
+        mapping.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -387,7 +388,7 @@ def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tu
             ``SessionData.acquisition_system``.
 
     Returns:
-        A mapping from each ``(module_type, module_id)`` pair the system parses to its parser. The agnostic
+        A mapping from each ``(module_type, module_id)`` pair that the system parses to its parser. The agnostic
         microcontroller pipeline treats this mapping as the set of parseable modules for the session.
 
     Raises:
@@ -538,7 +539,7 @@ def _assert_registry_coverage() -> None:
             console.error(message=message, error=RuntimeError)
 
     # A system tracks across recordings only the session types it records, so a declaration naming a type outside the
-    # shared assets library's own is a typo or a stale entry rather than a type this library knows more about.
+    # shared assets library's own is a typo or a stale entry rather than a type about which this library knows more.
     for target_system, tracked_types in sorted(
         _MULTI_RECORDING_SESSION_TYPE_REGISTRY.items(), key=lambda item: item[0].name
     ):
@@ -553,9 +554,9 @@ def _assert_registry_coverage() -> None:
             console.error(message=message, error=RuntimeError)
 
     # The session types a system records are the shared assets library's to declare, so an admission entry naming a
-    # type outside that declaration is a typo or a stale entry rather than a type this library knows more about. A
-    # type the system records and this registry omits is not an error, since a session type may deliberately join no
-    # dataset.
+    # type outside that declaration is a typo or a stale entry rather than a type about which this library knows
+    # more. A type that the system records and that this registry omits is not an error, since a session type may
+    # deliberately join no dataset.
     for target_system, requirements in sorted(_FORGING_ADMISSION_REGISTRY.items(), key=lambda item: item[0].name):
         unrecorded_types = sorted(set(requirements) - SYSTEM_SESSION_TYPES[target_system])
         if unrecorded_types:

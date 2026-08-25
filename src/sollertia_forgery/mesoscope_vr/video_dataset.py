@@ -220,9 +220,9 @@ def _interpolate_linear(
     """Linearly interpolates a continuous per-frame camera value onto the reference time vector.
 
     Args:
-        frame_time: The camera's per-frame acquisition timestamps, the source clock the values are sampled at.
+        frame_time: The camera's per-frame acquisition timestamps, the source clock at which the values are sampled.
         values: The per-frame values to interpolate.
-        reference_time: The reference time vector to interpolate the values onto.
+        reference_time: The reference time vector onto which to interpolate the values.
 
     Returns:
         The interpolated values, carried at the source feather precision. A not-a-number source value propagates to

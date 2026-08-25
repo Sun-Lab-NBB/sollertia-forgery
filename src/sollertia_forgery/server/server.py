@@ -37,8 +37,8 @@ _EXPECTED_FIELD_COUNT: int = 2
 """The number of pipe-separated fields a parsable accounting or queue row carries."""
 
 _REPORTED_ERROR_CHARACTERS: int = 2000
-"""The number of characters of a failed command's error output an error message carries. A command that cannot read
-many directories reports one line per directory, which is worth naming but not worth printing whole."""
+"""The number of characters of a failed command's error output that an error message carries. A command that cannot
+read many directories reports one line per directory, which is worth naming but not worth printing whole."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
         JobStatus.BLOCKED,
     }
 )
-"""The statuses a job never leaves, which is what tells a caller a polled submission has settled.
+"""The statuses a job never leaves. Reaching one tells a caller that a polled submission has settled.
 
 Notes:
     ``UNKNOWN`` is absent, since accounting reports it for a submission it has not yet registered as well as for one
@@ -330,7 +330,7 @@ class Server:
             slurm_job_ids: The SLURM-assigned job IDs to query.
 
         Returns:
-            A dictionary mapping every requested job ID to its status. An allocation accounting does not know reports
+            A dictionary mapping every requested job ID to its status. An allocation unknown to accounting reports
             as ``UNKNOWN``.
         """
         requested = [str(job_id) for job_id in slurm_job_ids]
@@ -363,8 +363,8 @@ class Server:
         """Returns the identifiers of this user's queued allocations whose dependencies can no longer be satisfied.
 
         Notes:
-            Queries the user's whole queue, since naming an allocation the queue no longer holds makes the command
-            report an error for it.
+            Queries the user's whole queue, since naming an allocation that the queue no longer holds makes the
+            command report an error for it.
 
         Returns:
             The SLURM-assigned job IDs the queue reports as permanently blocked.
@@ -522,8 +522,8 @@ class Server:
         Notes:
             The search runs as one shell command rather than as a walk over the file-transfer protocol, which trades
             one query per directory and per candidate for a single round trip. Symbolic links are followed, and a link
-            whose target does not resolve is reported as absent, so the answer matches the one exists() gives for the
-            same path.
+            whose target does not resolve is reported as absent, so the answer matches the one that exists() gives
+            for the same path.
 
         Args:
             remote_path: The absolute path to the directory to search on the remote server.
@@ -591,8 +591,8 @@ class Server:
             if not record:
                 continue
             match = Path(record)
-            # The search echoes the directory it was given back at the head of every record, so a record that does not
-            # carry it is output the search did not produce and the answer it belongs to cannot be trusted.
+            # The search echoes the directory it was given at the head of every record, so a record that does not
+            # carry it is output that the search did not produce, and the answer containing it cannot be trusted.
             if not match.is_relative_to(remote_path):
                 message = (
                     f"Unable to search {remote_path} on the remote compute server. The search reported the entry "
@@ -607,9 +607,9 @@ class Server:
         """Executes the specified command on the remote server and returns the result.
 
         Notes:
-            Both streams are drained concurrently. They share the channel's flow-control window, so draining
-            either to its end before the other lets a command that fills that window with the stream nothing is
-            reading block forever. This call then waits on output the command cannot finish writing.
+            Both streams are drained concurrently. They share the channel's flow-control window, so draining either
+            to its end before the other lets a command fill that window with the unread stream and block forever.
+            This call then waits on output the command cannot finish writing.
 
         Args:
             command: The shell command to execute on the remote server.

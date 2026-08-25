@@ -1,4 +1,4 @@
-"""Contains tests for the import-time donor-registry coverage check and the resolver guarantees it underwrites."""
+"""Contains tests for the import-time donor-registry coverage check and the resolver guarantees that it underwrites."""
 
 from __future__ import annotations
 
@@ -52,18 +52,18 @@ _DONOR_REGISTRY_NAMES: tuple[str, ...] = (
     "_FORGING_ADMISSION_REGISTRY",
     "_MICROCONTROLLER_PARSER_REGISTRY",
 )
-"""Every registry an acquisition system donates to, each of which the import-time check must cover."""
+"""Every registry to which an acquisition system donates, each of which the import-time check must cover."""
 
 
 def test_an_unknown_acquisition_system_is_rejected_with_a_value_error():
-    """Verifies the eligibility resolver reports an unsupported identifier as the ValueError its docstring documents."""
+    """Verifies that the eligibility resolver reports an unsupported identifier as its documented ValueError."""
     session = SimpleNamespace(session_name="2026-01-02-03-04-05-000006")
     with pytest.raises(ValueError, match="Unable to resolve the acquisition system"):
         resolve_eligible_microcontroller_modules(system="not-a-system", session=session)
 
 
 def test_every_acquisition_system_donates_an_eligibility_accessor():
-    """Verifies a registered system resolves through the eligibility registry instead of reaching a bare KeyError."""
+    """Verifies that a registered system resolves through the eligibility registry instead of reaching KeyError."""
     assert set(_MICROCONTROLLER_ELIGIBILITY_REGISTRY) == set(AcquisitionSystems)
 
 
@@ -91,7 +91,7 @@ def test_a_parseable_module_that_declares_no_event_codes_fails_the_check(monkeyp
 
 def test_admitting_a_session_type_the_system_does_not_record_fails_the_check(monkeypatch):
     """Verifies that the shared assets library declares which session types a system records, so an admission entry
-    naming a type outside that declaration is a stale entry rather than a system this library knows more about.
+    naming a type outside that declaration is a stale entry rather than a system about which this library knows more.
     """
     monkeypatch.setattr(
         "sollertia_forgery.registries._FORGING_ADMISSION_REGISTRY",
@@ -111,8 +111,7 @@ def test_admitting_a_session_type_the_system_does_not_record_fails_the_check(mon
 
 def test_tracking_a_session_type_the_system_does_not_record_fails_the_check(monkeypatch):
     """Verifies that the cross-recording declaration answers whether a dataset needs multi-day plans without loading a
-    session, so a type outside the shared assets library's own declaration would quietly change what a dataset is
-    planned for.
+    session, so a type outside the shared assets library's own declaration would quietly change a dataset's plan.
     """
     monkeypatch.setattr(
         "sollertia_forgery.registries._MULTI_RECORDING_SESSION_TYPE_REGISTRY",
@@ -129,8 +128,8 @@ def test_tracking_a_session_type_the_system_does_not_record_fails_the_check(monk
 
 
 def test_every_cross_recording_session_type_is_one_the_system_records():
-    """Verifies that a dataset's recorded session type is matched against this set, so a type the system never records
-    would make the answer unreachable rather than merely wrong.
+    """Verifies that a dataset's recorded session type is matched against this set, so a type that the system never
+    records would make the answer unreachable rather than merely wrong.
     """
     tracked = resolve_multi_recording_session_types(system=AcquisitionSystems.MESOSCOPE_VR)
 

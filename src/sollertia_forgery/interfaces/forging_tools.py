@@ -1,5 +1,5 @@
-"""Provides the Model Context Protocol (MCP) tools for defining the dataset hierarchy a forging batch runs against and
-for snapshotting the state of its forging jobs.
+"""Provides the Model Context Protocol (MCP) tools for defining the dataset hierarchy against which a forging batch runs
+and for snapshotting the state of its forging jobs.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ _DATASET_SEMI_FIELDS: tuple[str, ...] = (
 counts, since reading them opens one stored table per dataset."""
 
 _STATE_AXES: tuple[str, ...] = ("scope", "animal", "job_name", "status")
-"""The snapshot columns a caller may filter by, and the axes its breakdown counts."""
+"""The snapshot columns by which a caller may filter, and the axes its breakdown counts."""
 
 _STATE_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "scope", "job_name", "specifier", "status", "job_id")
 """The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset
@@ -82,10 +82,10 @@ def define_forging_dataset_tool(
     case for sessions carrying two-photon imaging data. The configuration file carries the recording set, the
     qualified dataset name, and the progress flag.
 
-    Provided sessions the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
-    animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged
-    for the sessions it keeps. Name that animal in ``recreate_animals`` to rebuild it from the provided sessions
-    while every other animal keeps its data, which also returns that animal's tracked jobs to the scheduled state.
+    Provided sessions that the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
+    animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged for
+    the sessions it keeps. Name that animal in ``recreate_animals`` to rebuild it from the provided sessions while every
+    other animal keeps its data, which also returns that animal's tracked jobs to the scheduled state.
 
     Args:
         project_path: The path to the project's root directory holding the animal and session data directories. The
@@ -101,9 +101,9 @@ def define_forging_dataset_tool(
             provided session list. Mutually exclusive with ``recreate_animals``.
 
     Returns:
-        A response dict with the ``dataset_name``, the ``dataset_path`` the hierarchy was built at, the
-        ``tracker_path`` its jobs record on, the ``session_count`` and ``animal_count`` the dataset now holds, and
-        the ``animals`` it covers. Returns an error when the resolution policy rejects the request.
+        A response dict with the ``dataset_name``, the ``dataset_path`` at which the hierarchy was built, the
+        ``tracker_path`` recording its jobs, the ``session_count`` and ``animal_count`` the dataset now holds, and the
+        ``animals`` it covers. Returns an error when the resolution policy rejects the request.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -240,7 +240,7 @@ def read_dataset_state_tool(
         status: Restricts the listing to one tracker status, such as ``FAILED``.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
         detailed: Determines whether the listed jobs carry the executor, timestamps, and error text.
 
@@ -331,7 +331,7 @@ def list_project_datasets_tool(
         animal: The animal identifier to restrict the listing to the datasets holding it.
         limit: The datasets to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         detailed: Determines whether each listed dataset reports its animals and its job counts by status, read from
             its state snapshot.
 

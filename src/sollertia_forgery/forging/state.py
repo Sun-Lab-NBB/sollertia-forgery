@@ -1,4 +1,4 @@
-"""Provides the dataset state artifact that serializes every forging job the dataset's tracker records into one
+"""Provides the dataset state artifact that serializes every forging job recorded by the dataset's tracker into one
 shippable table.
 """
 
@@ -97,7 +97,7 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
             reads a single tracker, so no progress bar is displayed.
 
     Returns:
-        The path the state artifact was written to.
+        The path to which the state artifact was written.
 
     Raises:
         Timeout: If the state file's lock cannot be acquired within the timeout period.
@@ -159,8 +159,8 @@ def _build_job_rows(dataset: DatasetData) -> list[dict[str, str | int | None]]:
     if unscoped:
         message = (
             f"Unable to serialize the state of dataset '{dataset.name}'. Its forging tracker records job name(s) "
-            f"{unscoped}, which declare no scope. Every forging job name must declare the unit its specifier names "
-            f"in _DATASET_JOB_SCOPES."
+            f"{unscoped}, which declare no scope. Every forging job name must declare, in _DATASET_JOB_SCOPES, the "
+            f"unit that its specifier names."
         )
         console.error(message=message, error=ValueError)
 

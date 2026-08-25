@@ -1,5 +1,5 @@
-"""Contains tests for the resource narrowing the generic processing tools apply to a local batch before they dispatch
-it.
+"""Contains tests for the resource narrowing that the generic processing tools apply to a local batch before they
+dispatch it.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 _MEMORY_BUDGET_MB: int = 16_384
-"""The memory budget every staged batch runs against, kept far above what its jobs ask for so the core terms alone
-decide the outcome."""
+"""The memory budget against which every staged batch runs, kept far above what its jobs request so the core terms
+alone decide the outcome."""
 
 
 # Helpers
@@ -69,7 +69,7 @@ def _make_job(job_id: str, cores: int, job_name: str = CAMERA_EXTRACTION_JOB_NAM
     """Builds one dispatchable job carrying the width its own sizing pass gave it.
 
     Args:
-        job_id: The identifier the tracker records the job under.
+        job_id: The identifier under which the tracker records the job.
         cores: The cores the sizing pass chose for this particular job.
         job_name: The job type name, which is what groups this job with the others of its type.
 
@@ -115,11 +115,11 @@ def staged_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     keeps a staged batch from being mistaken for a live one.
 
     Args:
-        monkeypatch: The fixture used to replace each dependency the dispatch path reaches for.
+        monkeypatch: The fixture used to replace each dependency that the dispatch path uses.
     """
 
     def _honor_request(requested_workers: int, reserved_cores: int) -> int:
-        """Answers with the budget the caller asked for, whatever the host running the test holds."""
+        """Answers with the budget the caller requested, whatever the host running the test holds."""
         return requested_workers
 
     monkeypatch.setattr(processing_tools, "Thread", _IdleThread)
@@ -187,9 +187,9 @@ def test_a_job_wider_than_the_host_is_capped_while_a_narrow_one_is_left_alone(st
 
 
 def test_a_zero_width_job_is_floored_at_one_core_rather_than_widened_to_its_type(staged_batch: None) -> None:
-    """Verifies that a width the plan artifact records as non-positive would leave admission with no core term at all,
-    so the dispatch floor of one core stands whatever the descriptor carries. The floor is the job's own and not its
-    type's, which is what a zero-width job sharing a type with a wide one shows.
+    """Verifies that a non-positive width in the plan artifact would leave admission with no core term at all, so the
+    dispatch floor of one core stands whatever the descriptor carries. The floor is the job's own and not its type's,
+    which is what a zero-width job sharing a type with a wide one shows.
     """
     empty = _make_job(job_id="empty", cores=0)
     wide = _make_job(job_id="wide", cores=8)
@@ -201,6 +201,6 @@ def test_a_zero_width_job_is_floored_at_one_core_rather_than_widened_to_its_type
     # The type is still represented by its widest job, so the floor applied to the zero-width one leaves the reported
     # allocation alone.
     assert response["job_allocations"][CAMERA_EXTRACTION_JOB_NAME]["cores_per_job"] == 8
-    # The pool follows the narrowest job the batch ended up with, which is the floored one rather than the type's
+    # The pool follows the narrowest job that the batch holds, which is the floored one rather than the type's
     # reported width. A run that widened the zero-width job onto its type would spawn a single worker here.
     assert response["pool_size"] == 2

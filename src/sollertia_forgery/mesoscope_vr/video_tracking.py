@@ -58,8 +58,8 @@ _LIKELIHOOD_THRESHOLD: float = 0.8
 The gate stays high because the labeled-angle fit trusts each surviving point's ring identity, so a mislabeled
 low-confidence point biases the ellipse directly rather than averaging out. It stays off the top of the band because
 the eye ring carries four points against a three-point minimum, leaving it one point of redundancy. A gate that
-rejects a merely borderline point costs the whole eye fit, and with it the openness a squinting eye is read from. It
-applies uniformly to the pupil ring, the eye ring, and the corneal reflection."""
+rejects a merely borderline point costs the whole eye fit, and with it the openness from which a squinting eye is read.
+It applies uniformly to the pupil ring, the eye ring, and the corneal reflection."""
 
 _MINIMUM_PERIMETER_POINTS: int = 3
 """The number of a feature's ring points that must clear the likelihood threshold for its ellipse to be determined.
@@ -67,10 +67,10 @@ Each point's ring position fixes its parametric angle, so three points supply si
 unknowns regardless of where on the ring they sit."""
 
 _MAXIMUM_FIT_CONDITION: float = 12.0
-"""The largest condition number a feature's ellipse fit may have and still be trusted. The condition number measures
-how far the surviving arc must reach to pin the rest of the ellipse. The cap sits at the worst value a
-minimally-determined three-point fit on an evenly spaced ring produces, so it admits every fit the pupil and eye rings
-produce and guards a ring that samples the ellipse less evenly."""
+"""The largest condition number a feature's ellipse fit may have and still be trusted. The condition number measures how
+far the surviving arc must reach to pin the rest of the ellipse. The cap sits at the worst value produced by a
+minimally-determined three-point fit on an evenly spaced ring, so it admits every fit the pupil and eye rings produce
+and guards a ring that samples the ellipse less evenly."""
 
 _BLINK_FRACTION: float = 0.5
 """The fraction of the session-median eye openness below which a frame is flagged as a blink."""
@@ -87,12 +87,12 @@ class PupilColumn(StrEnum):
     """Defines every column written into the Mesoscope-VR pupil-tracking feather by the donated video-tracking worker.
 
     Notes:
-        Positions and lengths are expressed in the face camera's pixel coordinate frame (``_px``), matching the frame
-        DeepLabCut reports its predictions in, and are never converted to physical units: the camera is not calibrated
-        against a physical scale. Dimensionless ratios and flags carry no unit suffix.
+        Positions and lengths are expressed in the face camera's pixel coordinate frame (``_px``), matching the frame in
+        which DeepLabCut reports its predictions, and are never converted to physical units: the camera is not
+        calibrated against a physical scale. Dimensionless ratios and flags carry no unit suffix.
 
-        Every geometric column is NaN on frames whose feature kept too few confident points to fit, so consumers see
-        NaN rather than a confidently-wrong ellipse. For the pupil columns those frames are exactly the ones
+        Every geometric column is NaN on frames whose feature kept too few confident points to fit, so consumers see NaN
+        rather than a confidently-wrong ellipse. For the pupil columns those frames are exactly the ones that
         ``blinking_state`` and ``dilation_state`` flag. The eye columns answer only to their own fit, so they stay
         populated on a blink flagged by low openness or by a lost corneal reflection.
     """
@@ -192,8 +192,8 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     Args:
         session: The loaded session whose pupil DLC predictions are post-processed. Its raw camera_data directory
             supplies the DLC ``.h5``.
-        output_directory: The processed video-data directory (``session.processed_data.video_data_path``) the pupil
-            feather is written into.
+        output_directory: The processed video-data directory (``session.processed_data.video_data_path``) into which
+            the pupil feather is written.
 
     Raises:
         ValueError: If a DLC ``.h5`` is present but is missing a canonical bodypart or has an unrecognized layout.
@@ -318,9 +318,9 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
         eye_height, eye_width, out=np.full_like(a=eye_height, fill_value=np.nan), where=eye_width > 0.0
     )
 
-    # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline to compare
-    # against. Resolves to NaN and the openness term drops out of the flag below, leaving the eye's visibility
-    # to carry it.
+    # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline against which to
+    # compare. Resolves to NaN and the openness term drops out of the flag below, leaving the eye's visibility to carry
+    # it.
     confident_openness = eye_openness[eye_fit.valid]
     baseline = float(np.nanmedian(confident_openness)) if np.isfinite(confident_openness).any() else np.nan
 
@@ -439,7 +439,7 @@ def _fit_ring_ellipse(points: dict[str, NDArray[np.float64]], names: tuple[str, 
 
     # Frames that lost the same points share a design matrix, and therefore a conditioning verdict, so each distinct
     # occlusion pattern is solved once for every frame that carries it. Packing each frame's confidence mask into one
-    # integer code groups the patterns with a fast 1-D unique, avoiding the void-row lexsort np.unique(..., axis=0)
+    # integer code groups the patterns with a fast 1-D unique, avoiding the void-row lexsort that np.unique(..., axis=0)
     # would run over the whole (frame_count, point_count) mask.
     codes = confident.astype(np.int64) @ (1 << np.arange(len(names), dtype=np.int64))
     _, representatives, inverse = np.unique(codes, return_index=True, return_inverse=True)

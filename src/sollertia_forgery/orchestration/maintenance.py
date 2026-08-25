@@ -19,7 +19,7 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
 
     Notes:
         Resolves each tracker from its unit rather than taking a path, so a caller names what it wants to be reset
-        without knowing where the record sits. Identifiers a unit does not track are dropped, because a tracker
+        without knowing where the record sits. Identifiers that a unit does not track are dropped, because a tracker
         rejects a request naming a job it does not hold and would then reset nothing at all.
 
         Every named identifier is applied to every named unit. A job identifier is derived from the job name and the
@@ -34,8 +34,8 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
         job_ids: The identifiers to reset, or empty to reset every job each unit tracks.
 
     Returns:
-        The identifiers that were reset, which repeats an identifier held by more than one unit. Naming a pipeline the
-        dispatch table does not support returns nothing.
+        The identifiers that were reset, which repeats an identifier held by more than one unit. Naming a pipeline
+        that the dispatch table does not support returns nothing.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     if dispatch is None:
@@ -80,8 +80,8 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
         unit_paths: The processing units to clean.
 
     Returns:
-        One entry per removed path, carrying the ``path`` and the ``removed_bytes`` it held. Naming a pipeline the
-        dispatch table does not support removes nothing.
+        One entry per removed path, carrying the ``path`` and the ``removed_bytes`` it held. Naming a pipeline that
+        the dispatch table does not support removes nothing.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     if dispatch is None:
@@ -98,8 +98,8 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
             )
             continue
 
-        # The tracker is a file and the directory a pipeline owns is a directory, so the two are removed on their own
-        # terms rather than through one branch that would have to ask which it was handed.
+        # The tracker is a file and the directory that a pipeline owns is a directory, so the two are removed on
+        # their own terms rather than through one branch that would have to ask which it was handed.
         tracker_path = dispatch.tracker_path(unit)
         if tracker_path.exists():
             removed.append({"path": str(tracker_path), "removed_bytes": _resolve_path_size(path=tracker_path)})

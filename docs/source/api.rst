@@ -10,7 +10,7 @@ Dataset Forging
    :show-inheritance:
 
 .. Documents the package constants explicitly, since the automodule directive above discovers module-level data
-   through the source of the module it documents and therefore skips a constant this package re-exports. Each
+   through the source of the module it documents, and therefore skips a constant that this package re-exports. Each
    directive names the defining module rather than the re-exporting package, because autodoc reads the attribute
    docstring from that module's source and otherwise falls back to the docstring of the value's own type.
 .. autodata:: sollertia_forgery.forging.state.DATASET_STATE_FILENAME
@@ -128,7 +128,7 @@ Mesoscope-VR Assets
    :undoc-members:
    :show-inheritance:
 
-.. Documents the column enumerations explicitly, since each names the columns a forged dataset carries and the
+.. Documents the column enumerations explicitly, since each names the columns carried by a forged dataset, and the
    automodule directive above reaches only what the package re-exports.
 .. autoclass:: sollertia_forgery.mesoscope_vr.metadata.DatasetColumn
    :members:

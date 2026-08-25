@@ -24,10 +24,10 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _DATASET_NAME: str = "Learning"
-"""The unqualified dataset name the assembler resolves the multi-recording cindra directory from."""
+"""The unqualified dataset name from which the assembler resolves the multi-recording cindra directory."""
 
 _FRAME_COUNT: int = 24
-"""The number of mesoscope frames cindra reports, which the TTL pulse alignment is reconciled against."""
+"""The number of mesoscope frames cindra reports, against which the TTL pulse alignment is reconciled."""
 
 _ROI_COUNT: int = 5
 """The number of regions of interest the single-recording cindra output holds before the cell filter is applied."""
@@ -96,7 +96,7 @@ _FLUORESCENCE_COLUMNS: frozenset[str] = frozenset(
         "multi_day_spikes",
     }
 )
-"""The columns the fluorescence sub-dataset contributes, including the reference clock the others align to."""
+"""The columns the fluorescence sub-dataset contributes, including the reference clock to which the others align."""
 
 _BEHAVIOR_COLUMNS: frozenset[str] = frozenset(
     {"brake", "screens", "torque_N_cm", "distance_cm", "speed_cm_s", "lick", "water_uL", "reward", "system_state"}
@@ -278,8 +278,8 @@ def _write_runtime_sources(session: SessionData) -> None:
 def _build_extraction(roi_count: int, is_cell: Sequence[int] | None = None) -> ExtractionData:
     """Builds the cindra extraction record the fluorescence assembly reads back.
 
-    Every trace array counts up from zero in row-major order, so a value pins both the region of interest it came from
-    and the frame it was sampled at, and the per-array offset keeps the four distinguishable.
+    Every trace array counts up from zero in row-major order, so a value pins the region of interest and the frame that
+    produced it, and the per-array offset keeps the four distinguishable.
 
     Args: roi_count: The number of region rows every trace array carries. is_cell: The per-region cell label, one entry
     per row, or None for a record carrying no classification.
@@ -304,7 +304,7 @@ def _write_cindra_outputs(session: SessionData) -> None:
     """Writes the single-recording and multi-recording cindra arrays the fluorescence assembly reads.
 
     Notes: Both directories are written through cindra's own writers, so the arrays and the combined metadata archive
-    the assembler reads back are the ones cindra's stages publish.
+    that the assembler reads back are the ones cindra's stages publish.
 
     Args: session: The loaded experiment session whose cindra directories receive the arrays.
     """
@@ -359,7 +359,7 @@ def prepared_experiment_session(experiment_session: SessionData) -> SessionData:
     """Builds a fully processed mesoscope experiment session carrying every input the experiment assembler reads.
 
     Args:
-        experiment_session: The acquired experiment session the processed outputs are written under.
+        experiment_session: The acquired experiment session that receives the processed outputs.
 
     Returns:
         The same session, now holding its microcontroller, runtime, cindra, and video outputs.
@@ -377,7 +377,7 @@ def assembled_experiment(prepared_experiment_session: SessionData, tmp_path: Pat
 
     Args:
         prepared_experiment_session: The session holding every processed input.
-        tmp_path: The temporary directory the forged dataset is written under.
+        tmp_path: The temporary directory that receives the forged dataset.
 
     Returns:
         The assembled data feather.
@@ -419,7 +419,7 @@ def test_assemble_experiment_dataset_keeps_only_the_classified_cells(assembled_e
 
     assert single_traces.shape == (len(retained), _CELL_COUNT)
     assert multi_traces.shape == (len(retained), _MULTI_ROI_COUNT)
-    # The traces count up in row-major order, so a value names the region of interest and the frame it came from.
+    # The traces count up in row-major order, so a value names the region of interest and the frame that produced it.
     expected_single = [float(roi * _FRAME_COUNT + retained[0]) for roi in (0, 2, 3)]
     assert single_traces[0].tolist() == expected_single
     expected_multi = [float(roi * _FRAME_COUNT + retained[0] + 3) for roi in range(_MULTI_ROI_COUNT)]

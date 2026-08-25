@@ -1,4 +1,4 @@
-"""Provides the shared MCP server instance that the interface tool modules register their tools on."""
+"""Provides the shared MCP server instance on which the interface tool modules register their tools."""
 
 from __future__ import annotations
 

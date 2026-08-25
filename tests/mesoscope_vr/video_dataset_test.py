@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _CLOCK_ORIGIN: int = 1_700_000_000_000_000
-"""The microsecond epoch every synthetic camera clock starts at."""
+"""The microsecond epoch at which every synthetic camera clock starts."""
 
 
 def _clock(*offsets_us: int) -> NDArray[np.uint64]:
@@ -87,10 +87,10 @@ def _write_pupil(path: Path, diameter: Sequence[float], blinking: Sequence[bool]
 
 @pytest.fixture
 def video_data_path(tmp_path: Path) -> Path:
-    """Creates the processed video-data directory the assembler and the clock resolver read.
+    """Creates the processed video-data directory read by the assembler and the clock resolver.
 
     Args:
-        tmp_path: The temporary directory the video-data directory is created under.
+        tmp_path: The temporary directory under which the video-data directory is created.
 
     Returns:
         The created directory path.
@@ -293,8 +293,8 @@ def test_resolve_slowest_camera_clock_rejects_a_clock_whose_frames_run_backwards
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
     # The timestamps are unsigned, so an out-of-order feather's endpoint difference wraps to a span of roughly six
-    # hundred thousand years. That reads as the slowest camera in the session and would be handed back as the
-    # reference clock every other data source is interpolated onto, so the span is measured in floating point.
+    # hundred thousand years. That reads as the slowest camera in the session and would be handed back as the reference
+    # clock onto which every other data source is interpolated, so the span is measured in floating point.
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(5000, 1000))
 
     with pytest.raises(FileNotFoundError, match=re.escape("spanning a positive duration")):

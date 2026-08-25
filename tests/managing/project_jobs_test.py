@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from sollertia_forgery.shared_assets import ProcessingPipelines
 
 _SUBJECT_COLUMNS: tuple[str, ...] = ("animal", "session")
-"""The columns that identify which session recorded a job row, and the keys the manifest joins against."""
+"""The columns that identify which session recorded a job row, and the keys against which the manifest joins."""
 
 
 def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
@@ -33,8 +33,8 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
     this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
 
-    Args: _frame: The frame the writer was called on, which this stand-in never serializes. file: The open file object
-    the artifact is written to. **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args: _frame: The frame handed to the writer, which this stand-in never serializes. file: The open file object
+    receiving the artifact. **_keywords: The serialization options the caller passed, which this stand-in ignores.
 
     Raises: RuntimeError: Always, standing in for a writer that dies partway through.
     """
@@ -124,7 +124,7 @@ def test_the_written_rows_order_every_identifier_the_way_it_is_written(tmp_path:
     """Verifies that the rows place animal 2 ahead of animal 10 and specifier 2 ahead of specifier 10.
 
     The animal and the specifier are numbers held as text, so ordering the rows as plain text would put 10 ahead of 2
-    and leave this artifact disagreeing with the manifest a reader joins it against.
+    and leave this artifact disagreeing with the manifest against which a reader joins it.
     """
     rows: list[dict[str, str | None]] = [
         {"animal": "10", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "10"},

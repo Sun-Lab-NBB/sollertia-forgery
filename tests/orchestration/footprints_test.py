@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 _WORKER_ONLY_MB: int = _apply_tolerance(memory_mb=WORKER_MEMORY_MB)
-"""The memory a stage holding one worker and nothing besides is charged, which is the whole model for a job that
+"""The memory charged to a stage holding one worker and nothing besides, which is the whole model for a job that
 reads no input of its own."""
 
 _PARALLEL_ARCHIVE_MESSAGES: int = 35_000
@@ -89,17 +89,17 @@ _PARALLEL_ARCHIVE_MESSAGES: int = 35_000
 The video library carries the higher of the two message thresholds, so an archive this size clears both."""
 
 _FRAME_HEIGHT: int = 300
-"""The line count of one unsliced acquisition frame the synthetic imaging stacks carry."""
+"""The line count of one unsliced acquisition frame that the synthetic imaging stacks carry."""
 
 _FRAME_WIDTH: int = 64
 """The pixel width of one acquisition frame, shared by every plane the conversion stage slices out."""
 
 _REGION_LINES: list[list[int]] = [[1, 100], [101, 300], []]
-"""The per-region line spans the synthetic acquisition parameters declare. The parameters name no roi_number, so
+"""The per-region line spans declared by the synthetic acquisition parameters. The parameters name no roi_number, so
 cindra reads the recording as single-region and discards every span."""
 
 _SAMPLING_RATE: float = 10.0
-"""The volume acquisition rate the synthetic acquisition parameters declare, from which cindra derives a per-plane
+"""The volume acquisition rate declared by the synthetic acquisition parameters, from which cindra derives a per-plane
 rate of half this figure across the two declared planes."""
 
 _CHECKSUM_READER_MEMORY_MB: int = 285
@@ -114,12 +114,12 @@ _ASSEMBLY_WRITE_COPIES: int = 1
 """The copies of the assembled fluorescence volume the same model charges at the write, anchored on the same terms."""
 
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
-"""The memory the same model charges the behavior, runtime, and video sub-datasets per sample of the clock they are
-placed on, anchored on the same terms."""
+"""The memory the same model charges the behavior, runtime, and video sub-datasets per sample of the clock on which
+they are placed, anchored on the same terms."""
 
 
 def write_surgery_metadata(session: SessionData, genotype: str = "GP5.17") -> Path:
-    """Writes the surgery metadata the Mesoscope-VR cindra resolvers read an animal's genotype from.
+    """Writes the surgery metadata from which the Mesoscope-VR cindra resolvers read an animal's genotype.
 
     Args:
         session: The session whose raw data receives the metadata file.
@@ -161,7 +161,7 @@ def write_acquisition_parameters(directory: Path, *, region_lines: list[list[int
     """Writes a cindra acquisition parameters file describing the synthetic recording's shape.
 
     Args:
-        directory: The raw imaging directory the file is written into.
+        directory: The raw imaging directory into which the file is written.
         region_lines: The per-region line spans to declare, or None to declare none at all.
 
     Returns:
@@ -180,7 +180,7 @@ def write_imaging_stack(directory: Path, name: str, pages: int) -> Path:
     """Writes one multi-page acquisition image whose header reports the synthetic recording's frame shape.
 
     Args:
-        directory: The raw imaging directory the image is written into.
+        directory: The raw imaging directory into which the image is written.
         name: The filename to write, including its extension.
         pages: The number of pages the image holds.
 
@@ -198,7 +198,7 @@ def write_raw_imaging(session: SessionData, *, region_lines: list[list[int]] | N
 
     Args:
         session: The session whose raw data receives the imaging directory.
-        region_lines: The per-region line spans the parameters declare.
+        region_lines: The per-region line spans declared by the parameters.
 
     Returns:
         The path to the raw imaging directory.
@@ -216,9 +216,9 @@ def write_trace_array(path: Path, shape: tuple[int, ...], *, version: tuple[int,
     """Writes an array whose header alone reports the extents the estimators read.
 
     Args:
-        path: The path to write the array to.
+        path: The path to which the array is written.
         shape: The extents the header reports.
-        version: The array format version the header is written under.
+        version: The array format version under which the header is written.
 
     Returns:
         The path to the written array.
@@ -230,10 +230,10 @@ def write_trace_array(path: Path, shape: tuple[int, ...], *, version: tuple[int,
 
 
 def write_combined_metadata(directory: Path, *, height: int, width: int) -> Path:
-    """Writes the cindra archive reporting the combined field extent every multi-day stage works at.
+    """Writes the cindra archive reporting the combined field extent at which every multi-day stage works.
 
     Args:
-        directory: The processed output directory the archive is written into.
+        directory: The processed output directory into which the archive is written.
         height: The combined field height in pixels.
         width: The combined field width in pixels.
 
@@ -249,7 +249,7 @@ def write_combined_metadata(directory: Path, *, height: int, width: int) -> Path
 def write_processed_recording(
     session: SessionData, *, regions: int, samples: int, height: int = 128, width: int = 96
 ) -> Path:
-    """Writes the single-recording outputs a dataset job's estimate is sized from.
+    """Writes the single-recording outputs from which a dataset job's estimate is sized.
 
     Args:
         session: The session whose processed data receives the outputs.
@@ -273,7 +273,7 @@ def build_dataset(
     """Creates a forged dataset hierarchy naming the given sessions, through the shared hierarchy's own creator.
 
     Args:
-        project_root: The project root the dataset is created under, which is where its sessions are resolved from.
+        project_root: The project root under which the dataset is created and from which its sessions are resolved.
         name: The dataset name.
         sessions: The acquired sessions the dataset covers.
         session_type: The session type every covered session shares.
@@ -298,7 +298,7 @@ def two_photon_estimates(session: SessionData, jobs: list[tuple[str, str, int]])
     """Sizes the named two-photon jobs of one session.
 
     Args:
-        session: The session the jobs operate on.
+        session: The session on which the jobs operate.
         jobs: The jobs as name, specifier, and declared core triples.
 
     Returns:
@@ -308,13 +308,13 @@ def two_photon_estimates(session: SessionData, jobs: list[tuple[str, str, int]])
 
 
 def camera_library_footprint(archive: Path) -> JobFootprint:
-    """Reports the footprint the video library's own sizing pass gives one archive, at the scale slf reports it on.
+    """Reports the footprint the video library's own sizing pass gives one archive, at slf's scale.
 
     Args:
         archive: The log archive the extraction job reads.
 
     Returns:
-        The library's cores and its memory, rounded up to the whole gigabyte every estimate lands on.
+        The library's cores and its memory, rounded up to the whole gigabyte on which every estimate lands.
     """
     sizing = size_camera_extraction_job(archive_path=archive)
     return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
@@ -327,7 +327,7 @@ def controller_library_footprint(archive: Path) -> JobFootprint:
         archive: The log archive the extraction job reads.
 
     Returns:
-        The library's cores and its memory, rounded up to the whole gigabyte every estimate lands on.
+        The library's cores and its memory, rounded up to the whole gigabyte on which every estimate lands.
     """
     sizing = size_controller_extraction_job(archive_path=archive)
     return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
@@ -339,12 +339,12 @@ def cindra_single_recording_footprint(
     """Reports the footprint cindra's own sizing pass gives one single-recording stage, at slf's scale.
 
     Args:
-        session: The session the job operates on.
+        session: The session on which the job operates.
         job_name: The cindra stage the job runs.
         specifier: The job's tracker specifier, which names a plane for the per-plane stages.
 
     Returns:
-        cindra's own width for the stage and its memory, rounded up to the whole gigabyte every estimate lands on.
+        cindra's own width for the stage and its memory, rounded up to the whole gigabyte on which every estimate lands.
     """
     resolve_configuration = resolve_single_recording_configuration_resolver(system=session.acquisition_system)
     locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
@@ -365,12 +365,12 @@ def cindra_multi_recording_footprint(
 
     Args:
         dataset: The dataset whose acquisition system donates the multi-recording configuration.
-        sessions: The sessions whose cindra output directories the stage spans.
+        sessions: The sessions whose cindra output directories are spanned by the stage.
         job_name: The cindra stage the job runs.
         specifier: The job's tracker specifier, naming a session for extraction and an animal for discovery.
 
     Returns:
-        cindra's own width for the stage and its memory, rounded up to the whole gigabyte every estimate lands on.
+        cindra's own width for the stage and its memory, rounded up to the whole gigabyte on which every estimate lands.
     """
     resolve_configuration = resolve_multi_recording_configuration_resolver(system=dataset.acquisition_system)
     sizing = size_multi_recording_job(
@@ -439,7 +439,7 @@ def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
         memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + 4 * (per_reader + SPAWNED_CHILD_MEMORY_MB)),
     )
     # The extraction stage belongs to the communication library, so both halves of its figure are that library's own
-    # sizing pass, with the memory rounded to the gigabyte every reportable estimate lands on.
+    # sizing pass, with the memory rounded to the gigabyte on which every reportable estimate lands.
     assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "51"] == controller_library_footprint(archive=archive)
 
 
@@ -517,9 +517,9 @@ def test_an_extraction_job_is_sized_at_the_width_its_own_archive_earns(
 def test_an_archive_above_the_parallel_threshold_earns_each_librarys_declared_width(
     experiment_session: SessionData, write_log_archive: Callable[..., Path]
 ) -> None:
-    """Verifies that an archive dense enough to repay a pool earns the allocation the library that owns the stage
-    declares, and the memory that comes back is the memory of that width rather than of the width this package asked
-    for.
+    """Verifies that an archive dense enough to repay a pool earns the allocation declared by the library that owns
+    the stage, and the memory that comes back is the memory of that width rather than of the width this package
+    requested.
     """
     archive = write_log_archive(
         experiment_session.raw_data.behavior_data_path.joinpath("77_log.npz"),
@@ -565,8 +565,8 @@ def test_a_parse_estimate_follows_the_widest_archive_in_the_behavior_directory(
 def test_a_parse_estimate_is_refused_when_the_behavior_directory_holds_no_archive(
     experiment_session: SessionData,
 ) -> None:
-    """Verifies that a directory carrying no candidate file states nothing the stage scales with, so the job is refused
-    rather than planned at a guess.
+    """Verifies that a directory carrying no candidate file states nothing with which the stage scales, so the job is
+    refused rather than planned at a guess.
     """
     experiment_session.raw_data.behavior_data_path.mkdir(parents=True, exist_ok=True)
 
@@ -649,7 +649,7 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     experiment_session: SessionData,
 ) -> None:
     """Verifies that a session carrying no camera directory reports no frame, which leaves motion energy on the per-core
-    decoder and child cost its model charges whatever the recording holds, and pose tracking on one worker.
+    decoder and child cost that its model charges whatever the recording holds, and pose tracking on one worker.
     """
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(ENERGY_JOB_NAME, "51", 16)]
@@ -759,7 +759,7 @@ def test_a_plane_job_whose_specifier_names_no_plane_takes_the_widest_plane(
         session=experiment_session, job_name=SingleRecordingJobNames.PROCESS, specifier=""
     )
     assert estimates[str(SingleRecordingJobNames.REGISTER), "an_unstructured_specifier"] == widest_registration
-    # A specifier that does name a plane the recording holds is charged that plane alone, not the widest one.
+    # A specifier that does name a plane held by the recording is charged that plane alone, not the widest one.
     assert estimates[
         str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}1"
     ] == cindra_single_recording_footprint(
@@ -804,8 +804,8 @@ def test_a_recording_declaring_no_regions_is_read_as_one_full_frame_plane(experi
 
 
 def test_two_photon_jobs_are_refused_when_the_session_holds_no_raw_imaging(experiment_session: SessionData) -> None:
-    """Verifies that a session with no imaging directory names no geometry, and a recording cindra will not size is a
-    recording whose stages cannot run.
+    """Verifies that a session with no imaging directory names no geometry, and a recording that cindra will not size
+    is a recording whose stages cannot run.
     """
     write_surgery_metadata(session=experiment_session)
 
@@ -819,7 +819,7 @@ def test_two_photon_jobs_are_refused_when_the_session_holds_no_raw_imaging(exper
 def test_two_photon_jobs_are_refused_when_the_imaging_directory_holds_no_parameters(
     experiment_session: SessionData,
 ) -> None:
-    """Verifies an imaging directory carrying no acquisition parameters reports no shape to scale an estimate with."""
+    """Verifies an imaging directory carrying no acquisition parameters reports no shape for scaling an estimate."""
     write_surgery_metadata(session=experiment_session)
     experiment_session.raw_data_path.joinpath("mesoscope_data").mkdir(parents=True, exist_ok=True)
 
@@ -845,8 +845,8 @@ def test_two_photon_jobs_are_refused_when_every_image_is_excluded(experiment_ses
 def test_two_photon_jobs_are_refused_when_the_acquisition_parameters_cannot_be_read(
     experiment_session: SessionData,
 ) -> None:
-    """Verifies that a parameters file the reader rejects names no geometry, and that refusal propagates to the caller
-    sizing the batch rather than resolving to a figure nothing measured.
+    """Verifies that a parameters file rejected by the reader names no geometry, and that refusal propagates to the
+    caller sizing the batch rather than resolving to a figure nothing measured.
     """
     write_surgery_metadata(session=experiment_session)
     directory = experiment_session.raw_data_path.joinpath("mesoscope_data")
@@ -911,12 +911,12 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that the write that closes an assembly job streams the frame it was handed rather than rebuilding it, so
-    the columns the assembly already holds are what the stage peaks at.
+    the stage peaks at the columns the assembly already holds.
 
-    The reportable figure is rounded up to the whole gigabyte, which leaves a recording of the scale the other dataset
-    tests use unable to tell one copy of its fluorescence from two. This recording is therefore written large enough
-    that a second copy of its retained columns would push the reported estimate from one whole gigabyte to two, which is
-    the scale the copy count becomes visible at.
+    The reportable figure is rounded up to the whole gigabyte, which leaves a recording of the scale used by the
+    other dataset tests unable to tell one copy of its fluorescence from two. This recording is therefore written
+    large enough that a second copy of its retained columns would push the reported estimate from one whole gigabyte
+    to two, which is the scale at which the copy count becomes visible.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -970,8 +970,8 @@ def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
 def test_dataset_stages_are_refused_for_a_session_carrying_no_processed_output(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
-    """Verifies that a session the single-recording pipeline never wrote for names no geometry to scale any stage with,
-    so every stage that would read it is refused rather than planned at a floor.
+    """Verifies that a session with no single-recording output names no geometry for scaling any stage, so every
+    stage that would read it is refused rather than planned at a floor.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -1034,7 +1034,7 @@ def test_a_dataset_naming_no_session_resolves_no_tracking_configuration(
     dataset.save()
     emptied = DatasetData.load(dataset_path=dataset.dataset_data_path.parent)
 
-    # No session leaves no recording directory to hand cindra and no session to resolve a configuration from.
+    # No session leaves no recording directory to hand cindra and no session from which to resolve a configuration.
     with pytest.raises(ValueError, match="resolved no multi-recording"):
         size_dataset_jobs(dataset=emptied, jobs=[(MULTIDAY_DISCOVERY_JOB_NAME, "305", 30)])
 
@@ -1060,7 +1060,7 @@ def test_a_session_that_left_the_project_root_contributes_no_recording(
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(MULTIDAY_DISCOVERY_JOB_NAME, "305", 30)])
 
-    # The surviving recording is the whole set the stage is sized from, and the configuration is resolved from it too.
+    # The stage is sized from the surviving recording alone, and the configuration is resolved from it too.
     assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == cindra_multi_recording_footprint(
         dataset=dataset, sessions=[second], job_name=MultiRecordingJobNames.DISCOVER, specifier="305"
     )
@@ -1069,8 +1069,8 @@ def test_a_session_that_left_the_project_root_contributes_no_recording(
 def test_an_assembly_job_is_sized_when_a_sibling_session_left_the_project_root(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
-    """Verifies that the region bound is drawn from every recording the animal contributes, so a sibling moved to long-
-    term storage is skipped on the same terms the recording set skips it rather than failing the surviving session's
+    """Verifies that the region bound is drawn from every recording the animal contributes, so a sibling moved to
+    long-term storage is skipped the same way the recording set skips it rather than failing the surviving session's
     own estimate.
     """
     first = session_factory(animal_id="305", experiment_name="test_experiment")
@@ -1088,7 +1088,7 @@ def test_an_assembly_job_is_sized_when_a_sibling_session_left_the_project_root(
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, second.session_name, 1)])
 
-    # The surviving recording is the whole set the bound is drawn from, so it narrows to that recording's own regions.
+    # The bound is drawn from the surviving recording alone, so it narrows to that recording's own regions.
     assert estimates[FORGING_JOB_NAME, second.session_name] == JobFootprint(
         cores=1, memory_mb=assembly_memory(samples=900, regions=120)
     )
@@ -1125,8 +1125,8 @@ def test_a_trace_array_of_another_rank_is_refused(
     """Verifies that a fluorescence array carrying a rank other than regions by samples is not read as a recording
     geometry.
 
-    The rank is rejected on both sides of the two the geometry is made of, so an array carrying a further axis is
-    refused rather than read as its leading two extents.
+    The rank is rejected on both sides of the two axes that make up the geometry, so an array carrying a further
+    axis is refused rather than read as its leading two extents.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -1140,7 +1140,7 @@ def test_a_trace_array_of_another_rank_is_refused(
     with pytest.raises(FileNotFoundError, match="carries no processed imaging"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
-    # The metadata archive is present here, so the rank the header reports is the whole of what the refusal rests on.
+    # The metadata archive is present here, so the rank the header reports is the whole basis of the refusal.
     assert _read_array_shape(array_path=flat) is None
     volume = write_trace_array(path=directory.joinpath("volume.npy"), shape=(4, 120, 900))
     assert _read_array_shape(array_path=volume) is None
@@ -1187,9 +1187,9 @@ def test_an_assembly_job_carrying_an_animal_specifier_bounds_its_regions_at_one(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that the discovery stage is specified by its animal while assembly is specified by its session, so a
-    specifier naming an animal matches no session the dataset lists and resolves no animal to pool recordings from.
-    The bound settles at the one template an empty recording set allows rather than failing the whole batch's sizing
-    pass.
+    specifier naming an animal matches no session the dataset lists and resolves no animal from which to pool
+    recordings. The bound settles at the one template an empty recording set allows rather than failing the whole
+    batch's sizing pass.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -1203,9 +1203,9 @@ def test_an_assembly_job_carrying_an_animal_specifier_bounds_its_regions_at_one(
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, "305", 1)])
 
-    # The animal directory resolves the recording whose samples the job is charged, while the regions it is charged
-    # across are the single template rather than the two hundred and fifty that recording detected. The two figures
-    # differ by a saving the gigabyte rounding absorbs at this fixture's scale.
+    # The animal directory resolves the recording, and the job is charged that recording's samples, while the regions
+    # across which it is charged are the single template rather than the two hundred and fifty that recording
+    # detected. The two figures differ by a saving the gigabyte rounding absorbs at this fixture's scale.
     assert estimates[FORGING_JOB_NAME, "305"] == JobFootprint(
         cores=1, memory_mb=assembly_memory(samples=1100, regions=1)
     )

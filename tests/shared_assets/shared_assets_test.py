@@ -80,8 +80,8 @@ def test_the_terminal_delay_holds_the_runtime_for_its_declared_period() -> None:
 
 
 def test_a_natural_sort_orders_an_identifier_by_the_number_it_embeds() -> None:
-    """Verifies that every identifier this library orders on embeds a number in text, so a listing has to place 2 ahead
-    of 10.
+    """Verifies that every identifier on which this library orders embeds a number in text, so a listing has to place 2
+    ahead of 10.
 
     Ordering the same identifiers as plain text puts 10 ahead of 2, which is the inversion this function exists to keep
     out of the project manifest, the project plan, the project jobs artifact, and the dataset state artifact.
@@ -91,7 +91,7 @@ def test_a_natural_sort_orders_an_identifier_by_the_number_it_embeds() -> None:
     ordered = natural_sort(frame=frame, by=["animal"])
 
     assert ordered["animal"].to_list() == ["1", "2", "10"]
-    # The remaining columns travel with the row their identifier was read from.
+    # The remaining columns travel with the row that supplied their identifier.
     assert ordered["session"].to_list() == ["c", "b", "a"]
 
 
@@ -107,7 +107,7 @@ def test_the_multi_recording_dataset_name_is_qualified_by_animal() -> None:
 
 @pytest.mark.xdist_group(name="console")
 def test_importing_the_library_turns_on_whichever_terminal_channel_is_off() -> None:
-    """Verifies every pipeline reports through the console and its progress bars, so importing has to switch on both."""
+    """Verifies that every pipeline reports through the console and its progress bars, so importing enables both."""
     console.disable()
 
     importlib.reload(sollertia_forgery)

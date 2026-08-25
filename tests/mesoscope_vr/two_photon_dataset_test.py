@@ -86,8 +86,8 @@ def _build_extraction(
 ) -> ExtractionData:
     """Builds the cindra extraction record holding the four fluorescence trace arrays and, optionally, the labels.
 
-    Every trace array counts up from a shared ramp, so a value pins both the ROI row it came from and the frame it was
-    sampled at, and the per-array offset keeps the four distinguishable.
+    Every trace array counts up from a shared ramp, so a value pins the ROI row and the frame that produced it, and the
+    per-array offset keeps the four distinguishable.
 
     Args: roi_count: The number of ROI rows every array carries. frame_count: The number of frame columns every array
     carries. offset: The constant added to the base ramp, so each directory carries distinguishable values. is_cell: The
@@ -114,7 +114,7 @@ def _write_traces(directory: Path, *, roi_count: int, frame_count: int, offset: 
     """Writes the four cindra fluorescence trace arrays into a processing output directory.
 
     Args:
-        directory: The directory the trace arrays are written into.
+        directory: The directory that receives the trace arrays.
         roi_count: The number of ROI rows every array carries.
         frame_count: The number of frame columns every array carries.
         offset: The constant added to the base ramp, so each directory carries distinguishable values.
@@ -129,7 +129,7 @@ def _write_cindra_outputs(directory: Path, *, is_cell: Sequence[int], frame_coun
     Notes: The combined record is saved rather than assembled by hand, so the archive the assembler reads back is the
     one cindra's combination stage publishes, including every metadata field its reader expects.
 
-    Args: directory: The directory the single-recording outputs are written into. is_cell: The per-ROI cell label, one
+    Args: directory: The directory that receives the single-recording outputs. is_cell: The per-ROI cell label, one
     entry per ROI row. frame_count: The number of frames every trace array carries. offset: The constant added to the
     base ramp of every trace array.
     """
@@ -155,7 +155,7 @@ def _write_frame_metadata(
     """Writes the ScanImage per-frame metadata archive into a session's raw mesoscope_data directory.
 
     Args:
-        raw_data_path: The session raw_data directory the archive is written under.
+        raw_data_path: The session raw_data directory that receives the archive.
         frame_numbers: The per-frame ScanImage frame counter values.
         frame_seconds: The per-frame ScanImage clock timestamps in seconds. Defaults to None, which writes a zero
             timestamp for every frame.
@@ -180,10 +180,10 @@ def _write_frame_metadata(
 
 
 class _Layout:
-    """Bundles the four directories ``assemble_cindra_dataset`` reads from.
+    """Bundles the four directories that ``assemble_cindra_dataset`` reads.
 
     Args:
-        root: The temporary directory the layout is created under.
+        root: The temporary directory under which the layout is created.
 
     Attributes:
         cindra_data_path: The single-recording cindra output directory.
@@ -236,7 +236,7 @@ def _prepare(
     """Writes every input file the assembler reads for one scenario.
 
     Args:
-        layout: The directory layout the files are written into.
+        layout: The directory layout that receives the files.
         pulses: The TTL pulse train written into the processed mesoscope-frame feather.
         frame_count: The cindra frame count every trace array carries.
         is_cell: The per-ROI cell label of the single-recording classification array.
@@ -302,7 +302,7 @@ def test_assemble_cindra_dataset_publishes_every_trace_array_under_its_own_colum
 
     # The single-recording classification keeps ROIs 0, 2 and 3 of the four-ROI arrays, while both ROIs of the
     # two-ROI multi-recording arrays survive. Each array counts up from the ramp its own offset shifts, so the first
-    # frame's vector names both the directory the column was read from and the array it holds.
+    # frame's vector names both the directory that supplied the column and the array it holds.
     expected = {
         DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE: (pl.Array(pl.Float32, 3), [0.0, 10.0, 15.0]),
         DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE: (pl.Array(pl.Float32, 3), [1.0, 11.0, 16.0]),
@@ -566,7 +566,7 @@ def test_match_runs_to_acquisitions_spans_consecutive_runs() -> None:
 
 
 def test_match_runs_to_acquisitions_pairs_acquisitions_recorded_out_of_size_order() -> None:
-    """Verifies each acquisition claims the run span matching its own frame count, whatever order the runs arrive in.
+    """Verifies each acquisition claims the run span matching its own frame count, in any arrival order.
 
     The acquisition sizes are reported largest first while the runs stay chronological, so a session whose smaller
     acquisition ran first is only accounted for by pairing the two lists across that mismatch.

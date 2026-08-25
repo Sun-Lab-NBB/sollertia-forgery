@@ -45,28 +45,28 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _DATASET_NAME: str = "TestDataset"
-"""The name every forged dataset in this module is defined under, carrying uppercase so the lowercasing the cindra
-output directory applies stays observable."""
+"""The name under which every forged dataset in this module is defined, carrying uppercase so the lowercasing of the
+cindra output directory stays observable."""
 
 _MULTIDAY_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
-"""The filename each tracked animal's materialized multi-recording configuration is written under."""
+"""The filename under which each tracked animal's materialized multi-recording configuration is written."""
 
 _ARGUMENT_RECORD_FILENAME: str = "assembly_arguments.txt"
-"""The filename the stand-in assembly worker records its source path and dataset name into, which lets a job
-dispatched into a worker process report what it was called with."""
+"""The filename into which the stand-in assembly worker records its source path and dataset name, which lets a job
+dispatched into a worker process report its own arguments."""
 
 _DESCRIBED_COLUMN: str = "time_us"
 """A column name the Mesoscope-VR description binding declares, so a feather holding it passes the dataset's
 description check."""
 
 _UNDESCRIBED_COLUMN: str = "unregistered_measurement"
-"""A column name no acquisition system describes, which the assembly stage rejects."""
+"""A column name that no acquisition system describes, which the assembly stage rejects."""
 
 _GENOTYPE: str = "GP5.17"
-"""The genotype every synthetic animal records, which the Mesoscope-VR resolver maps to a calcium indicator."""
+"""The genotype recorded by every synthetic animal, which the Mesoscope-VR resolver maps to a calcium indicator."""
 
 _PRIMING_STEP: str = "priming"
-"""The label the shared dispatch recorder marks a bootstrap priming call with, which collides with no cindra job
+"""The label with which the shared dispatch recorder marks a bootstrap priming call, which collides with no cindra job
 name."""
 
 
@@ -117,10 +117,10 @@ class MultidayCall:
     """Records one cross-recording invocation the pipeline dispatched.
 
     Attributes:
-        configuration_path: The configuration the invocation was pointed at.
+        configuration_path: The configuration the invocation was handed.
         job_name: The cindra job the invocation requested.
         specifier: The recording identifier the invocation named.
-        job_id: The forging tracker identifier the invocation recorded against.
+        job_id: The forging tracker identifier against which the invocation recorded.
         workers: The worker count the invocation was given.
     """
 
@@ -149,7 +149,7 @@ class ForgingProject:
 
 
 def write_surgery_metadata(session: SessionData) -> None:
-    """Writes the surgery metadata snapshot the cindra configuration resolver reads the animal's genotype from.
+    """Writes the surgery metadata snapshot from which the cindra configuration resolver reads the animal's genotype.
 
     Args:
         session: The loaded session whose raw data receives the snapshot.
@@ -182,16 +182,16 @@ def write_surgery_metadata(session: SessionData) -> None:
 
 @pytest.fixture
 def recorded_dispatch_order() -> list[tuple[str, str]]:
-    """Returns the one timeline both cross-recording recorders append to, in the order the pipeline reached them.
+    """Returns the one timeline to which both cross-recording recorders append, in the order the pipeline reached them.
 
     Priming and dispatch are separate calls, so recording them into two lists makes only their contents assertable.
-    A single interleaved timeline is what makes the order between them observable, which is the guarantee that
+    A single interleaved timeline makes the order between them observable, which is the guarantee that
     matters: every stage reads the bootstrap its animal's priming wrote, and every extraction reads the ROI set its
     animal's discovery wrote.
 
     Returns:
-        The list every priming and every dispatched stage is appended to, as a ``(step, subject)`` pair naming the
-        animal a priming or a whole-animal stage belongs to and the session a per-recording stage names.
+        The list to which every priming and every dispatched stage is appended, as a ``(step, subject)`` pair naming
+        the animal that owns a priming or a whole-animal stage and the session a per-recording stage names.
     """
     return []
 
@@ -205,10 +205,10 @@ def recorded_primings(monkeypatch: pytest.MonkeyPatch, recorded_dispatch_order: 
 
     Args:
         monkeypatch: The fixture used to replace the priming call the pipeline module holds.
-        recorded_dispatch_order: The shared timeline each priming is appended to alongside the dispatched stages.
+        recorded_dispatch_order: The shared timeline to which each priming is appended alongside the dispatched stages.
 
     Returns:
-        The list every primed configuration path is appended to, in call order.
+        The list to which every primed configuration path is appended, in call order.
     """
     primed: list[Path] = []
 
@@ -232,10 +232,10 @@ def recorded_multiday_jobs(
     shared bootstrap before it dispatches.
 
     Args: monkeypatch: The fixture used to replace the entry point the pipeline module holds. recorded_primings: The
-    recorder standing in for the dataset priming the discovery stage performs first. recorded_dispatch_order: The shared
-    timeline each dispatch is appended to alongside the primings.
+    recorder standing in for the dataset priming that the discovery stage performs first. recorded_dispatch_order: The
+    shared timeline to which each dispatch is appended alongside the primings.
 
-    Returns: The list every dispatched invocation is appended to, in dispatch order.
+    Returns: The list to which every dispatched invocation is appended, in dispatch order.
     """
     calls: list[MultidayCall] = []
 
@@ -258,8 +258,8 @@ def recorded_multiday_jobs(
                 workers=workers,
             )
         )
-        # A stage spanning the whole animal carries no specifier, so it is named by the animal its configuration
-        # belongs to, which is the same subject the priming of that animal is recorded under.
+        # A stage spanning the whole animal carries no specifier, so it is named by the animal that owns its
+        # configuration, which is the same subject under which the priming of that animal is recorded.
         recorded_dispatch_order.append((job_name.value, specifier or configuration_path.parent.name))
         tracker.start_job(job_id=job_id)
         tracker.complete_job(job_id=job_id)
@@ -280,7 +280,7 @@ def install_assembly_worker(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], 
         monkeypatch: The fixture used to replace the registry accessor the pipeline module holds.
 
     Returns:
-        A callable taking the worker every acquisition system resolves to.
+        A callable taking the worker to which every acquisition system resolves.
     """
 
     def _install(worker: Any) -> None:
@@ -297,11 +297,11 @@ def experiment_project(
 ) -> ForgingProject:
     """Builds a project holding two experiment sessions for one animal and one for a second animal.
 
-    Every session is fully processed and carries its surgery metadata, which is the state forging admission and the
-    cross-recording configuration resolver both require.
+    Every session is fully processed and carries its surgery metadata, which is the state that forging admission and
+    the cross-recording configuration resolver both require.
 
     Args:
-        project_root: The created project the sessions are placed under.
+        project_root: The created project under which the sessions are placed.
         session_factory: The builder that creates and reloads each session.
         mark_session_processed: The helper that records every per-session pipeline as succeeded.
 
@@ -326,7 +326,7 @@ def training_project(
     """Builds a project holding two run-training sessions of one animal, which carry no cross-recording tracking.
 
     Args:
-        project_root: The created project the sessions are placed under.
+        project_root: The created project under which the sessions are placed.
         session_factory: The builder that creates and reloads each session.
         mark_session_processed: The helper that records every per-session pipeline as succeeded.
 
@@ -473,7 +473,7 @@ def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
 
 
 def test_load_multiday_plan_skips_an_animal_holding_no_sessions(tmp_path: Path) -> None:
-    """Verifies that an animal the dataset lists without any session contributes no plan entry."""
+    """Verifies that an animal listed by the dataset without any session contributes no plan entry."""
     animal_path = tmp_path.joinpath("305")
     animal_path.mkdir()
     animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).touch()
@@ -504,8 +504,8 @@ def test_define_forging_dataset_rewrites_a_configuration_that_was_never_written(
     without one.
 
     The dataset marker is committed before the configurations are written, so a definition that died in between leaves
-    an animal the marker names and the disk does not. Reading the plan back passes such an animal over in silence, so
-    its discovery and extraction stages vanish from the job universe until a repeated definition repairs it.
+    an animal that the marker names and the disk does not. Reading the plan back passes such an animal over in silence,
+    so its discovery and extraction stages vanish from the job universe until a repeated definition repairs it.
     """
     names = experiment_project.names()
     dataset = define_forging_dataset(
@@ -528,8 +528,8 @@ def test_define_forging_dataset_rewrites_a_configuration_that_was_never_written(
 def test_define_forging_dataset_passes_over_an_unconfigured_animal_whose_sources_moved_away(
     experiment_project: ForgingProject,
 ) -> None:
-    """Verifies that an animal the dataset holds without a configuration is left as it stands once its source data has
-    moved off this machine, so a large project is still forged in passes.
+    """Verifies that an animal that the dataset holds without a configuration is left as it stands once its source data
+    has moved off this machine, so a large project is still forged in passes.
 
     Materializing a configuration loads every one of the animal's sessions from the project root, so an animal whose
     directory is gone cannot be repaired and attempting it would fail the whole definition.
@@ -552,7 +552,7 @@ def test_define_forging_dataset_passes_over_an_unconfigured_animal_whose_sources
 def test_define_forging_dataset_extends_a_dataset_whose_forged_animal_lost_its_sources(
     experiment_project: ForgingProject,
 ) -> None:
-    """Verifies that adding an animal succeeds while an animal the dataset already holds has no source data left."""
+    """Verifies that adding an animal succeeds while an animal already in the dataset has no source data left."""
     names = experiment_project.names()
     define_forging_dataset(name=_DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root)
 
@@ -606,7 +606,7 @@ def _define_whole_project(experiment_project: ForgingProject) -> DatasetData:
     """Defines the module's dataset over every session the project holds.
 
     Args:
-        experiment_project: The source project whose sessions the dataset is defined from.
+        experiment_project: The source project from whose sessions the dataset is defined.
 
     Returns:
         The resolved dataset.
@@ -760,7 +760,7 @@ def test_run_forging_pipeline_resolves_the_assembly_worker_under_the_acquisition
     requested: list[str] = []
 
     def _resolve(system: str) -> Any:
-        """Records the key the pipeline resolved the per-session assembly worker under."""
+        """Records the key under which the pipeline resolved the per-session assembly worker."""
         requested.append(system)
         return assemble_described_session
 
@@ -879,7 +879,7 @@ def test_run_forging_pipeline_rejects_an_undescribed_column(
     recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
-    """Verifies that a feather carrying a column the dataset does not describe fails its own session's assembly."""
+    """Verifies that a feather carrying a column that the dataset does not describe fails its own session's assembly."""
     install_assembly_worker(assemble_undescribed_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
@@ -919,7 +919,7 @@ def test_run_forging_pipeline_rejects_an_unknown_job_id(
     experiment_project: ForgingProject,
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
-    """Verifies that a job identifier the dataset does not carry is refused rather than silently skipped."""
+    """Verifies that a job identifier that the dataset does not carry is refused rather than silently skipped."""
     install_assembly_worker(assemble_described_session)
     define_forging_dataset(
         name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root

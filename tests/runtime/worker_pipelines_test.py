@@ -71,7 +71,7 @@ def runtime_archive(training_session: SessionData, write_log_archive: Callable[.
     """Writes a small Mesoscope-VR runtime archive carrying two system-state and one runtime-state message.
 
     Args:
-        training_session: The session the archive is written for.
+        training_session: The session for which the archive is written.
         write_log_archive: The writer that builds a real DataLogger archive.
 
     Returns:
@@ -93,7 +93,7 @@ def parallel_archive(tmp_path: Path, write_log_archive: Callable[..., Path]) -> 
     """Writes an archive large enough for the reader to split it across more than one decode batch.
 
     Args:
-        tmp_path: The directory the archive is written under.
+        tmp_path: The directory under which the archive is written.
         write_log_archive: The writer that builds a real DataLogger archive.
 
     Returns:
@@ -118,7 +118,7 @@ def test_discovering_runtime_jobs_reports_the_single_source_job(training_session
 def test_discovering_runtime_jobs_admits_the_job_once_the_archive_exists(
     training_session: SessionData, runtime_archive: Path
 ) -> None:
-    """Verifies a present archive is the only condition the discovery step tests, so the possible subset fills in."""
+    """Verifies that a present archive is the only condition discovery tests, so the possible subset fills in."""
     assert runtime_archive.is_file()
 
     _session, universe, possible = discover_runtime_jobs(session_path=_session_path(training_session))
@@ -213,7 +213,7 @@ def test_single_batch_decode_returns_every_message_in_archive_order(runtime_arch
 
 
 def test_a_single_worker_decodes_a_multi_batch_archive_in_process(parallel_archive: Path) -> None:
-    """Verifies a one-worker request keeps the decode in this process even when the reader offers several batches."""
+    """Verifies that a one-worker request keeps the decode in-process even when the reader offers several batches."""
     assert len(LogArchiveReader(archive_path=parallel_archive).get_batches(workers=1)) > 1
 
     decoded = _decode_archive(archive_path=parallel_archive, workers=1, display_progress=False)
@@ -242,8 +242,8 @@ def test_the_parallel_decode_reassembles_the_archive_in_order(
 
 
 def test_decoding_one_batch_returns_its_timestamps_and_payloads(runtime_archive: Path) -> None:
-    """Verifies that the unit of work a decode worker runs reads only the keys it is handed, with the onset supplied to
-    it.
+    """Verifies that the unit of work run by a decode worker reads only the keys it is handed, with the onset supplied
+    to it.
     """
     reader = LogArchiveReader(archive_path=runtime_archive)
     onset_us = reader.onset_timestamp_us

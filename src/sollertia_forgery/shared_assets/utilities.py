@@ -36,7 +36,7 @@ def natural_sort(frame: pl.DataFrame, by: Sequence[str], *, nulls_last: bool = F
 
     Args:
         frame: The frame to order.
-        by: The names of the columns to order on, in precedence order.
+        by: The names of the columns on which to order, in precedence order.
         nulls_last: Determines whether rows holding no value for a column sort after the rows that do.
 
     Returns:
@@ -56,8 +56,8 @@ def natural_sort(frame: pl.DataFrame, by: Sequence[str], *, nulls_last: bool = F
 
 
 def multi_recording_dataset_name(animal_id: str, dataset_name: str) -> str:
-    """Returns the cindra multi-recording dataset name one animal's recordings are tracked under within a forged
-    dataset.
+    """Returns the cindra multi-recording dataset name under which one animal's recordings are tracked within a
+    forged dataset.
 
     Notes:
         Qualifying the dataset name with the animal identifier keeps an animal's multi-recording outputs separate
@@ -68,6 +68,6 @@ def multi_recording_dataset_name(animal_id: str, dataset_name: str) -> str:
         dataset_name: The unqualified forged dataset name.
 
     Returns:
-        The ``{animal_id}_{dataset_name}`` name cindra records the animal's multi-recording output under.
+        The ``{animal_id}_{dataset_name}`` name under which cindra records the animal's multi-recording output.
     """
     return f"{animal_id}_{dataset_name}"

@@ -61,10 +61,10 @@ _UNROUTED_CODE: int = 9
 """A leading payload byte the parser routes to none of its collectors, which every archive may carry."""
 
 _GRATING_CODE: int = 1
-"""The wall cue code of the first cue every template built by this suite catalogs."""
+"""The wall cue code of the first cue catalogued by every template this suite builds."""
 
 _CHECKER_CODE: int = 2
-"""The wall cue code of the second cue every template built by this suite catalogs."""
+"""The wall cue code of the second cue catalogued by every template this suite builds."""
 
 _CUE_LENGTH_CM: float = 30.0
 """The corridor length every catalogued wall cue occupies."""
@@ -73,7 +73,7 @@ _TRIAL_COUNT: int = 251
 """The number of two-cue trials one recorded cue sequence carries, chosen so the payload passes the length gate."""
 
 _ARCHIVE_ONSET_US: int = 1_700_000_000_000_000
-"""The microsecond epoch the synthetic runtime archive anchors its elapsed timestamps on."""
+"""The microsecond epoch on which the synthetic runtime archive anchors its elapsed timestamps."""
 
 
 def _state_payload(code: int, value: int) -> bytes:
@@ -188,7 +188,7 @@ def _build_experiment_configuration(trial_names: Sequence[str]) -> MesoscopeExpe
     """Builds an experiment configuration whose canonical trial order matches the requested names.
 
     Args:
-        trial_names: The trial names, in the order the trial type indices refer to.
+        trial_names: The trial names, in the order to which the trial type indices refer.
 
     Returns:
         The experiment configuration instance.
@@ -226,7 +226,7 @@ def _read_feather(directory: Path, name: BehaviorDataFiles) -> pl.DataFrame:
     """Reads one behavior feather the runtime parser wrote.
 
     Args:
-        directory: The directory the parser wrote its feathers into.
+        directory: The directory into which the parser wrote its feathers.
         name: The canonical filename of the feather to read.
 
     Returns:
@@ -236,7 +236,7 @@ def _read_feather(directory: Path, name: BehaviorDataFiles) -> pl.DataFrame:
 
 
 def _normalized(message: str) -> str:
-    """Collapses the line wrapping the console applies to a raised error message.
+    """Collapses the line wrapping that the console applies to a raised error message.
 
     Args:
         message: The message text as the raised exception carries it.
@@ -426,7 +426,7 @@ def test_parse_runtime_writes_each_guidance_feather_on_its_own_recorded_transiti
 def test_parse_runtime_truncates_the_trial_spanning_the_recorded_corridor_swap(
     experiment_session: SessionData, tmp_path: Path
 ) -> None:
-    """Verifies that the distance a mid-session corridor swap was recorded at is decoded from its snapshot exactly.
+    """Verifies that the recorded distance of a mid-session corridor swap is decoded from its snapshot exactly.
 
     The snapshot payload's leading byte is its message code, so a double read one byte early yields a breakpoint far
     beyond any distance the animal ran, and the two corridors are then stitched as though no swap had happened.
@@ -488,7 +488,7 @@ def test_parse_runtime_raises_for_missing_vr_configuration(experiment_session: S
 def test_parse_runtime_raises_for_trial_absent_from_task_template(
     experiment_session: SessionData, tmp_path: Path
 ) -> None:
-    """Verifies that a trial the VR task template does not define is reported against the template's trial set."""
+    """Verifies that a trial absent from the VR task template is reported against the template's trial set."""
     _write_configurations(
         session=experiment_session,
         experiment_configuration=_build_experiment_configuration(trial_names=["absent_trial"]),
@@ -622,7 +622,7 @@ def test_decompose_decodes_every_trial_of_a_configuration_mixing_motif_lengths()
 
 
 def test_decompose_matches_the_longer_motif_when_a_shorter_trial_is_its_prefix() -> None:
-    """Verifies that a trial whose motif another trial's motif begins with never consumes that longer trial.
+    """Verifies that a trial whose motif is a prefix of another trial's motif never consumes that longer trial.
 
     The kernel takes the first motif that matches, so the motifs have to reach it longest-first. Offered the prefix
     first, it eats two cues of every three-cue trial and the rest of the corridor stops decomposing altogether.
@@ -670,11 +670,11 @@ def test_decompose_reports_trial_types_in_the_configuration_declaration_order() 
 
 
 def test_decompose_accumulates_trial_distances_at_the_precision_of_the_declared_cue_lengths() -> None:
-    """Verifies that a trial end is reported as the exact double the cue lengths it spans sum to.
+    """Verifies that a trial end is reported as the exact double sum of the cue lengths it spans.
 
-    These distances become the coordinate the assembled dataset interpolates its trial columns against, and the
-    encoder distance they are matched to is a double, so an accumulator held at a narrower width drifts off the
-    corridor the task template declared.
+    These distances become the coordinate against which the assembled dataset interpolates its trial columns, and the
+    matching encoder distance is a double, so an accumulator held at a narrower width drifts off the corridor the task
+    template declared.
     """
     trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
@@ -759,7 +759,7 @@ def test_every_distance_stream_shares_the_traveled_frame_under_a_cue_offset() ->
         trial_distances=np.array([50.0, 110.0, 170.0], dtype=np.float64),
     )
 
-    # A trial begins exactly where its own first cue does, which is the invariant the two frames disagreed on.
+    # A trial begins exactly where its own first cue does, which is the invariant on which the two frames disagreed.
     assert trial_starts.tolist() == [0.0, 50.0, 110.0]
     assert [cue_distances[index] for index in (0, 2, 4)] == trial_starts.tolist()
     assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE] * 3
@@ -772,8 +772,8 @@ def test_every_distance_stream_shares_the_traveled_frame_under_a_cue_offset() ->
 def test_decomposition_reports_trial_ends_as_distances_traveled() -> None:
     """Verifies the decomposition reports how far the animal ran rather than how long the corridor was.
 
-    The trial ends it returns become the coordinate the assembled dataset interpolates the trial columns against, and
-    that coordinate is the encoder's traveled distance, so a corridor length would place every boundary too late.
+    The trial ends it returns become the coordinate against which the assembled dataset interpolates the trial columns,
+    and that coordinate is the encoder's traveled distance, so a corridor length would place every boundary too late.
     """
     trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
@@ -798,10 +798,10 @@ def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_tri
 
     assert cues.tolist() == [1, 2, 1, 1, 2, 1, 2]
     assert distances.tolist() == [0.0, 20.0, 50.0, 80.0, 100.0, 130.0, 160.0]
-    # Trial 0 and trial 2 are entered 10 cm into their first cue, so each reaches the corridor position its trigger
-    # zone is declared at after traveling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the
-    # corridor, so the same offset applies to it. Trial 1 is cut short before its zone begins and contributes no
-    # entry, and trial 3 follows a complete trial, so its zone sits at the full 30 cm.
+    # Trial 0 and trial 2 are entered 10 cm into their first cue, so each reaches its declared trigger zone position
+    # after traveling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the corridor, so the same offset
+    # applies to it. Trial 1 is cut short before its zone begins and contributes no entry, and trial 3 follows a
+    # complete trial, so its zone sits at the full 30 cm.
     assert trigger_starts.tolist() == [20.0, 100.0, 180.0]
     assert trigger_ends.tolist() == [35.0, 115.0, 190.0]
     assert trial_starts.tolist() == [0.0, 60.0, 80.0, 150.0]
@@ -872,7 +872,7 @@ def _write_experiment_runtime_feathers(session: SessionData, *, guidance: bool) 
         guidance: Determines whether the archive carries the reinforcing and aversive guidance transitions.
 
     Returns:
-        The path to the directory the runtime feathers were written into.
+        The path to the directory that received the runtime feathers.
     """
     messages: list[tuple[int, bytes]] = [
         (100, _state_payload(_SYSTEM_STATE_CODE, 0)),
@@ -899,7 +899,7 @@ def _write_encoder_feather(
     times_us: Sequence[int] = (0, 500, 1000),
     distances_cm: Sequence[float] = (0.0, 90.0, 180.0),
 ) -> Path:
-    """Writes the encoder feather the runtime assembler interpolates its reference distance from.
+    """Writes the encoder feather from which the runtime assembler interpolates its reference distance.
 
     Args:
         session: The session whose processed microcontroller directory receives the feather.
@@ -907,7 +907,7 @@ def _write_encoder_feather(
         distances_cm: The cumulative distance the animal had traveled at each of those timestamps.
 
     Returns:
-        The path to the directory the encoder feather was written into.
+        The path to the directory that received the encoder feather.
     """
     directory = session.processed_data.microcontroller_data_path
     directory.mkdir(parents=True, exist_ok=True)
@@ -965,7 +965,7 @@ def test_assemble_runtime_dataset_omits_the_guidance_columns_when_their_feathers
 def test_assemble_runtime_dataset_labels_a_mixed_session_against_the_reference_distance(
     experiment_session: SessionData,
 ) -> None:
-    """Verifies that the trial type of every sample is looked up in the distance frame the trial feather is keyed by.
+    """Verifies that the trial type of every sample is looked up in the distance frame that keys the trial feather.
 
     The trial feather indexes its trial types by traveled distance while the state feathers are indexed by time.
     Matching the trial types against the reference time instead labels every sample with whichever trial happens to

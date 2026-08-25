@@ -49,7 +49,7 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
         never reported as an animal's sessions.
 
         The search reads every directory above the depth it covers, so a caller that needs the datasets alone narrows
-        it to the depth their markers sit at. That keeps the answer from depending on the session and output
+        it to the depth at which their markers sit. That keeps the answer from depending on the session and output
         directories every animal holds, which a project shared between accounts need not leave readable.
 
     Args:
@@ -89,7 +89,7 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
             sessions.append(DatasetSession(session=parts[1], animal=parts[0]))
 
     # The search orders the marker paths, where the separator that follows a directory's name orders a name against a
-    # sibling that extends it. Both collections are therefore ordered again on the names they are reported by.
+    # sibling that extends it. Both collections are therefore ordered again on the names by which they are reported.
     dataset_names = {dataset.name for dataset in datasets}
     return _ProjectMarkers(
         datasets=tuple(natsorted(datasets)),

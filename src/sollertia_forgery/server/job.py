@@ -103,8 +103,7 @@ class Job:
             unexpected behavior.
 
             Commands added through this method run under shell error checking, so the job exits with the status of the
-            first command that fails. The scheduler reads that status, which is what lets a dependent job be sequenced
-            behind this one.
+            first command that fails. The scheduler reads that status and sequences a dependent job behind this one.
 
         Args:
             command: The command string to append to the job's command sequence, for example
@@ -133,8 +132,8 @@ class _SlurmScript:
         error: The absolute path to the stderr log file on the compute server.
         memory: The memory allocation string in SLURM format, e.g. ``"10G"``.
         time: The maximum wall-time for the job.
-        dependencies: The SLURM-assigned identifiers this job waits for, which are rendered as one ``afterok``
-            directive.
+        dependencies: The SLURM-assigned identifiers of the allocations that must complete before this job runs,
+            rendered as one ``afterok`` directive.
         cleanup_path: The absolute path to the script file itself, removed when the job exits.
 
     Attributes:

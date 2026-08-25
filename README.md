@@ -177,9 +177,9 @@ resolves its universe this way, a completed tracker already accounts for every s
 
 Work reaches a host as a **job**, and every pipeline models its jobs the same way.
 
-1. **Plan.** `slf plan` reads a unit's acquisition data, registers every job that unit is able to run on that unit's
-   processing tracker, and records each job's cores, memory, and upstream jobs into a per-unit `job_plan.yaml`. A unit
-   runs only the jobs registered on its tracker.
+1. **Plan.** `slf plan` reads a unit's acquisition data, registers on its processing tracker every job that unit is able
+   to run, and records each job's cores, memory, and upstream jobs into a per-unit `job_plan.yaml`. A unit runs only the
+   jobs registered on its tracker.
 2. **Prepare.** Preparation joins the tracker state to those records into one descriptor per job, and registers the
    result under a batch identifier. A job counts as blocked when preparation can neither queue its upstream stage nor
    confirm that the stage already succeeded.
@@ -656,7 +656,7 @@ donation.
 4. Add the pipeline to the batch pipeline set and give it a dispatch entry that supplies its unit loader, job discovery,
    batch worker, prerequisites, tracker path, output path, unit name, sizing pass, remote command renderer, and any
    priming hook. An import-time check fails on either half alone.
-5. Give every job type the pipeline resolves its core allocation and its sizing model, following [Adding a New
+5. Declare the core allocation and the sizing model of every job type the pipeline resolves, following [Adding a New
    Processing Stage](#adding-a-new-processing-stage).
 6. Add the `slf process` subcommand and the MCP surface, then add the pipeline to the admission policy of every system
    whose sessions complete it before forging.

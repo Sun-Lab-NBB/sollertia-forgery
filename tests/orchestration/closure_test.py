@@ -33,17 +33,17 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_working_directory")
 
 _UNIT_NAME: str = "2024_11_04"
-"""The name of the processing unit the closure tests place their jobs under."""
+"""The name of the processing unit under which the closure tests place their jobs."""
 
 _UNIT_PATH: str = f"/data/Project/305/{_UNIT_NAME}"
-"""The path to the processing unit the closure tests place their jobs under."""
+"""The path to the processing unit under which the closure tests place their jobs."""
 
 
 class _StubHost:
     """Stands in for an execution host, answering fixed state rows and recording what it was asked to materialize.
 
     Args:
-        rows: The state rows this host answers every read with.
+        rows: The state rows with which this host answers every read.
         fails: Determines whether materialization raises for every batch.
         failing_units: The unit paths whose materialization raises.
 
@@ -62,7 +62,7 @@ class _StubHost:
 
     @property
     def label(self) -> str:
-        """Returns the name this host is reported under."""
+        """Returns the name under which this host is reported."""
         return "remote"
 
     def materialize(
@@ -76,8 +76,8 @@ class _StubHost:
         """Records the call, or fails when the stub is configured to fail for this batch's units.
 
         Args:
-            project_root: The project the artifacts are regenerated for.
-            unit_paths: The processing units the artifacts are regenerated for.
+            project_root: The project for which the artifacts are regenerated.
+            unit_paths: The processing units for which the artifacts are regenerated.
             unit_kind: The kind of processing unit the paths name.
             replan: Determines whether the plan is regenerated alongside the state artifacts.
 
@@ -94,7 +94,7 @@ class _StubHost:
 
         Args:
             path: The artifact the host was asked to deliver.
-            destination: The directory the artifact is delivered into.
+            destination: The directory into which the artifact is delivered.
 
         Returns:
             The path to the delivered snapshot.
@@ -108,16 +108,16 @@ class _StubHost:
         """Answers the fixed state rows.
 
         Args:
-            path: The delivered artifact the rows would be read from.
+            path: The delivered artifact from which the rows would be read.
 
         Returns:
-            The state rows this stub was built with.
+            The state rows with which this stub was built.
         """
         return self._rows
 
 
 class _DatasetStubHost:
-    """Stands in for a remote host holding one state table per dataset, answering each by the directory it sits in.
+    """Stands in for a remote host holding one state table per dataset, answering each by the directory holding it.
 
     Args:
         rows_by_dataset: The state rows each dataset's table holds, keyed by the dataset directory name.
@@ -125,7 +125,7 @@ class _DatasetStubHost:
     Attributes:
         _rows_by_dataset: Cached per-dataset state rows.
         read_paths: The artifact paths this host was asked to read, in order.
-        delivered: The local paths this host delivered its artifacts to, in order.
+        delivered: The local paths to which this host delivered its artifacts, in order.
     """
 
     def __init__(self, rows_by_dataset: dict[str, list[dict[str, Any]]]) -> None:
@@ -135,7 +135,7 @@ class _DatasetStubHost:
 
     @property
     def label(self) -> str:
-        """Returns the name this host is reported under."""
+        """Returns the name under which this host is reported."""
         return "remote"
 
     def materialize(
@@ -153,7 +153,7 @@ class _DatasetStubHost:
 
         Args:
             path: The artifact the host was asked to deliver.
-            destination: The directory the artifact is delivered into.
+            destination: The directory into which the artifact is delivered.
 
         Returns:
             The path to the delivered snapshot.
@@ -168,10 +168,10 @@ class _DatasetStubHost:
         """Answers the rows the named dataset's table holds, recording the path this host was given.
 
         Args:
-            path: The artifact the rows are read from.
+            path: The artifact from which the rows are read.
 
         Returns:
-            The state rows that dataset recorded, empty for a path naming no dataset this host holds.
+            The state rows that dataset recorded, empty for a path naming no dataset held by this host.
         """
         self.read_paths.append(path)
         return self._rows_by_dataset.get(path.parent.name, [])
@@ -181,8 +181,8 @@ def _make_dataset_job(job_id: str, unit_path: str) -> dict[str, Any]:
     """Builds one dispatched forging job descriptor.
 
     Args:
-        job_id: The identifier the descriptor is built under.
-        unit_path: The dataset root the job runs against.
+        job_id: The identifier under which the descriptor is built.
+        unit_path: The dataset root against which the job runs.
 
     Returns:
         The job descriptor.
@@ -202,8 +202,8 @@ def _make_job(job_id: str, prerequisites: tuple[str, ...] = ()) -> dict[str, Any
     """Builds one dispatched job descriptor.
 
     Args:
-        job_id: The identifier the descriptor is built under.
-        prerequisites: The identifiers of the jobs this job waits on.
+        job_id: The identifier under which the descriptor is built.
+        prerequisites: The identifiers of the jobs on which this job waits.
 
     Returns:
         The job descriptor.
@@ -257,7 +257,7 @@ def _record_settled_batch(unit_path: str = _UNIT_PATH, slurm_job_id: str = "7") 
     """Records one prepared batch and the ledger entry naming the single allocation it holds.
 
     Args:
-        unit_path: The processing unit the batch's single job runs against.
+        unit_path: The processing unit against which the batch's single job runs.
         slurm_job_id: The scheduler identifier of the allocation the batch holds.
 
     Returns:
@@ -284,7 +284,7 @@ def test_a_forging_batch_spanning_two_datasets_counts_every_dataset_it_dispatche
     project table.
 
     Each table therefore has to be read where the host holds it rather than from a delivered copy, and delivered
-    somewhere it cannot overwrite the table another dataset already delivered under the same filename.
+    somewhere it cannot overwrite the same-named table already delivered by another dataset.
     """
     alpha, beta = "/data/Project/alpha", "/data/Project/beta"
     batch_id = record_prepared_batch(
@@ -310,7 +310,7 @@ def test_a_forging_batch_spanning_two_datasets_counts_every_dataset_it_dispatche
     assert outcome is not None
     assert (outcome.succeeded, outcome.outstanding, outcome.failed) == (2, 0, 0)
     assert outcome.complete
-    # Every table is read from the dataset directory the host holds it in, so a remote host resolves a path it owns.
+    # Every table is read from the dataset directory that holds it, so a remote host resolves a path it owns.
     assert [path.parent.name for path in host.read_paths] == ["alpha", "beta"]
     # The two tables share a filename, so one destination for both would leave only the second on this machine.
     assert len(set(host.delivered)) == 2
@@ -350,7 +350,7 @@ def test_a_job_waiting_on_a_failed_prerequisite_counts_as_blocked() -> None:
         rows=[_make_state_row(job_id="up", status="FAILED"), _make_state_row(job_id="down", status="SCHEDULED")],
     )
 
-    # A blocked job is separated from work the batch was merely cut short of, because no rerun of it alone succeeds.
+    # A blocked job is separated from work the batch merely never reached, because no rerun of it alone succeeds.
     assert (outcome.failed, outcome.blocked, outcome.outstanding) == (1, 1, 0)
     assert outcome.blocked_jobs[0]["unsatisfied_prerequisite_ids"] == ["up"]
 
@@ -407,7 +407,7 @@ def test_a_settled_batch_is_snapshotted_before_it_leaves_the_ledger() -> None:
 
 def test_a_submission_dispatching_several_prepared_batches_snapshots_each_one_it_covered() -> None:
     """Verifies that one submission may dispatch several prepared batches, and each carries its own document, so closing
-    the submission has to snapshot every batch it covered rather than the one its ledger entry is keyed by.
+    the submission has to snapshot every batch it covered rather than the one that keys its ledger entry.
     """
     covered = [
         record_prepared_batch(
@@ -431,8 +431,8 @@ def test_a_submission_dispatching_several_prepared_batches_snapshots_each_one_it
     closed = close_settled_batches(host=host, batches=[batch], statuses={"7": JobStatus.COMPLETED})
 
     assert [outcome.batch_id for outcome in closed] == covered
-    # The second batch is the one a closure keyed by the ledger entry alone would leave open forever, since retiring
-    # the entry drops the only record naming it.
+    # The second batch is the one that a closure keyed by the ledger entry alone would leave open forever, since
+    # retiring the entry drops the only record naming it.
     assert read_batch_outcome(batch_id=covered[1])["complete"]
     assert not read_ledger().batches
 
@@ -445,7 +445,7 @@ def test_a_batch_that_cannot_be_closed_stays_outstanding() -> None:
         host=_StubHost(rows=[], fails=True), batches=[batch], statuses={"7": JobStatus.FAILED}
     )
 
-    # The ledger keeps the batch, because retiring one this host could not snapshot loses the run's record.
+    # The ledger keeps the batch, because retiring one that this host could not snapshot loses the run's record.
     assert not closed
     assert read_batch_outcome(batch_id=batch.batch_id) is None
     assert [recorded.batch_id for recorded in read_ledger().batches] == [batch.batch_id]
@@ -509,7 +509,7 @@ def test_the_enumerated_examples_are_capped_while_the_counts_stay_whole() -> Non
 
 
 def test_a_settled_batch_this_host_never_prepared_is_retired_without_an_outcome() -> None:
-    """Verifies that a settled batch this host holds no prepared record of is retired without an outcome."""
+    """Verifies that a settled batch with no prepared record on this host is retired without an outcome."""
     batch = SubmissionBatch(
         batch_id="unprepared",
         submissions=[RemoteSubmission(job_id="a", slurm_job_id="7", unit_path=_UNIT_PATH)],
@@ -525,7 +525,7 @@ def test_a_settled_batch_this_host_never_prepared_is_retired_without_an_outcome(
 
 
 def test_a_batch_reports_every_pipeline_its_allocations_belong_to() -> None:
-    """Verifies that a batch names each pipeline its allocations belong to once and in a stable order."""
+    """Verifies that a batch names each pipeline to which its allocations belong once and in a stable order."""
     batch = SubmissionBatch(
         batch_id="mixed",
         submissions=[

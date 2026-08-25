@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 _BASE_TIME_US = 1_700_000_000_000_000
-"""The acquisition-clock origin every synthetic feather is anchored to, sized like a real UTC microsecond stamp."""
+"""The acquisition-clock origin that anchors every synthetic feather, sized like a real UTC microsecond stamp."""
 
 _SAMPLE_INTERVAL_US = 6_000_000
 """The spacing of the reference time vector, chosen so each sample advances the elapsed-minutes column by 0.1."""
@@ -46,7 +46,7 @@ _SYSTEM_STATE_CODES: dict[str, int] = {"idle": 0, "rest": 1, "run": 2}
 
 
 def _reference_time_vector() -> NDArray[np.uint64]:
-    """Builds the reference time vector every assembly test aligns its dataset to.
+    """Builds the reference time vector to which every assembly test aligns its dataset.
 
     Returns:
         A ten-sample microsecond vector spaced by the shared sampling interval.
@@ -73,7 +73,7 @@ def _make_input_directories(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Creates the three input directories the behavior assembler reads.
 
     Args:
-        tmp_path: The temporary directory to build the input tree under.
+        tmp_path: The temporary directory that receives the input tree.
 
     Returns:
         A tuple of the microcontroller-data, runtime-data, and raw-data directories.
@@ -88,7 +88,7 @@ def _write_hardware_state(raw_data_path: Path, **overrides: object) -> None:
     """Writes the session's hardware state snapshot into the raw data directory.
 
     Args:
-        raw_data_path: The raw data directory the snapshot is written into.
+        raw_data_path: The raw data directory that receives the snapshot.
         **overrides: Field values replacing the defaults of the synthetic hardware state.
     """
     arguments: dict[str, object] = {

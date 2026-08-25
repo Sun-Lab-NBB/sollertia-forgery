@@ -51,7 +51,7 @@ _ADMISSION_TRACKERS: dict[ProcessingPipelines, tuple[str, str]] = {
     ProcessingPipelines.VIDEO: ("processed_data", "video_tracker.yaml"),
     ProcessingPipelines.TWO_PHOTON: ("processed_data", "two_photon_tracker.yaml"),
 }
-"""The tracker location the stand-in session reports for each pipeline forging admission can require. The stand-in
+"""The tracker location the stand-in session reports for each pipeline that forging admission can require. The stand-in
 replaces the shared hierarchy's own accessors, so these names need only agree between the writer and the reader here."""
 
 _MULTIDAY_PLAN: dict[str, tuple[Path, list[str]]] = {
@@ -61,17 +61,17 @@ _MULTIDAY_PLAN: dict[str, tuple[Path, list[str]]] = {
 """A two-animal multi-day plan standing in for what a defined dataset leaves on disk."""
 
 _SESSION_ANIMALS: dict[str, str] = {"session_1": "animal_a", "session_2": "animal_a", "session_3": "animal_b"}
-"""The animal owning each session in the plan, which the ordering resolves an extraction's discovery through."""
+"""The animal owning each session in the plan, through which the ordering resolves an extraction's discovery."""
 
 
 def _tracker_path(session_path: Path, pipeline: ProcessingPipelines) -> Path:
-    """Returns the stand-in tracker path one pipeline records against for a session."""
+    """Returns the stand-in tracker path against which one pipeline records for a session."""
     directory, filename = _ADMISSION_TRACKERS[pipeline]
     return session_path.joinpath(directory, filename)
 
 
 def _mark_processed(session_path: Path) -> None:
-    """Writes a completed tracker for every pipeline forging admission can require.
+    """Writes a completed tracker for every pipeline that forging admission can require.
 
     Admission holds a session out of a dataset until its required pipelines report every job as succeeded, so a
     session standing in for a processed one has to carry those trackers.
@@ -100,7 +100,7 @@ def _install_project(
     """Creates a source project with the given animal-to-session layout and stubs the resolution dependencies.
 
     Args:
-        tmp_path: The temporary directory the project root is created under.
+        tmp_path: The temporary directory under which the project root is created.
         monkeypatch: The fixture used to replace the module-level discovery, loading, and registry dependencies.
         sessions: The session names to create for each animal.
         session_types: The session type to report for individual sessions, keyed by session name. Sessions absent
@@ -129,7 +129,7 @@ def _install_project(
             session_paths.append(session_path)
 
     def _discover_sessions(root_path: Path) -> list[Path]:
-        """Returns the sessions the project was seeded with, standing in for marker-based discovery."""
+        """Returns the sessions with which the project was seeded, standing in for marker-based discovery."""
         return list(session_paths)
 
     def _load(session_path: Path) -> SimpleNamespace:
@@ -231,7 +231,7 @@ def test_resolve_dataset_copies_the_surgery_snapshot_of_an_animals_latest_sessio
     """Verifies that an animal's snapshot is taken from its most recent source session rather than its earliest.
 
     Session names are timestamped, so the last of an animal's sessions in natural order is the most recent one and
-    carries the surgery record closest to the sessions the dataset is forged over.
+    carries the surgery record closest to the sessions over which the dataset is forged.
     """
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1", "session_2"]}
@@ -245,7 +245,7 @@ def test_resolve_dataset_copies_the_surgery_snapshot_of_an_animals_latest_sessio
 
 
 def test_resolve_dataset_appends_sessions_of_a_new_animal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that sessions of an animal the dataset does not hold are appended to it."""
+    """Verifies that sessions of an animal that the dataset does not hold are appended to it."""
     project_root = _install_project(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -266,7 +266,7 @@ def test_resolve_dataset_appends_sessions_of_a_new_animal(tmp_path: Path, monkey
 def test_resolve_dataset_leaves_membership_alone_when_sessions_already_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that providing sessions the dataset already holds changes nothing."""
+    """Verifies that providing sessions that the dataset already holds changes nothing."""
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1", "session_2"]}
     )
@@ -311,7 +311,7 @@ def test_resolve_dataset_rejects_an_unprocessed_session(tmp_path: Path, monkeypa
 def test_resolve_dataset_rejects_an_unprocessed_session_the_list_does_not_begin_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that every session a dataset is created from is screened, not only the one its metadata comes from.
+    """Verifies that every session of a dataset's creation list is screened, not only the source of its metadata.
 
     The admission gate is the only thing standing between an unfinished pipeline and a forged dataset, so a session
     named after the first has to hold the whole definition out just as the first one does.
@@ -391,8 +391,8 @@ def test_resolve_dataset_screens_every_added_session_rather_than_the_first(
 ) -> None:
     """Verifies that an extension naming several sessions screens each of them against the dataset it joins.
 
-    The dataset marker keeps claiming one session type and one acquisition system, so a second added session the
-    check never reaches leaves the membership mixed while the marker still reads as uniform.
+    The dataset marker keeps claiming one session type and one acquisition system, so a second added session that
+    the check never reaches leaves the membership mixed while the marker still reads as uniform.
     """
     project_root = _install_project(
         tmp_path=tmp_path,
@@ -532,8 +532,8 @@ def test_create_dataset_rejects_a_session_of_a_differing_acquisition_system(
     """Verifies that creating a dataset from sessions of two acquisition systems is rejected.
 
     Only one acquisition system is registered, so admission rejects a divergent value before the creator compares
-    it. The creator is therefore driven directly with admission held open, which is what a second registered system
-    would reach through the public policy.
+    it. The creator is therefore driven directly with admission held open. A second registered system would reach
+    that state through the public policy.
     """
     project_root = _install_project(
         tmp_path=tmp_path,
@@ -558,8 +558,8 @@ def test_verify_session_compatibility_rejects_a_differing_acquisition_system(
 ) -> None:
     """Verifies that a session acquired by another system never joins an existing dataset.
 
-    The dataset's own recorded system is moved off the session's, which is the state a dataset forged under a second
-    acquisition system would present to the compatibility check.
+    The dataset's own recorded system is moved off the session's, which is the state that a dataset forged under a
+    second acquisition system would present to the compatibility check.
     """
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]}
@@ -677,7 +677,7 @@ def test_resolve_dataset_rebuilds_a_named_animal_with_an_unchanged_session_set(
 def test_resolve_dataset_rejects_rebuilding_an_animal_absent_from_the_dataset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that naming an animal the dataset does not hold for rebuilding is rejected."""
+    """Verifies that an animal named for rebuilding is rejected when the dataset does not hold it."""
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]}
     )
@@ -778,7 +778,7 @@ def test_resolve_runnable_jobs_reports_the_whole_universe_for_an_unwritten_track
 
 
 def test_resolve_runnable_jobs_excludes_succeeded_jobs(tmp_path: Path) -> None:
-    """Verifies that a job the tracker records as succeeded is left out of the outstanding subset."""
+    """Verifies that a job recorded by the tracker as succeeded is left out of the outstanding subset."""
     universe = [(FORGING_JOB_NAME, "session_1"), (FORGING_JOB_NAME, "session_2")]
     tracker = _make_tracker(tmp_path=tmp_path, universe=universe)
     succeeded = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
@@ -789,7 +789,7 @@ def test_resolve_runnable_jobs_excludes_succeeded_jobs(tmp_path: Path) -> None:
 
 
 def test_resolve_runnable_jobs_includes_failed_jobs(tmp_path: Path) -> None:
-    """Verifies that a job the tracker records as failed stays outstanding so it is retried."""
+    """Verifies that a job recorded by the tracker as failed stays outstanding so it is retried."""
     universe = [(FORGING_JOB_NAME, "session_1")]
     tracker = _make_tracker(tmp_path=tmp_path, universe=universe)
     failed = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
@@ -834,7 +834,7 @@ def test_reset_animal_jobs_targets_only_the_named_animals(tmp_path: Path) -> Non
 
 
 def test_reset_animal_jobs_leaves_an_untracked_animal_alone(tmp_path: Path) -> None:
-    """Verifies that resetting an animal the tracker holds no job for leaves every recorded state in place."""
+    """Verifies that resetting an animal with no tracked job leaves every recorded state in place."""
     universe = [(MULTIDAY_DISCOVERY_JOB_NAME, "animal_b"), (FORGING_JOB_NAME, "session_2")]
     tracker = _make_tracker(tmp_path=tmp_path, universe=universe)
     for job_name, specifier in universe:
@@ -904,7 +904,7 @@ def test_run_forging_pipeline_never_redefines_the_hierarchy(tmp_path: Path, monk
     """Verifies that running the pipeline loads the dataset without changing its session set.
 
     The hierarchy is built by the definition entry point before any job is prepared, so a run that could widen it
-    would let a dispatched job mutate the universe its siblings were planned against.
+    would let a dispatched job mutate the universe against which its siblings were planned.
     """
     recorded = _record_resolution(monkeypatch)
 
@@ -1045,7 +1045,7 @@ def test_verify_session_admissibility_reports_the_unfinished_job_count(
         succeeded=[jobs[0]],
     )
 
-    with pytest.raises(ValueError, match="1 of 2 job\\(s\\) not"):
+    with pytest.raises(ValueError, match=r"1 of 2 job\(s\)\s+not"):
         verify_session_admissibility(session=training_session)
 
 

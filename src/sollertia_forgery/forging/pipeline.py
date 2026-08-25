@@ -75,16 +75,17 @@ FORGING_JOB_CONCURRENCY_LIMITS: dict[str, int] = {
 the tracker job name.
 
 Notes:
-    Only assembly declares a ceiling. It holds one core per job, so this is what sets the width of the pool it
-    opens. The cross-recording jobs exist for two-photon sessions alone, and each of them takes a wide core
-    allocation of its own, so the core budget already bounds how many run at once and no separate ceiling applies.
+    Only assembly declares a ceiling. It holds one core per job, so the ceiling sets the width of the pool it opens. The
+    cross-recording jobs exist for two-photon sessions alone, and each of them takes a wide core allocation of its own,
+    so the core budget already bounds how many run at once and no separate ceiling applies.
 """
 
 _MULTIDAY_JOB_NAMES: dict[MultiRecordingJobNames, str] = {
     MultiRecordingJobNames.DISCOVER: MULTIDAY_DISCOVERY_JOB_NAME,
     MultiRecordingJobNames.EXTRACT: MULTIDAY_EXTRACTION_JOB_NAME,
 }
-"""The forging tracker job name each cindra cross-recording stage is recorded under, keyed by the cindra job name.
+"""The forging tracker job name under which each cindra cross-recording stage is recorded, keyed by the cindra job
+name.
 
 Notes:
     cindra owns the cross-recording pipeline, while the forging tracker interleaves those stages with the per-session
@@ -98,12 +99,12 @@ class _MultidayStage:
     """Bundles one cindra cross-recording stage with everything the forging pipeline needs to dispatch it."""
 
     configuration_path: Path
-    """The path to the materialized multi-recording configuration of the animal the stage belongs to."""
+    """The path to the materialized multi-recording configuration of the animal to which the stage belongs."""
     job_name: MultiRecordingJobNames
     """The cindra job the stage executes."""
     specifier: str
-    """The cindra specifier the stage executes under, which is the recording identifier for a per-recording stage and
-    an empty string for a stage spanning the whole animal.
+    """The cindra specifier under which the stage executes. It is the recording identifier for a per-recording stage
+    and an empty string for a stage spanning the whole animal.
     """
     prime: bool
     """Determines whether the stage writes the shared multi-recording bootstrap before it runs."""
@@ -121,15 +122,15 @@ def define_forging_dataset(
     """Builds the dataset hierarchy and materializes each tracked animal's multi-recording configuration.
 
     Notes:
-        Every forging job runs against a hierarchy this call established, so it precedes them rather than joining
-        them on the processing tracker. Rebuilding an animal resets that animal's tracked jobs, since its new
-        session set makes every stage outstanding again. The tracked jobs of a session the animal no longer holds
-        fall outside the resulting universe and are discarded when the next pipeline run aligns the tracker.
+        Every forging job runs against a hierarchy this call established, so it precedes them rather than joining them
+        on the processing tracker. Rebuilding an animal resets that animal's tracked jobs, since its new session set
+        makes every stage outstanding again. The tracked jobs of a session no longer held by the animal fall outside the
+        resulting universe and are discarded when the next pipeline run aligns the tracker.
 
-        The animals this call adds or rebuilds have their multi-recording configuration materialized, alongside any
-        the dataset holds without one whose sessions are still on this machine. Whether a configuration is needed at
-        all follows from the dataset's recorded session type, so a dataset of sessions the system tracks nothing
-        across reads no source data here.
+        Each animal that this call adds or rebuilds has its multi-recording configuration materialized, as does an
+        animal already in the dataset that lacks one and whose sessions are still on this machine. Whether a
+        configuration is needed at all follows from the dataset's recorded session type, so a dataset of sessions with
+        no cross-recording tracking reads no source data here.
 
         An animal that already carries its configuration is left alone, and one whose sessions have moved off
         this machine is passed over. A dataset therefore keeps growing while part of its source data lives
@@ -160,7 +161,7 @@ def define_forging_dataset(
     """
     console.echo(message=f"Defining the '{name}' dataset...", level=LogLevel.INFO)
 
-    # Captured before resolution, so the animals this call adds are the ones absent from this set afterwards.
+    # Captured before resolution, so the animals added by this call are the ones absent from this set afterwards.
     existing_animals: frozenset[str] = frozenset()
     dataset_directory = project_root.joinpath(name)
     if not force_recreate and dataset_directory.joinpath(DATASET_MARKER_FILENAME).is_file():
@@ -178,13 +179,13 @@ def define_forging_dataset(
     resolved_animals = frozenset(dataset_animal.animal for dataset_animal in dataset.animals)
 
     # Membership in the dataset marker is not evidence that a configuration was written, because the marker is
-    # committed before the configurations are. An animal the marker holds but the disk does not is therefore
-    # materialized again, which is what makes a definition that failed partway self-healing on the next identical call.
+    # committed before the configurations are. An animal held by the marker but absent from the disk is therefore
+    # materialized again, so the next identical call heals a definition that failed partway.
     #
     # Whether an animal needs a configuration at all is a property of the dataset's own recorded session type, so a
-    # dataset the system tracks nothing across backfills nothing and reads no source data. Materializing also reads
+    # dataset with no cross-recording tracking backfills nothing and reads no source data. Materializing also reads
     # the animal's sessions, so the backfill covers the animals whose sessions are still here and leaves an animal
-    # whose data has moved off as it stands, which is what lets a large project be forged in passes.
+    # whose data has moved off as it stands. A large project is therefore forged in passes.
     tracked_across_recordings = SessionTypes(dataset.session_type) in resolve_multi_recording_session_types(
         system=dataset.acquisition_system
     )
@@ -195,8 +196,8 @@ def define_forging_dataset(
         and not dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME).is_file()
         and project_root.joinpath(dataset_animal.animal).is_dir()
     )
-    # Materializing loads every requested animal's sessions before the resolver can decline, so a dataset whose type
-    # the system tracks nothing across skips the call outright rather than paying that read to write nothing.
+    # Materializing loads every requested animal's sessions before the resolver can decline, so a dataset with no
+    # cross-recording tracking skips the call outright rather than paying that read to write nothing.
     if tracked_across_recordings:
         _materialize_multiday_plan(
             dataset=dataset,
@@ -238,9 +239,9 @@ def run_forging_pipeline(
         ``define_forging_dataset`` roots the ordering. It resolves the hierarchy from the requested session list and
         writes each animal's multi-recording configuration, so no job runs before it completes.
 
-        In local mode every stage the tracker already records as succeeded is skipped, so an invocation runs only the
-        jobs still outstanding. In remote mode the named job runs whatever state the tracker records for it.
-        Rebuilding an animal resets that animal's jobs first.
+        In local mode every stage that the tracker already records as succeeded is skipped, so an invocation runs only
+        the jobs still outstanding. In remote mode the named job runs regardless of the state that the tracker records
+        for it. Rebuilding an animal resets that animal's jobs first.
 
         In local mode (``job_id`` is None) every outstanding stage runs in sequence: each animal's discovery and its
         per-session extractions, then the assembly jobs across a parallel pool. The assembly stage runs sequentially
@@ -326,9 +327,9 @@ def run_forging_pipeline(
         console.echo(message="Forging job completed successfully.", level=LogLevel.SUCCESS)
         return
 
-    # The stages are resolved in the order cindra executes them, animal by animal, and the priming step each animal's
-    # first stage performs writes the shared bootstrap on disk. An outstanding later stage therefore runs correctly
-    # even when the stage that primed the bootstrap is skipped by this invocation.
+    # The stages are resolved in the order cindra executes them, animal by animal, and the priming step performed by
+    # each animal's first stage writes the shared bootstrap on disk. An outstanding later stage therefore runs
+    # correctly even when the stage that primed the bootstrap is skipped by this invocation.
     for job, stage in multiday_stages.items():
         if job not in runnable_jobs:
             continue
@@ -401,12 +402,12 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     Notes:
         Reads the dataset marker and each animal's materialized configuration, loading no session marker. Discovery
         therefore reads nothing outside the dataset hierarchy, so a dataset whose source sessions have moved off this
-        machine still resolves its jobs. Every job the universe names is possible, because ``define_forging_dataset``
-        admits a session only once it carries the single-day outputs the forging stages consume, so the possible
-        subset equals the universe.
+        machine still resolves its jobs. Every job that the universe names is possible, because
+        ``define_forging_dataset`` admits a session only once it carries the single-day outputs the forging stages
+        consume, so the possible subset equals the universe.
 
-        Every stage is specified by the animals and sessions the dataset hierarchy holds, so a batch is prepared
-        against a dataset ``define_forging_dataset`` has already built. Preparing it afterwards names everything the
+        Every stage is specified by the animals and sessions the dataset hierarchy holds, so a batch is prepared against
+        a dataset that ``define_forging_dataset`` has already built. Preparing it afterwards names everything the
         hierarchy now holds, and the recorded job state decides which of those a run dispatches.
 
     Args:
@@ -447,8 +448,8 @@ def _materialize_multiday_plan(
         project_root: The path to the project's root directory that stores the animal and session data directories.
         display_progress: Determines whether the configuration materialized for each animal requests progress
             bars.
-        animals: The identifiers of the animals to materialize a configuration for. Pass None to materialize every
-            animal the dataset holds, which is what a freshly created dataset needs.
+        animals: The identifiers of the animals for which to materialize a configuration. Pass None to materialize
+            every animal the dataset holds, which is what a freshly created dataset needs.
 
     Returns:
         A mapping of each tracked animal to a tuple of its materialized configuration path and its session names, in
@@ -534,8 +535,8 @@ def _build_forging_universe(
     """Builds the full forging job universe for the dataset's tracker.
 
     Notes:
-        cindra declares which cross-recording stages an animal runs and the order they run in, so the universe takes
-        that stretch of the graph from it and appends the per-session assembly stage this library owns. The result
+        cindra declares which cross-recording stages an animal runs and the order in which they run, so the universe
+        takes that stretch of the graph from it and appends the per-session assembly stage this library owns. The result
         holds one discovery job per tracked animal, one extraction job per that animal's session, and one assembly job
         per session in the dataset. Datasets whose animals need no multi-day processing carry assembly jobs alone.
 
@@ -544,7 +545,7 @@ def _build_forging_universe(
         multiday_plan: The per-animal multi-day plan from ``_materialize_multiday_plan`` or ``_load_multiday_plan``.
 
     Returns:
-        The list of ``(job_name, specifier)`` pairs the forging tracker aligns against.
+        The list of ``(job_name, specifier)`` pairs against which the forging tracker aligns.
     """
     universe: list[tuple[str, str]] = list(_resolve_multiday_stages(multiday_plan=multiday_plan))
     universe.extend((FORGING_JOB_NAME, entry.session) for entry in dataset.sessions)
@@ -566,13 +567,13 @@ def forging_job_prerequisites(
         that edge is added on top of the ordering cindra supplies. A dataset needing no multi-day processing carries
         assembly jobs that depend on nothing.
 
-        The dataset supplies the animal each session belongs to, which the universe pairs do not carry, since an
-        extraction is specified by its session while its discovery is specified by its animal. A job whose animal the
-        dataset no longer holds keeps an empty prerequisite tuple, so every job in the universe is answered for.
+        The dataset supplies the animal to which each session belongs, which the universe pairs do not carry, since an
+        extraction is specified by its session while its discovery is specified by its animal. A job whose animal is no
+        longer in the dataset keeps an empty prerequisite tuple, so every job in the universe carries an entry.
 
     Args:
-        dataset: The resolved dataset the universe was built from.
-        universe: The job set to build ordering over, as returned by ``_build_forging_universe``.
+        dataset: The resolved dataset from which the universe was built.
+        universe: The job set over which to build ordering, as returned by ``_build_forging_universe``.
 
     Returns:
         A mapping of each job to its tuple of prerequisite jobs, following the discovery to extraction to assembly
@@ -610,20 +611,20 @@ def forging_job_prerequisites(
 
 
 def _forging_job(animal: str, job: tuple[str, str]) -> tuple[str, str]:
-    """Renames one cindra cross-recording job into the forging job the tracker records it under.
+    """Renames one cindra cross-recording job into the forging job under which the tracker records it.
 
     Notes:
-        cindra specifies a stage spanning the whole animal with an empty string, since it knows the dataset it
-        registers rather than the animal that dataset belongs to. The forging tracker interleaves several animals, so
-        it records such a stage under the animal instead. Every other stage is specified by its recording, which the
+        cindra specifies a stage spanning the whole animal with an empty string, since it knows the dataset it registers
+        rather than the animal to which that dataset belongs. The forging tracker interleaves several animals, so it
+        records such a stage under the animal instead. Every other stage is specified by its recording, which the
         forging layout names by its session.
 
     Args:
-        animal: The identifier of the animal whose cross-recording pipeline the job belongs to.
+        animal: The identifier of the animal whose cross-recording pipeline holds the job.
         job: The cindra ``(job_name, specifier)`` pair to rename.
 
     Returns:
-        The ``(job_name, specifier)`` pair the forging tracker records the job under.
+        The ``(job_name, specifier)`` pair under which the forging tracker records the job.
     """
     job_name, specifier = job
     return _MULTIDAY_JOB_NAMES[MultiRecordingJobNames(job_name)], specifier or animal
@@ -633,7 +634,7 @@ def _resolve_multiday_stages(multiday_plan: dict[str, tuple[Path, list[str]]]) -
     """Resolves every cross-recording stage the multi-day plan implies, keyed by the forging job that tracks it.
 
     Notes:
-        Which stages an animal runs, the order they run in, and the stage that has nothing before it are all
+        Which stages an animal runs, the order in which they run, and the stage that has nothing before it are all
         cindra's to declare. They come from its resolvers, and this call only renames the result into the forging
         tracker's vocabulary. The returned mapping preserves that order, animal by animal, so iterating it dispatches an
         animal's stages in the order cindra executes them.
@@ -671,7 +672,7 @@ def _resolve_runnable_jobs(tracker: ProcessingTracker, universe: list[tuple[str,
         reports its whole universe as outstanding.
 
     Args:
-        tracker: The forging processing tracker to read the recorded job states from.
+        tracker: The forging processing tracker from which to read the recorded job states.
         universe: Every ``(job_name, specifier)`` pair the dataset could produce.
 
     Returns:
@@ -691,9 +692,9 @@ def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals
 
     Notes:
         A rebuilt animal has a new session set, so its discovery stage is outstanding again, along with the multi-day
-        extraction and assembly stages of every session it now holds, including the sessions it kept across the
-        rebuild. Only the identifiers the tracker already holds are reset, since a tracker rejects a request naming a
-        job it does not track.
+        extraction and assembly stages of every session it now holds, including the sessions it kept across the rebuild.
+        Only the identifiers that the tracker already holds are reset, since a tracker rejects a request naming a job it
+        does not track.
 
     Args:
         tracker: The forging processing tracker whose job states to reset.
@@ -731,15 +732,15 @@ def _run_multiday_job(
         cindra records this job's state directly on the forging tracker under job_id, and identifies each recording by
         the unique component of its recording directory path, which for the forging layout is the session name.
 
-        A stage that primes writes the shared multi-recording bootstrap every cindra stage reads. The priming precedes
+        A priming stage writes the shared multi-recording bootstrap that every cindra stage reads. The priming precedes
         the tracked job, so a bootstrap that cannot be written leaves the job unstarted rather than recorded as failed.
 
     Args:
         stage: The cindra stage to execute, resolved by ``_resolve_multiday_stages``.
-        job: The forging ``(job_name, specifier)`` pair the stage is tracked under, used for logging.
-        tracker: The forging processing tracker this job is recorded on.
+        job: The forging ``(job_name, specifier)`` pair under which the stage is tracked, used for logging.
+        tracker: The forging processing tracker on which this job is recorded.
         job_id: The unique hexadecimal identifier for this job.
-        workers: The workers this stage runs under.
+        workers: The workers under which this stage runs.
 
     Raises:
         FileNotFoundError: If the configuration file is missing, is not a .yaml file, is not a valid multi-recording
@@ -782,20 +783,20 @@ def _execute_remote_forging_job(
 
     Notes:
         The resolved cross-recording stages carry everything cindra needs to run any one of them on its own, so a job
-        they name is dispatched through them and every other job is an assembly job this library runs itself.
+        that they name is dispatched through them and every other job is an assembly job this library runs itself.
 
     Args:
         job_id: The hexadecimal identifier of the job to execute.
         universe: Every ``(job_name, specifier)`` pair the dataset could produce, used to resolve the job.
         dataset: The resolved dataset being forged.
         session_lookup: The mapping from session name to its DatasetSession metadata, used by assembly jobs.
-        multiday_stages: The cross-recording stages from ``_resolve_multiday_stages``, keyed by the forging job each
-            one is tracked under.
+        multiday_stages: The cross-recording stages from ``_resolve_multiday_stages``, keyed by the forging job under
+            which each one is tracked.
         project_root: The path to the project's root directory.
         tracker: The forging processing tracker.
         worker: The registered per-session assembly worker.
-        described_columns: The column names the dataset describes, which every assembled session is held to.
-        workers: The workers a multi-day stage runs under. The assembly stage takes its own fan-out instead.
+        described_columns: The column names the dataset describes, to which every assembled session is held.
+        workers: The workers under which a multi-day stage runs. The assembly stage takes its own fan-out instead.
 
     Raises:
         ValueError: If the job_id does not match any job available for this dataset.
@@ -853,7 +854,7 @@ def _execute_jobs_sequential(
         tracker: The forging processing tracker.
         job_ids: The mapping from session name to job ID.
         worker: The registered per-session assembly worker.
-        described_columns: The column names the dataset describes, which every assembled session is held to.
+        described_columns: The column names the dataset describes, to which every assembled session is held.
         display_progress: Determines whether to display a per-session progress bar.
     """
     progress_context = (
@@ -910,7 +911,7 @@ def _execute_jobs_parallel(
         tracker: The forging processing tracker.
         job_ids: The mapping from session name to job ID.
         worker: The registered per-session assembly worker. Must be picklable for the worker processes.
-        described_columns: The column names the dataset describes, which every assembled session is held to.
+        described_columns: The column names the dataset describes, to which every assembled session is held.
         workers: The resolved worker-process count for the shared pool.
         display_progress: Determines whether to display a per-session progress bar.
     """
@@ -996,7 +997,7 @@ def _execute_job(
         tracker: The forging processing tracker.
         job_id: The unique hexadecimal identifier for this assembly job.
         worker: The registered per-session assembly worker.
-        described_columns: The column names the dataset describes, which every assembled session is held to.
+        described_columns: The column names the dataset describes, to which every assembled session is held.
     """
     console.echo(message=f"Running '{FORGING_JOB_NAME}' job with specifier '{session_name}' (ID: {job_id})...")
     with tracker.run_job(job_id=job_id):
@@ -1023,22 +1024,21 @@ def _forge_session(
     columns, then re-exporting the shared assets.
 
     Notes:
-        This is the atomic unit the parallel path dispatches to worker processes, so it stays importable at module
-        level and accepts only picklable arguments. The session descriptor is written by every acquisition runtime,
-        while the VR and experiment configurations are present only for the session types that carry them. A session
-        missing a required asset fails before any expensive work, and whichever assets the session holds are
-        re-exported alongside the assembled feather.
+        This is the atomic unit the parallel path dispatches to worker processes, so it stays importable at module level
+        and accepts only picklable arguments. The session descriptor is written by every acquisition runtime, while the
+        VR and experiment configurations are present only for the session types that carry them. A session missing a
+        required asset fails before any expensive work, and every asset that the session holds is re-exported alongside
+        the assembled feather.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
         output_path: The path to the session's ``data.feather`` in the forged dataset hierarchy.
         dataset_name: The unqualified dataset name, forwarded to the assembly worker.
         worker: The registered per-session assembly worker for the dataset's acquisition system.
-        described_columns: The column names the dataset describes, which every assembled session is held to.
+        described_columns: The column names the dataset describes, to which every assembled session is held.
 
     Raises:
-        FileNotFoundError: If a re-exported shared asset the session is required to carry is missing from the source
-            session.
+        FileNotFoundError: If the source session is missing a re-exported shared asset that it is required to carry.
         ValueError: If the assembled feather carries a column the dataset's description companion file does not
             describe.
     """

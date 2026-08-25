@@ -1,5 +1,5 @@
-"""Contains tests for the paging primitives every read tool shares, the three stages read_project_jobs_tool reports in,
-and the project dataset listing.
+"""Contains tests for the paging primitives every read tool shares, the three stages in which read_project_jobs_tool
+reports, and the project dataset listing.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ _JOB_COUNT: int = 7
 
 @pytest.fixture
 def project_directory(tmp_path: Path) -> Path:
-    """Returns the project directory every read tool in this module is pointed at."""
+    """Returns the project directory at which every read tool in this module is pointed."""
     return tmp_path.joinpath("Proj")
 
 
@@ -155,10 +155,10 @@ def test_the_default_page_shrinks_when_detail_is_requested() -> None:
 
 
 def test_counting_values_reports_absent_subjects_as_a_category() -> None:
-    """Verifies that a null is itself a value a caller filters on, so it is counted rather than dropped.
+    """Verifies that a null is itself a value on which a caller filters, so it is counted rather than dropped.
 
-    A breakdown is read top to bottom as the list of values an axis can be filtered on, so the counts are reported in
-    value order rather than in the order the column happens to hold them.
+    A breakdown is read top to bottom as the list of values on which an axis can be filtered, so the counts are
+    reported in value order rather than in the order the column happens to hold them.
     """
     counts = count_values(values=["a", "a", None, "b"])
 
@@ -167,7 +167,7 @@ def test_counting_values_reports_absent_subjects_as_a_category() -> None:
 
 
 def test_filtering_on_a_column_the_table_does_not_hold_names_the_columns_it_does() -> None:
-    """Verifies that a filter naming a column the artifact lacks is answered rather than left to fail on the read."""
+    """Verifies that a filter naming a column missing from the artifact is answered rather than failing on the read."""
     frame = pl.DataFrame({"status": ["FAILED"], "pipeline": ["video"]})
 
     response = reject_unknown(frame=frame, column="state", values=["FAILED"], subject="job")
@@ -179,7 +179,7 @@ def test_filtering_on_a_column_the_table_does_not_hold_names_the_columns_it_does
 
 
 def test_the_elapsed_runtime_a_response_reports_is_measured_in_seconds() -> None:
-    """Verifies that an operation timed in milliseconds is reported in the seconds every response carries it in."""
+    """Verifies that an operation timed in milliseconds is reported in the seconds every response uses."""
     timer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
     timer.reset()
     timer.delay(delay=100, allow_sleep=True, block=False)
@@ -329,7 +329,7 @@ def test_a_session_resolves_to_every_dataset_holding_it(project_directory: Path)
 
 
 def test_an_animal_resolves_to_every_dataset_holding_it(project_directory: Path) -> None:
-    """Verifies that an animal filter answers which datasets a subject participates in."""
+    """Verifies that an animal filter answers the datasets in which a subject participates."""
     _install_dataset(project_directory=project_directory, name="ds_a", members=[("305", "s1"), ("321", "s2")])
     _install_dataset(project_directory=project_directory, name="ds_b", members=[("305", "s1")])
 

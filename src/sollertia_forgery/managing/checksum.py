@@ -43,7 +43,7 @@ def run_checksum_processing_pipeline(
     Notes:
         This is a single-stage pipeline that produces exactly one job, which resolves the whole raw_data directory.
         The job runs in one of two modes. Verification compares the recomputed checksum against the stored value and
-        records a failure on any mismatch, which is what marks the data as corrupted. Regeneration overwrites the
+        records a failure on any mismatch. That failure marks the data as corrupted. Regeneration overwrites the
         stored value with the freshly computed one, re-baselining a session whose raw data changed by intent.
 
         Every path this pipeline reads and writes lives under raw_data, while every other session pipeline writes
@@ -94,13 +94,13 @@ def run_checksum_processing_pipeline(
 
     checksum_path = session.raw_data.checksum_path
 
-    # Verification needs a stored value to compare against, so its absence is a hard error rather than a mismatch.
+    # Verification needs a stored value for the comparison, so its absence is a hard error rather than a mismatch.
     # Regeneration writes that value, so it runs on a session that has never been checksummed.
     if not regenerate_checksum and not checksum_path.is_file():
         message = (
             f"Unable to verify the data integrity checksum for the session '{session.session_name}'. No checksum "
             f"file exists at '{checksum_path}'. Regenerate the session's checksum to establish the stored value "
-            f"this verification compares against."
+            f"against which this verification compares."
         )
         console.error(message=message, error=FileNotFoundError)
 
@@ -206,7 +206,7 @@ def _has_checksummable_data(raw_data_path: Path) -> bool:
 
     Notes:
         Stops at the first qualifying file, so the cost is a partial directory walk rather than a full census. A
-        session holding only the excluded bookkeeping files has nothing to checksum, which is what distinguishes an
+        session holding only the excluded bookkeeping files has nothing to checksum. That absence distinguishes an
         acquired session from one whose raw data never arrived.
 
     Args:

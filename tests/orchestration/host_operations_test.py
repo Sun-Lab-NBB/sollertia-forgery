@@ -58,7 +58,7 @@ class StubResult:
     """Stands in for a completed server-side invocation."""
 
     return_code: int = 0
-    """The status the invocation exited with."""
+    """The status with which the invocation exited."""
     stdout: str = ""
     """The invocation's standard output."""
     stderr: str = ""
@@ -69,12 +69,12 @@ class StubServer:
     """Stands in for a connected server, recording every command it is handed.
 
     Args:
-        stdout: The standard output every command answers with.
-        return_code: The status every command exits with.
+        stdout: The standard output with which every command answers.
+        return_code: The status with which every command exits.
 
     Attributes:
-        _stdout: The standard output every command answers with.
-        _return_code: The status every command exits with.
+        _stdout: The standard output with which every command answers.
+        _return_code: The status with which every command exits.
         commands: The commands the server was handed, in the order it received them.
     """
 
@@ -218,7 +218,7 @@ def test_defining_a_remote_dataset_names_its_sessions_and_rebuild_flags() -> Non
     extended = server.commands[1]
     # A rebuild deletes the whole hierarchy and reassembles it, so an additive definition must not carry the flag.
     assert "force_recreate=False" in extended
-    # The order the sessions were acquired in is what the dataset records, so the caller's own order travels intact.
+    # The dataset records the order in which the sessions were acquired, so the caller's own order travels intact.
     assert 'session_names=tuple(["s2", "s1"])' in extended
     assert "recreate_animals=tuple([])" in extended
 
@@ -300,7 +300,7 @@ def test_a_path_size_sums_every_file_it_holds(tmp_path: Path) -> None:
 
 
 def test_cleaning_an_unsupported_pipeline_removes_nothing(tmp_path: Path) -> None:
-    """Verifies that a pipeline the dispatch table does not hold names no output, so nothing is removed."""
+    """Verifies that a pipeline absent from the dispatch table names no output, so nothing is removed."""
     assert clean_pipeline_output(pipeline="nonexistent", unit_paths=[tmp_path]) == []
 
 
@@ -316,8 +316,8 @@ def test_the_local_host_reports_where_an_artifact_already_sits(tmp_path: Path) -
 def test_the_mirrored_artifact_set_covers_what_the_read_tools_resolve_from(
     tmp_path: Path,
 ) -> None:
-    """Verifies that a mirrored table is only readable alongside the file its tool resolves it from, so both travel
-    together.
+    """Verifies that a mirrored table is only readable alongside the file from which its tool resolves it, so both
+    travel together.
     """
     pulled: list[str] = []
 
@@ -354,7 +354,7 @@ def test_the_mirrored_artifact_set_covers_what_the_read_tools_resolve_from(
 
         @staticmethod
         def pull(local_path: Path, remote_path: Path) -> None:
-            """Records what was asked for rather than copying it."""
+            """Records the requested artifact rather than copying it."""
             pulled.append(remote_path.name)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text("mirrored")
@@ -382,7 +382,7 @@ def create_dataset(project: ProjectData, name: str) -> DatasetData:
     """Creates one forged dataset hierarchy under a project through the shared hierarchy's own creator.
 
     Args:
-        project: The project the dataset is created under.
+        project: The project under which the dataset is created.
         name: The name of the dataset to create.
 
     Returns:
@@ -403,7 +403,7 @@ def write_plan_table(path: Path, rows: list[dict[str, Any]]) -> Path:
     """Writes one project plan projection holding the supplied partial rows.
 
     Args:
-        path: The path the projection is written to.
+        path: The path to which the projection is written.
         rows: The partial rows, each overriding the shared defaults.
 
     Returns:
@@ -438,7 +438,7 @@ def issued_command(server: StubSSHTransport, index: int = 0) -> str:
     """Returns one invocation the stubbed transport recorded.
 
     Args:
-        server: The transport every invocation was recorded against.
+        server: The transport against which every invocation was recorded.
         index: The position of the invocation to return.
 
     Returns:
@@ -535,7 +535,7 @@ def test_planning_reports_the_figures_each_unit_recorded(project_root: Path, exp
     # survives the sizing pass.
     assert planned[0]["job_count"] == 1
     # The reported figure is the memory the projection records for that unit's jobs, so the two agree exactly. A
-    # summary built from any other planned quantity would disagree with the table a submission is sized against.
+    # summary built from any other planned quantity would disagree with the table against which a submission is sized.
     plan_rows = LocalHost.read_rows(path=project_plan_path(project_directory=project_root))
     assert planned[0]["summed_memory_mb"] == sum(int(row["memory_mb"]) for row in plan_rows)
 
@@ -642,8 +642,8 @@ def test_a_local_reset_applies_each_units_own_identifiers_to_that_unit_alone(
     """Verifies that a retry names the jobs it wants back, so every other record the unit holds survives the reset.
 
     A job identifier carries no unit, so the two sessions record the same stage under the same identifier. Applying one
-    unit's identifiers to the other, or discarding them and clearing everything, would push a succeeded record the
-    caller never named back to the scheduled state and recompute a whole run's work.
+    unit's identifiers to the other, or discarding them and clearing everything, would push back to the scheduled
+    state a succeeded record the caller never named, and recompute a whole run's work.
     """
     retried = session_factory(animal_id="321", experiment_name="test_experiment")
     jobs = [("runtime_processing", "1"), ("runtime_processing", "2")]
@@ -708,7 +708,7 @@ def test_the_local_host_resolves_where_each_units_tracker_sits(experiment_sessio
 
 
 def test_an_unsupported_pipeline_resolves_no_tracker_at_all(experiment_session: SessionData) -> None:
-    """Verifies that a pipeline the dispatch table does not hold names no tracker, so no descriptor carries a location
+    """Verifies that a pipeline absent from the dispatch table names no tracker, so no descriptor carries a location
     for it.
     """
     assert (
@@ -902,8 +902,8 @@ def test_a_server_side_invocation_killed_by_a_signal_is_reported_as_a_failure(
             project_root=_SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
         )
 
-    # The invocation whose output the caller parses answers the same way, so a killed cleanup never reads as a short
-    # removal list.
+    # The invocation whose output is parsed by the caller answers the same way, so a killed cleanup never reads as a
+    # short removal list.
     with pytest.raises(RuntimeError):
         captured_host.clean(pipeline="video", unit_paths=[Path("/data/P/305/a")])
 

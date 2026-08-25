@@ -46,7 +46,7 @@ Notes:
 
 
 class _CalciumIndicator(StrEnum):
-    """Enumerates the calcium indicators the Mesoscope-VR cindra configurations are tuned for."""
+    """Enumerates the calcium indicators for which the Mesoscope-VR cindra configurations are tuned."""
 
     GCAMP6F = "GCaMP6f"
     """The Thy1-GCaMP6f transgenic line (GP5.17)."""
@@ -144,7 +144,7 @@ def resolve_multi_recording_configuration(session: SessionData) -> MultiRecordin
 
 
 def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
-    """Resolves an animal's genotype string to the calcium indicator its cindra configuration is tuned for.
+    """Resolves an animal's genotype string to the calcium indicator for which its cindra configuration is tuned.
 
     Notes:
         The genotype is normalized before matching. Normalization casefolds the string, strips surrounding whitespace,
@@ -157,7 +157,7 @@ def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
 
     Returns:
-        The calcium indicator the genotype maps to.
+        The calcium indicator to which the genotype maps.
 
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
