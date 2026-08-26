@@ -132,6 +132,7 @@ donated by that member:
 | Microcontroller event codes    | The event codes each parsed module reads, which build the extraction filter                |
 | Microcontroller eligibility    | The modules a given session configured for use                                             |
 | Runtime binding                | The source identifier of the runtime log, paired with the parser that decodes its payloads |
+| Pose prediction locator        | The externally-produced pose-prediction file the system's tracking pass reads              |
 | Video tracking                 | The pass that reads the session's pose predictions and writes its tracking outputs         |
 | Two-photon data locator        | The raw imaging directory the two-photon pipeline hands to cindra                          |
 | Cindra configuration resolvers | The single-recording and multi-recording configurations passed to cindra                   |
@@ -395,7 +396,8 @@ tools and the skills described here.
 
 The server exposes the planning, processing, forging, and project management pipelines. The sollertia-shared-assets,
 ataraxis-video-system, ataraxis-communication-interface, and cindra libraries each serve their own assets through their
-own MCP server, so this server leaves those tools to them.
+own MCP server, so this server leaves those tools to them. `assets:working-directory` sets the data root, and the
+`assets:project-hierarchy`, `assets:session-discovery`, and `assets:datasets` skills produce the paths named below.
 
 Every tool names a filesystem path by what that path holds, and the same name means the same thing in every tool. A
 `session_path` names one session's root directory, a `dataset_path` names one forged dataset's root, and a
@@ -490,6 +492,10 @@ The **forging** plugin of the [sollertia](https://github.com/Sun-Lab-NBB/sollert
 library's Claude Code skills and the registration for its MCP server. Installing that plugin registers the MCP server
 with compatible clients and makes every associated skill available.
 
+Operators additionally install the **assets** plugin from the same marketplace, because every batch workflow above
+starts from the `session_paths` list produced by its `assets:session-discovery` skill, which is served by the separate
+`slsa mcp` server.
+
 Contributors additionally install the **automation** plugin from the [ataraxis](https://github.com/Sun-Lab-NBB/ataraxis)
 marketplace. That plugin provides the skills that enforce the Sollertia coding conventions of this repository, together
 with the codebase exploration and audit tools.
@@ -557,10 +563,10 @@ The Mesoscope-VR package is the reference for both the module split and the cont
 
 **Step 1: Add the enumeration member upstream**
 
-`AcquisitionSystems` is owned by sollertia-shared-assets. Add the member there first, along with the system's hardware
-state, experiment configuration, and raw-data dataclasses. In that library's `SYSTEM_SESSION_TYPES`, pair the member
-with the session types the system records. Until the steps below are complete, importing any pipeline in this library
-raises, because the coverage check refuses a partially wired system.
+`AcquisitionSystems` is owned by sollertia-shared-assets, and `assets:library-extension` owns this step. Add the member
+there first, along with the system's hardware state, experiment configuration, and raw-data dataclasses. In that
+library's `SYSTEM_SESSION_TYPES`, pair the member with the session types the system records. Until the steps below are
+complete, importing any pipeline in this library raises, because the coverage check refuses a partially wired system.
 
 **Step 2: Create the system package**
 
@@ -604,15 +610,17 @@ donor registry list the registry-coverage test checks. The suite gates on 100% s
 **Step 5: Update the sibling libraries**
 
 Coordinate with sollertia-experiment, which acquires the sessions the new system records, and confirm that every
-artifact a pipeline reads is an artifact the acquisition runtime writes. That library carries no import-time coverage
-check of its own, so a system left unwired in it surfaces only when an operator runs its configure command.
+artifact a pipeline reads is an artifact the acquisition runtime writes. `experiment:library-extension` owns the seams
+that half composes. That library carries no import-time coverage check of its own, so a system left unwired in it
+surfaces only when an operator runs its configure command.
 
 ### Adding a New Session Type
 
 A session type is owned by sollertia-shared-assets and reaches this library through the recording system's package.
 
-1. Add the `SessionTypes` member and its descriptor dataclass in sollertia-shared-assets. In `SYSTEM_SESSION_TYPES`,
-   pair the member with every acquisition system that records it.
+1. Add the `SessionTypes` member and its descriptor dataclass in sollertia-shared-assets, the step
+   `assets:library-extension` owns. In `SYSTEM_SESSION_TYPES`, pair the member with every acquisition system that
+   records it.
 2. Add the type to the recording system's admission policy, which names the pipelines a session of that type completes
    before it joins a forged dataset. A type left out of the policy joins no dataset, which is the deliberate opt-out
    rather than an omission.
