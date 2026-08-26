@@ -107,10 +107,10 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # A fixed handful of filesystem operations, independent of recording length.
     RENAME_JOB_NAME: 1,
     # Reads pose predictions written upstream and never runs inference. Its ellipse fit solves once per distinct
-    # occlusion pattern rather than once per sample, so its cost holds steady as a recording lengthens. The width
-    # covers the numeric backends used by the fit itself, which are resized per job. It does not reach the dataframe
-    # engine, whose width is latched at import and pinned to one thread for every worker in the pool.
-    TRACKING_JOB_NAME: 2,
+    # occlusion pattern rather than once per sample, so its cost holds steady as a recording lengthens. The stage runs
+    # in one process and opens no pool. The dataframe engine on which it leans is latched at import and pinned to one
+    # thread for every worker, so a wider allocation reserves cores the job never occupies.
+    TRACKING_JOB_NAME: 1,
     # Decodes the recording in parallel chunks. Throughput is bound by how fast frames move through memory rather
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.

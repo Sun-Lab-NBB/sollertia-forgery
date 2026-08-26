@@ -52,8 +52,9 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
 )
 """The job fields a semi-detail listing carries, which is the job's subject, its identity, and its figures."""
 
-_PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "prerequisite_ids")
-"""The job fields detail adds, which are the tracked job's identifier and its prerequisite jobs."""
+_PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "memory_modeled", "prerequisite_ids")
+"""The job fields detail adds, which are the tracked job's identifier, whether a model of the job's own input produced
+its memory figure, and its prerequisite jobs."""
 
 
 @mcp.tool()
@@ -66,19 +67,22 @@ def plan_session_jobs_tool(
     expensive half of planning and the reason it is a call of its own. A session already carrying a plan keeps every
     recorded figure and is only extended with jobs the cache does not hold, so re-running this is cheap and safe.
 
-    A session that cannot be planned is reported in its own entry and does not abort the others.
+    A session that cannot be planned is reported in its own entry and does not abort the others. A job whose input the
+    sizing pass cannot read is left out of its session's plan and reported with the reason, leaving every job beside it
+    planned.
 
     Args:
         session_paths: The session root directories to plan, which are paths ON THE SERVER for ``remote``.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds. Leave False unless a
             deliberate retune should be adopted, since a submission may already have been sized against the recorded
-            figures.
+            figures. A cache stamped with another resource-model version is re-estimated whatever this asks.
 
     Returns:
-        A response dict with ``host``, ``total_units``, ``total_jobs``, the ``elapsed_seconds`` planning took, and a
-        ``units`` list carrying each session's ``unit_path``, ``unit_name``, ``job_count``, and ``summed_memory_mb``,
-        or its ``unit_path`` and the ``error`` that stopped it.
+        A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
+        Carries a ``units`` list, whose entries hold each session's ``unit_path``, ``unit_name``, ``job_count``, and
+        ``summed_memory_mb``, or its ``unit_path`` and the ``error`` that stopped it. A ``local`` entry also holds the
+        ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -90,17 +94,21 @@ def plan_dataset_jobs_tool(
     """Records what every forging job of one or more datasets will cost, caching the figures at each dataset root.
 
     A dataset's figures follow from the single-day outputs its jobs consume, and admission already requires a session
-    to carry those outputs, so a dataset is plannable as soon as its hierarchy is defined.
+    to carry those outputs, so a dataset is plannable as soon as its hierarchy is defined. A job whose input the sizing
+    pass cannot read is left out of its dataset's plan and reported with the reason, leaving every job beside it
+    planned.
 
     Args:
         dataset_paths: The dataset root directories to plan, which are paths ON THE SERVER for ``remote``.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
-        regenerate_plan: Determines whether to re-estimate the figures a cache already holds.
+        regenerate_plan: Determines whether to re-estimate the figures a cache already holds. A cache stamped with
+            another resource-model version is re-estimated whatever this asks.
 
     Returns:
-        A response dict with ``host``, ``total_units``, ``total_jobs``, the ``elapsed_seconds`` planning took, and a
-        ``units`` list carrying each dataset's ``unit_path``, ``unit_name``, ``job_count``, and ``summed_memory_mb``,
-        or its ``unit_path`` and the ``error`` that stopped it.
+        A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
+        Carries a ``units`` list, whose entries hold each dataset's ``unit_path``, ``unit_name``, ``job_count``, and
+        ``summed_memory_mb``, or its ``unit_path`` and the ``error`` that stopped it. A ``local`` entry also holds the
+        ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -168,9 +176,11 @@ def read_project_plan_tool(
     """Reads the planned cores and memory of a project's jobs out of its stored projection, in three widening stages.
 
     A bare call reports the figures against which a submission is sized, alongside a ``breakdown`` naming every unit
-    kind, animal, dataset, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs
-    carrying their subject and their figures. Opting into detail adds each job's tracked identifier and its prerequisite
-    jobs.
+    kind, animal, dataset, pipeline, and job type the projection holds. An axis holding more distinct values than the
+    shared cap reports how many it holds in place of its counts, and filtering on that axis reaches the jobs
+    themselves. Naming a filter adds a page of planned jobs carrying their subject and their figures. Opting into
+    detail adds each job's tracked identifier, whether a model of the job's own input produced its memory figure, and
+    its prerequisite jobs.
 
     The totals and the breakdown span every planned job regardless of the filters, so narrowing what is listed never
     distorts what is reported. Reads the stored table rather than any unit's data, so the cost is independent of how
@@ -191,7 +201,8 @@ def read_project_plan_tool(
             every match, which is how a caller reading under a tight filter takes the whole result at once.
         start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report their tracked identifier and their prerequisite jobs.
+        detailed: Determines whether the listed jobs report their tracked identifier, whether a model of their own
+            input produced their memory figure, and their prerequisite jobs.
 
     Returns:
         A response dict with ``project_path``, ``plan_path``, the whole-projection totals, and a ``breakdown`` per

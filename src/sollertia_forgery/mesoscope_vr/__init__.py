@@ -9,7 +9,7 @@ from .two_photon import (
     resolve_multi_recording_configuration,
     resolve_single_recording_configuration,
 )
-from .video_tracking import process_mesoscope_video_tracking
+from .video_tracking import process_mesoscope_video_tracking, locate_mesoscope_pose_predictions
 from .microcontrollers import (
     parse_lick,
     parse_brake,
@@ -31,6 +31,7 @@ __all__ = [
     "assemble_mesoscope_session",
     "get_eligible_modules",
     "get_module_event_codes",
+    "locate_mesoscope_pose_predictions",
     "locate_two_photon_data",
     "parse_brake",
     "parse_encoder",

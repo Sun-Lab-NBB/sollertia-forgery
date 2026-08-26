@@ -596,7 +596,9 @@ def test_discovery_reports_the_universe_and_the_possible_subset(
     camera_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies discovery keeps every registered camera in the universe while gating parse jobs on their archives."""
+    """Verifies discovery keeps every registered camera in the universe while gating parse and tracking jobs on their
+    own inputs.
+    """
     write_frame_archive(camera_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
 
     session, universe, possible = discover_video_jobs(session_path=_session_path(camera_session))
@@ -610,10 +612,10 @@ def test_discovery_reports_the_universe_and_the_possible_subset(
         (ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)),
         (ENERGY_JOB_NAME, str(_BODY_SOURCE_ID)),
     ]
+    # The session carries no pose prediction, so the tracking job stays in the universe alone.
     assert possible == [
         (CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)),
         (RENAME_JOB_NAME, ""),
-        (TRACKING_JOB_NAME, ""),
         (ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)),
         (ENERGY_JOB_NAME, str(_BODY_SOURCE_ID)),
     ]
@@ -624,10 +626,21 @@ def test_discovery_omits_the_rename_job_without_any_archive(camera_session: Sess
     _session, _universe, possible = discover_video_jobs(session_path=_session_path(camera_session))
 
     assert possible == [
-        (TRACKING_JOB_NAME, ""),
         (ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)),
         (ENERGY_JOB_NAME, str(_BODY_SOURCE_ID)),
     ]
+
+
+def test_discovery_admits_the_tracking_job_once_a_prediction_is_present(
+    camera_session: SessionData,
+) -> None:
+    """Verifies the tracking job joins the possible subset exactly when the session carries a pose prediction."""
+    camera_session.raw_data.camera_data_path.mkdir(parents=True, exist_ok=True)
+    camera_session.raw_data.camera_data_path.joinpath("face_cameraDLC_eye_tracking.h5").write_bytes(b"prediction")
+
+    _session, _universe, possible = discover_video_jobs(session_path=_session_path(camera_session))
+
+    assert (TRACKING_JOB_NAME, "") in possible
 
 
 def test_discovery_rejects_a_manifest_without_cameras(experiment_session: SessionData) -> None:

@@ -22,6 +22,9 @@ _BATCH_DIRECTORY_NAME: str = "prepared_batches"
 _LOCK_TIMEOUT_SECONDS: float = 20.0
 """The period a writer waits for a batch file's lock before giving up, matching the project manifest's writer."""
 
+OUTCOME_FILE_SUFFIX: str = ".outcome.yaml"
+"""The suffix that separates a batch's outcome file from the prepared document the outcome describes."""
+
 
 @dataclass
 class _PreparedBatch(YamlConfig):
@@ -40,13 +43,24 @@ class _PreparedBatch(YamlConfig):
     """The host against which the batch was prepared, recorded for the same reason."""
     document: dict[str, Any] = field(default_factory=dict)
     """The batch document's fields, held as a plain mapping so it serializes without a nested dataclass schema."""
-    outcome: dict[str, Any] = field(default_factory=dict)
-    """What the batch's jobs finally recorded, written at closure and empty until then. This is the durable snapshot a
-    caller reads after the run, so a finished batch stays answerable once nothing is running and nothing is queued."""
 
     def as_document(self) -> BatchDocument:
         """Returns the recorded batch as the document that both execution backends dispatch."""
         return BatchDocument(**self.document)
+
+
+@dataclass
+class _RecordedOutcome(YamlConfig):
+    """Records what one batch's jobs finally recorded, in a file of its own beside the batch that dispatched them.
+
+    Notes:
+        Keeping the outcome apart from the prepared document is what lets that document be retired the moment the run
+        ends, while the answer a caller reads after the run stays on this host.
+    """
+
+    outcome: dict[str, Any] = field(default_factory=dict)
+    """What the batch's jobs finally recorded, held as a plain mapping so it serializes without a nested dataclass
+    schema."""
 
 
 def batch_directory() -> Path:
@@ -160,28 +174,27 @@ def resolve_batch_host(documents: list[BatchDocument]) -> str:
     return hosts[0]
 
 
-def _forget_prepared_batches(batch_ids: list[str]) -> list[str]:
-    """Removes the recorded batches this host holds under the named identifiers.
+def forget_batch_records(batch_ids: list[str]) -> list[str]:
+    """Removes every file this host holds for the named batches, which are the prepared document and the recorded
+    outcome.
 
     Args:
         batch_ids: The identifiers to remove.
 
     Returns:
-        The identifiers that were held and removed.
+        The identifiers this host held under either file, in the order the caller named them.
     """
     removed: list[str] = []
     for batch_id in batch_ids:
-        path = _batch_path(batch_id=batch_id)
-        if not path.is_file():
-            continue
-        path.unlink()
-        _lock_path(path=path).unlink(missing_ok=True)
-        removed.append(batch_id)
+        held_document = _remove_record(path=_batch_path(batch_id=batch_id))
+        held_outcome = _remove_record(path=_outcome_path(batch_id=batch_id))
+        if held_document or held_outcome:
+            removed.append(batch_id)
     return removed
 
 
 def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
-    """Writes what a batch's jobs finally recorded onto its own file.
+    """Writes what a batch's jobs finally recorded into the batch's own outcome file.
 
     Notes:
         This is the step that makes a finished batch answerable, so it runs before the batch is retired from anything
@@ -192,18 +205,16 @@ def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
         outcome: The rendered outcome to store.
 
     Returns:
-        True when the batch was held and updated, and False when this host holds no such batch.
+        True when the batch was held and its outcome written, and False when this host holds no such batch.
 
     Raises:
-        Timeout: If the batch file's lock cannot be acquired within the timeout period.
+        Timeout: If the outcome file's lock cannot be acquired within the timeout period.
     """
-    path = _batch_path(batch_id=batch_id)
-    if not path.is_file():
+    if not _batch_path(batch_id=batch_id).is_file():
         return False
+    path = _outcome_path(batch_id=batch_id)
     with FileLock(str(_lock_path(path=path))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
-        recorded = _PreparedBatch.from_yaml(file_path=path)
-        recorded.outcome = dict(outcome)
-        recorded.to_yaml(file_path=path)
+        _RecordedOutcome(outcome=dict(outcome)).to_yaml(file_path=path)
     return True
 
 
@@ -214,13 +225,39 @@ def read_batch_outcome(batch_id: str) -> dict[str, Any] | None:
         batch_id: The identifier of the batch to read.
 
     Returns:
-        The stored outcome, or None when this host holds no such batch or the batch has yet to reach closure.
+        The stored outcome, or None when this host holds no outcome under that identifier.
     """
-    path = _batch_path(batch_id=batch_id)
+    path = _outcome_path(batch_id=batch_id)
     if not path.is_file():
         return None
-    outcome = _PreparedBatch.from_yaml(file_path=path).outcome
+    outcome = _RecordedOutcome.from_yaml(file_path=path).outcome
     return outcome or None
+
+
+def retire_prepared_batch(batch_id: str) -> None:
+    """Removes the prepared document of one batch whose outcome this host has already recorded.
+
+    Notes:
+        The document is the larger half of what a batch leaves behind, and it describes work that has finished, so it
+        is dropped once the outcome answers for the run. A caller that asks about the batch afterwards reads that
+        outcome, and a caller that wants the work again prepares it against the state the run left.
+
+    Args:
+        batch_id: The identifier of the batch to retire.
+    """
+    _remove_record(path=_batch_path(batch_id=batch_id))
+
+
+def _outcome_path(batch_id: str) -> Path:
+    """Resolves where one batch's outcome is recorded.
+
+    Args:
+        batch_id: The identifier of the batch.
+
+    Returns:
+        The path to the batch's outcome file.
+    """
+    return batch_directory().joinpath(f"{batch_id}{OUTCOME_FILE_SUFFIX}")
 
 
 def _lock_path(path: Path) -> Path:
@@ -233,3 +270,19 @@ def _lock_path(path: Path) -> Path:
         The path to the lock file.
     """
     return path.with_suffix(path.suffix + ".lock")
+
+
+def _remove_record(path: Path) -> bool:
+    """Removes one of a batch's files together with the lock guarding it.
+
+    Args:
+        path: The file to remove.
+
+    Returns:
+        True when this host held the file and removed it.
+    """
+    if not path.is_file():
+        return False
+    path.unlink()
+    _lock_path(path=path).unlink(missing_ok=True)
+    return True

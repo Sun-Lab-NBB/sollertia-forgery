@@ -35,9 +35,11 @@ from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.graph import BatchDocument
 from sollertia_forgery.orchestration.batches import (
     _batch_path,
+    _outcome_path,
     read_prepared_batch,
+    forget_batch_records,
     record_batch_outcome,
-    _forget_prepared_batches,
+    retire_prepared_batch,
 )
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS, PipelineDispatch
 from sollertia_forgery.orchestration.planning import (
@@ -45,7 +47,7 @@ from sollertia_forgery.orchestration.planning import (
     _dataset_plan_path,
     _session_plan_path,
 )
-from sollertia_forgery.orchestration.footprints import JobFootprint
+from sollertia_forgery.orchestration.footprints import _POSE_PREDICTION_RATIO, JobFootprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -120,6 +122,45 @@ def refuse_to_size(_unit: Any, _jobs: list[tuple[str, str, int]]) -> dict[tuple[
     """
     message = "Unable to size the job. The archive 'camera_77.npz' does not exist."
     raise FileNotFoundError(message)
+
+
+def refuse_one_job(refused: tuple[str, str]) -> Callable[..., dict[tuple[str, str], JobFootprint]]:
+    """Builds a sizing pass that refuses one job of the universe and answers for every other job it is handed."""
+
+    def estimate(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+        """Sizes every requested job, raising where the request holds the job whose input cannot be read."""
+        if any((job_name, specifier) == refused for job_name, specifier, _cores in jobs):
+            message = f"Unable to size the job. The archive '{refused[1]}.npz' does not exist."
+            raise FileNotFoundError(message)
+        return {(job_name, specifier): JobFootprint(cores=cores, memory_mb=1000) for job_name, specifier, cores in jobs}
+
+    return estimate
+
+
+def omit_one_job(omitted: tuple[str, str]) -> Callable[..., dict[tuple[str, str], JobFootprint]]:
+    """Builds a sizing pass that leaves one job out of the mapping it returns while raising nothing."""
+
+    def estimate(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+        """Sizes every requested job apart from the one this stand-in silently drops."""
+        return {
+            (job_name, specifier): JobFootprint(cores=cores, memory_mb=1000)
+            for job_name, specifier, cores in jobs
+            if (job_name, specifier) != omitted
+        }
+
+    return estimate
+
+
+def refuse_the_whole_pass(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+    """Stands in for a sizing pass that raises for a whole-pipeline request and answers for a single job.
+
+    Raises:
+        RuntimeError: If more than one job is requested, standing in for a shared reader that died mid-pass.
+    """
+    if len(jobs) > 1:
+        message = "the shared reader died before it answered"
+        raise RuntimeError(message)
+    return {(job_name, specifier): JobFootprint(cores=cores, memory_mb=1000) for job_name, specifier, cores in jobs}
 
 
 def make_session(root: Path, animal_id: str = "305") -> SimpleNamespace:
@@ -326,6 +367,35 @@ def test_forcing_re_estimates_recorded_figures(tmp_path: Path) -> None:
     assert replanned.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].memory_mb == 99999
 
 
+def test_retuning_a_sizing_constant_re_estimates_a_recorded_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a retuned sizing constant re-estimates a recorded figure without a caller asking for it.
+
+    The stamp a plan carries is a digest of the sizing constants that produced its figures, so a retune answers with
+    another stamp and every cache holding the old one is read as absent.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    plan_session(
+        unit=session,
+        dispatches=[
+            make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=3200)
+        ],
+    )
+
+    monkeypatch.setattr(
+        "sollertia_forgery.orchestration.footprints._POSE_PREDICTION_RATIO", _POSE_PREDICTION_RATIO + 1.0
+    )
+    replanned = plan_session(
+        unit=session,
+        dispatches=[
+            make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=99999)
+        ],
+    )
+
+    assert replanned.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].memory_mb == 99999
+
+
 def test_a_widened_universe_appends_without_disturbing_recorded_entries(tmp_path: Path) -> None:
     """Verifies that a job appearing later is estimated and appended while every earlier entry keeps its figure."""
     session = make_session(root=tmp_path.joinpath("session"))
@@ -424,6 +494,40 @@ def test_a_unit_no_pipeline_can_size_stops_the_plan(tmp_path: Path) -> None:
     assert not _session_plan_path(session=session).exists()
 
 
+def test_a_job_the_sizing_pass_omits_without_raising_is_recorded(tmp_path: Path) -> None:
+    """Verifies that a job for which the sizing pass returns neither a footprint nor a refusal is still recorded.
+
+    A job that vanishes from the pass with no reason recorded would leave the plan silently short, so the omission
+    itself is recorded against the job that carries it.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    universe = [(CHECKSUM_JOB_NAME, "sized"), (CHECKSUM_JOB_NAME, "omitted")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    dispatch = replace(dispatch, size_jobs=omit_one_job(omitted=universe[1]))
+
+    plan = plan_session(unit=session, dispatches=[dispatch])
+
+    assert {entry.specifier for entry in plan.entries} == {"sized"}
+    assert "no footprint" in plan.unsized_jobs[f"checksum/{CHECKSUM_JOB_NAME} (omitted)"]
+
+
+def test_a_one_pass_sizing_failure_is_recorded_even_when_every_job_then_sizes(tmp_path: Path) -> None:
+    """Verifies that the refusal ending a pipeline's one-pass sizing survives a fallback that sizes every job.
+
+    Sizing each job on its own recovers the figures the one pass withheld, so the account of why that pass ended is
+    the only record of it left.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    universe = [(CHECKSUM_JOB_NAME, "first"), (CHECKSUM_JOB_NAME, "second")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    dispatch = replace(dispatch, size_jobs=refuse_the_whole_pass)
+
+    plan = plan_session(unit=session, dispatches=[dispatch])
+
+    assert {entry.specifier for entry in plan.entries} == {"first", "second"}
+    assert "the shared reader died" in plan.unsized_jobs["checksum/all jobs"]
+
+
 def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,6 +591,7 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
             "specifier": "downstream",
             "cores": _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME],
             "memory_mb": 3200,
+            "memory_modeled": True,
             "prerequisite_ids": [upstream_id],
         },
         {
@@ -500,6 +605,7 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
             "specifier": "upstream",
             "cores": _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME],
             "memory_mb": 3200,
+            "memory_modeled": True,
             "prerequisite_ids": [],
         },
     ]
@@ -691,6 +797,48 @@ def test_a_pipeline_supporting_no_job_records_its_figures_without_writing_a_trac
     assert {entry.specifier for entry in plan.entries} == {"", "unreachable"}
 
 
+def test_a_job_the_sizing_pass_refuses_is_retired_from_the_tracker(
+    tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]
+) -> None:
+    """Verifies that a refused job an earlier plan registered leaves the tracker, so preparation resolves the unit.
+
+    Preparation reads a tracked job carrying no planned figures as an unplanned job and refuses the whole unit over
+    it. Retiring the entry alongside the figures that sized it keeps the unit's remaining jobs dispatchable.
+    """
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    universe = [(CHECKSUM_JOB_NAME, "readable"), (CHECKSUM_JOB_NAME, "unreadable")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    write_tracker(path=dispatch.tracker_path(session), jobs=universe)
+    dispatch = replace(dispatch, size_jobs=refuse_one_job(refused=universe[1]))
+
+    plan = plan_unit(unit_path=tmp_path.joinpath("2024_11_04"), unit_kind=SESSION_UNIT, dispatches=[dispatch])
+
+    recorded = ProcessingTracker(file_path=dispatch.tracker_path(session)).snapshot()
+    assert [state.specifier for state in recorded.values()] == ["readable"]
+    assert "unreadable.npz" in plan.unsized_jobs[f"checksum/{CHECKSUM_JOB_NAME} (unreadable)"]
+
+
+def test_a_refused_job_the_tracker_records_as_succeeded_keeps_its_entry(
+    tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]
+) -> None:
+    """Verifies that a refused job that already succeeded keeps its recorded outcome, so the work is not run again.
+
+    A completed job's record outlives the input that produced it, and preparation already leaves a succeeded job out
+    of the work it dispatches, so nothing is gained by retiring it.
+    """
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    universe = [(CHECKSUM_JOB_NAME, "readable"), (CHECKSUM_JOB_NAME, "unreadable")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    write_tracker(path=dispatch.tracker_path(session), jobs=universe, succeeded=[universe[1]])
+    dispatch = replace(dispatch, size_jobs=refuse_one_job(refused=universe[1]))
+
+    plan_unit(unit_path=tmp_path.joinpath("2024_11_04"), unit_kind=SESSION_UNIT, dispatches=[dispatch])
+
+    recorded = ProcessingTracker(file_path=dispatch.tracker_path(session)).snapshot()
+    finished = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier="unreadable")
+    assert recorded[finished].status == ProcessingStatus.SUCCEEDED
+
+
 def test_priming_is_handed_the_unit_root_rather_than_the_directory_holding_it(tmp_path: Path) -> None:
     """Verifies a pipeline whose job model lives in state written by a dependency is primed against the unit itself.
 
@@ -878,7 +1026,7 @@ def test_an_unheld_batch_identifier_resolves_to_nothing(isolated_working_directo
     assert read_prepared_batch(batch_id="never_recorded") is None
     assert read_batch_outcome(batch_id="never_recorded") is None
     assert not record_batch_outcome(batch_id="never_recorded", outcome={"succeeded": 1})
-    assert _forget_prepared_batches(batch_ids=["never_recorded"]) == []
+    assert forget_batch_records(batch_ids=["never_recorded"]) == []
 
 
 def test_reading_several_batches_reports_the_identifiers_this_host_lacks(
@@ -917,8 +1065,9 @@ def test_forgetting_a_batch_removes_its_record_and_its_lock(
     first = record_prepared_batch(document=make_document())
     second = record_prepared_batch(document=make_document())
     outstanding = record_prepared_batch(document=make_document())
+    record_batch_outcome(batch_id=first, outcome={"succeeded": 1})
 
-    removed = _forget_prepared_batches(batch_ids=[first, "never_recorded", second])
+    removed = forget_batch_records(batch_ids=[first, "never_recorded", second])
 
     assert removed == [first, second]
     # The batch this call did not name keeps both its document and its lock.
@@ -926,7 +1075,43 @@ def test_forgetting_a_batch_removes_its_record_and_its_lock(
     assert _batch_path(batch_id=outstanding).is_file()
     assert not _batch_path(batch_id=first).is_file()
     assert not _batch_path(batch_id=first).with_suffix(".yaml.lock").is_file()
+    # A forget takes both halves of what a batch leaves behind, so the outcome goes with the document.
+    assert not _outcome_path(batch_id=first).is_file()
     assert read_prepared_batch(batch_id=second) is None
+
+
+def test_retiring_a_closed_batch_keeps_the_outcome_that_answers_for_it(
+    isolated_working_directory: Path,
+    deterministic_batch_ids: Any,
+) -> None:
+    """Verifies that closure drops the prepared document alone, since the outcome beside it is what a later caller
+    reads.
+    """
+    batch_id = record_prepared_batch(document=make_document())
+    record_batch_outcome(batch_id=batch_id, outcome={"succeeded": 2})
+
+    retire_prepared_batch(batch_id=batch_id)
+
+    assert read_prepared_batch(batch_id=batch_id) is None
+    assert not _batch_path(batch_id=batch_id).with_suffix(".yaml.lock").is_file()
+    assert read_batch_outcome(batch_id=batch_id) == {"succeeded": 2}
+
+
+def test_forgetting_a_settled_batch_takes_the_outcome_it_is_held_by(
+    isolated_working_directory: Path,
+    deterministic_batch_ids: Any,
+) -> None:
+    """Verifies that a batch stays forgettable after closure retires its document, which is what keeps the outcome from
+    outliving every record of the run.
+    """
+    batch_id = record_prepared_batch(document=make_document())
+    record_batch_outcome(batch_id=batch_id, outcome={"succeeded": 2})
+    retire_prepared_batch(batch_id=batch_id)
+
+    assert forget_batch_records(batch_ids=[batch_id]) == [batch_id]
+    assert read_batch_outcome(batch_id=batch_id) is None
+    assert not _outcome_path(batch_id=batch_id).is_file()
+    assert not _outcome_path(batch_id=batch_id).with_suffix(".yaml.lock").is_file()
 
 
 def test_batches_prepared_against_one_host_resolve_to_that_host(isolated_working_directory: Path) -> None:

@@ -39,6 +39,7 @@ from sollertia_forgery.orchestration.hosts import (
     environment_commands,
     state_artifact_paths,
 )
+from sollertia_forgery.orchestration.planning import resolve_session_plan
 from sollertia_forgery.orchestration.maintenance import _resolve_path_size
 
 if TYPE_CHECKING:
@@ -942,3 +943,23 @@ def test_the_plan_artifact_of_a_batch_is_its_projects_projection() -> None:
     assert plan_artifact_path(project_root=_SERVER_PROJECT_ROOT) == project_plan_path(
         project_directory=_SERVER_PROJECT_ROOT
     )
+
+
+def test_a_unit_whose_every_job_sized_reports_no_refusals(
+    project_root: Path, experiment_session: SessionData, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a unit whose sizing pass refused nothing carries no refusal key, so the key names real drops."""
+    session_path = experiment_session.raw_data_path.parent
+    resolved = resolve_session_plan(session_path=session_path, regenerate_plan=True)
+    resolved.unsized_jobs.clear()
+
+    monkeypatch.setattr(
+        "sollertia_forgery.orchestration.hosts.resolve_session_plan",
+        lambda _unit_path, **_kwargs: resolved,
+    )
+
+    planned = LocalHost.plan(project_root=project_root, unit_paths=[session_path], unit_kind=SESSION_UNIT, replan=True)
+
+    # The entry is a real summary rather than the error entry a refused unit reports, so the absent key is meaningful.
+    assert planned[0]["summed_memory_mb"] == sum(entry.memory_mb for entry in resolved.entries)
+    assert "unsized_jobs" not in planned[0]

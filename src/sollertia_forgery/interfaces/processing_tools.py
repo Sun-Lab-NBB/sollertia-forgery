@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Thread
 from collections import deque
+from dataclasses import dataclass
 
 from ataraxis_time import TimeUnits, convert_time
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
@@ -20,6 +21,7 @@ from .responses import (
     count_values,
     project_item,
     resolve_page,
+    bounded_counts,
     error_response,
     resolve_detail_limit,
 )
@@ -67,13 +69,9 @@ from .host_resolution import (
 if TYPE_CHECKING:
     from ..orchestration import ExecutionHost, GenericPendingJob
 
-_EXECUTION_STATE: JobExecutionState[GenericPendingJob] | None = None
-"""The single batch execution state. One pool serves every pipeline, so a batch may hold any mix of jobs and the
-engine packs them against one pair of budgets."""
-
 _CLOSED_BATCH_MESSAGE: str = (
-    "No batch is running in this process. The named batches have closed, so their outcomes are read from the snapshot "
-    "closure recorded rather than from a live pool."
+    "No batch is running in this process. The reported batches have closed, so their outcomes are read from the "
+    "snapshot closure recorded rather than from a live pool."
 )
 """The message returned when a caller asks about batches that already reached closure. Their counts are durable, so an
 answer survives the process that ran them."""
@@ -131,6 +129,27 @@ _STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in Proces
 by which a caller filters the listing, and the keys under which a tracker summary counts."""
 
 
+@dataclass(frozen=True, slots=True)
+class _LocalRun:
+    """Holds this process's one local batch together with the prepared batches that batch covers.
+
+    Notes:
+        A reader takes the pair in one reference and a writer replaces it whole, so a state is never read beside the
+        identifiers of another run.
+    """
+
+    state: JobExecutionState[GenericPendingJob] | None = None
+    """The execution state the dispatch installed, or None once the run closed and recorded a durable outcome."""
+    batch_ids: tuple[str, ...] = ()
+    """The prepared batches this run covers. They outlive the state, so a bare status call reads the outcomes of the
+    run that just finished."""
+
+
+_LOCAL_RUN: _LocalRun = _LocalRun()
+"""The single batch execution state and the batches it covers. One pool serves every pipeline, so a batch may hold any
+mix of jobs and the engine packs them against one pair of budgets."""
+
+
 @mcp.tool()
 def prepare_batch_tool(
     pipeline: str,
@@ -178,36 +197,11 @@ def prepare_batch_tool(
         ``blocked_count``, or its ``unit_path`` and an ``error``, and a ``blocked_jobs`` list naming what each blocked
         job awaits. Carries a ``jobs`` list when the caller requests the descriptors.
     """
-    if pipeline not in {member.value for member in BATCH_PIPELINES}:
-        return error_response(message=_unsupported_message(pipeline=pipeline))
-    if host not in HOST_LABELS:
-        return error_response(message=unsupported_host_message(host=host))
-
-    try:
-        with resolve_execution_host(host=host) as execution_host:
-            document = prepare_batch(
-                host=execution_host,
-                pipeline=pipeline,
-                unit_paths=session_paths,
-                options=options,
-                replan=replan,
-            )
-    except Exception as exception:
-        return error_response(message=f"Unable to prepare the {host} '{pipeline}' batch. {exception}")
-
-    batch_id = record_prepared_batch(document=document)
-    response = ok_response(
-        batch_id=batch_id,
-        pipeline=document.pipeline,
-        host=document.host,
-        units=document.units,
-        total_units=len(document.units),
-        total_jobs=len(document.jobs),
-        total_blocked_jobs=len(document.blocked_jobs),
-        blocked_jobs=[project_item(item=entry, fields=_BLOCKED_SEMI_FIELDS) for entry in document.blocked_jobs],
+    response = _prepare_batch_response(
+        pipeline=pipeline, session_paths=session_paths, options=options, host=host, replan=replan, record=True
     )
-    if include_job_descriptors:
-        response["jobs"] = document.jobs
+    if response["success"] and not include_job_descriptors:
+        response.pop("jobs")
     return response
 
 
@@ -261,13 +255,13 @@ def inspect_job_resources_tool(
         machine's ``total_memory_mb`` and the batch-available ``total_cores`` left after the reserved system cores.
         Both are absent for ``remote``, where the scheduler holds the budgets and the caller names what a job requests.
     """
-    prepared = prepare_batch_tool(
-        pipeline=pipeline, session_paths=session_paths, options=options, host=host, include_job_descriptors=True
+    prepared = _prepare_batch_response(
+        pipeline=pipeline, session_paths=session_paths, options=options, host=host, replan=False, record=False
     )
     if not prepared["success"]:
         return prepared
 
-    jobs = prepared.get("jobs", [])
+    jobs = prepared["jobs"]
     units = prepared["units"]
     response = ok_response(
         pipeline=prepared["pipeline"],
@@ -343,11 +337,15 @@ def execute_jobs_tool(
         remote dispatch adds the ``batch_id`` under which its scripts and logs are filed, the ``batch_ids`` the
         submission covered, ``walltime_minutes``, the ``batch_directory`` on the server, and a ``submissions`` list
         pairing each job with the allocation that runs it. Either host adds an ``invalid_jobs`` list when a recorded
-        descriptor could not be built into a job. Returns an error when an identifier resolves to no prepared batch,
-        when no batch is named, when the named batches mix hosts, when every prepared job is blocked or already
-        succeeded, or when no recorded descriptor builds into a job.
+        descriptor could not be built into a job. Returns an error when the prepared-batch registry cannot be read, when
+        an identifier resolves to no prepared batch, or when no batch is named. Returns an error as well when the
+        named batches mix hosts, when every prepared job is blocked or already succeeded, or when no recorded
+        descriptor builds into a job.
     """
-    documents, missing = read_prepared_batches(batch_ids=batch_ids)
+    try:
+        documents, missing = read_prepared_batches(batch_ids=batch_ids)
+    except Exception as exception:
+        return error_response(message=f"Unable to read the prepared batches {batch_ids}. {exception}")
     if missing:
         return error_response(
             message=(
@@ -420,28 +418,31 @@ def get_processing_status_tool(
     """Reports the live status of the active batch, in three widening stages.
 
     A bare call re-reads the processing trackers of every job the batch holds and reports the counts alongside a
-    ``breakdown`` naming every pipeline, job type, status, and session in the batch. That is what tracks a run at a size
-    a response can always carry, however many jobs it holds, and the counts are where a failure first shows. The counts
-    cover the batch's own jobs alone, so their total is the number of jobs the batch dispatched and a job of the same
-    tracker that this batch did not dispatch is left out of them. Those same counts resolve to the ``status`` label the
+    ``breakdown`` naming every pipeline, job type, status, and session in the batch. An axis holding more distinct
+    values than the shared cap reports how many it holds in place of its counts, which is what tracks a run at a size a
+    response can always carry, however many jobs it holds. The counts are where a failure first shows. They cover the
+    batch's own jobs alone, so their total is the number of jobs the batch dispatched and a job of the same tracker
+    that this batch did not dispatch is left out of them. Those same counts resolve to the ``status`` label the
     response carries, so the label and the counts describe one set.
 
     Naming a filter adds a page of jobs carrying identity and status. Filtering to ``failed`` is how a caller reads
     which jobs failed, and opting into detail adds each one's error text, timing, and the resources it occupies.
 
     A ``remote`` call carries an ``outcomes`` entry for any batch that settled and closed on it. A ``local`` call
-    carries one only when no batch state is held in this process and ``batch_ids`` names the closed batch. The entry is
-    the durable snapshot that closure took of what the batch's jobs recorded. Read ``complete``, ``succeeded``,
-    ``failed``, ``blocked``, and ``outstanding`` from it to decide whether the run needs anything further, and
-    ``failed_jobs`` for the error text each failure recorded.
+    carries one once the run this process dispatched has closed and recorded an outcome for at least one of its
+    batches. The report covers the batches named in ``batch_ids``, or the batches the last run covered when the
+    argument names none. Each entry is the durable snapshot that closure took of what a batch's jobs recorded. Read
+    ``complete``, ``succeeded``, ``failed``, ``blocked``, and ``outstanding`` from it to decide whether the run needs
+    anything further, and ``failed_jobs`` for the error text each failure recorded.
 
     Args:
         host: Which batch to report, either ``local`` for this machine's pool or ``remote`` for the outstanding
             allocations on the server's scheduler.
         batch_ids: Restricts a ``remote`` report to these outstanding batches. Omit to cover all of them. Naming any
             batch also counts as a filter, so the response carries a page of jobs. For ``local`` it names the closed
-            batches whose recorded outcomes to report when no batch is running in this process, and it is ignored
-            while a batch is running, since one pool holds one batch.
+            batches whose recorded outcomes to report, and omitting it reports the batches the last run covered. A
+            ``local`` call made while a batch runs returns one error naming every identifier the running batch does
+            not cover, since one pool holds one batch.
         status_filter: Restricts the listing to one status. Locally one of ``succeeded``, ``failed``, ``running``, or
             ``scheduled``, and remotely a scheduler state such as ``FAILED``, ``RUNNING``, or ``BLOCKED``.
         session_paths: Restricts the listing to these session root directories.
@@ -462,8 +463,9 @@ def get_processing_status_tool(
         ``status`` label resolved from those counts, and a ``breakdown`` per axis. Carries a ``jobs`` list with
         ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is
         requested. A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count with a
-        ``blocked_reason``, and those jobs are listed by filtering to ``scheduled``. If no batch has run, ``active`` is
-        False with an explanatory ``message``.
+        ``blocked_reason``, and those jobs are listed by filtering to ``scheduled``. A ``local`` call made once the run
+        closed and recorded an outcome reports ``active`` as False alongside the ``batch_ids`` it covered and their
+        ``outcomes``. If no batch has run, ``active`` is False with an explanatory ``message``.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -481,12 +483,28 @@ def get_processing_status_tool(
             detailed=detailed,
         )
 
-    state = _EXECUTION_STATE
+    run = _LOCAL_RUN
+    state = run.state
     if state is None:
-        recorded = [outcome for batch in batch_ids or [] if (outcome := read_batch_outcome(batch_id=batch)) is not None]
+        # A bare call falls back to the batches the last run covered, so the run that just finished still answers.
+        named = list(batch_ids) if batch_ids else list(run.batch_ids)
+        try:
+            recorded = [outcome for batch in named if (outcome := read_batch_outcome(batch_id=batch)) is not None]
+        except Exception as exception:
+            return error_response(message=f"Unable to read the recorded outcomes of {named}. {exception}")
         if recorded:
-            return ok_response(active=False, outcomes=recorded, message=_CLOSED_BATCH_MESSAGE)
+            return ok_response(active=False, batch_ids=named, outcomes=recorded, message=_CLOSED_BATCH_MESSAGE)
         return ok_response(active=False, message="No batch is running in this process.")
+
+    uncovered = sorted(set(batch_ids or ()) - set(run.batch_ids))
+    if uncovered:
+        return error_response(
+            message=(
+                f"Unable to report the named batch(es) {uncovered}. A local report must name the batches the running "
+                f"batch covers, which are {sorted(run.batch_ids)}, since one pool holds one batch. Read the others "
+                f"once this one finishes."
+            )
+        )
 
     if status_filter is not None and status_filter not in _STATUS_LABELS:
         return error_response(
@@ -499,7 +517,7 @@ def get_processing_status_tool(
         canceled=state.canceled,
         status=ProcessingTracker.resolve_status(summary=summary).value,
         summary=summary,
-        breakdown={axis: count_values(values=[entry[axis] for entry in per_job]) for axis in _STATUS_AXES},
+        breakdown={axis: bounded_counts(values=[entry[axis] for entry in per_job]) for axis in _STATUS_AXES},
     )
     if state.blocked_jobs:
         response["blocked_jobs"] = len(state.blocked_jobs)
@@ -556,7 +574,7 @@ def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = No
     if host == REMOTE_HOST_LABEL:
         return remote_batch_cancel(batch_ids=batch_ids)
 
-    state = _EXECUTION_STATE
+    state = _LOCAL_RUN.state
     if state is None or state.manager_thread is None or not state.manager_thread.is_alive():
         return error_response(message="No batch is running.")
 
@@ -659,7 +677,7 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
         return error_response(message=unsupported_host_message(host=host))
 
     # A running batch holds open the very files this removes, so cleaning waits for the pool to drain.
-    state = _EXECUTION_STATE
+    state = _LOCAL_RUN.state
     running = state is not None and state.manager_thread is not None and state.manager_thread.is_alive()
     if host == LOCAL_HOST_LABEL and running:
         return error_response(
@@ -679,6 +697,68 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
         total_paths=len(removed),
         removed_bytes=sum(int(entry["removed_bytes"]) for entry in removed),
     )
+
+
+def _prepare_batch_response(
+    pipeline: str,
+    session_paths: list[str],
+    options: dict[str, Any] | None,
+    host: str,
+    *,
+    replan: bool,
+    record: bool,
+) -> dict[str, Any]:
+    """Resolves a pipeline's dispatchable jobs on the host that holds the data and renders them as a response.
+
+    Notes:
+        Recording sits inside the guarded region alongside the resolution it completes, because it writes under the
+        platform working directory and a caller is owed an error naming whichever step failed.
+
+        A caller that only reads the resolved jobs records nothing, because dispatch resolves a batch by its
+        recorded identifier, and a record that no caller can name is never retired.
+
+    Args:
+        pipeline: The batch pipeline to resolve.
+        session_paths: The processing unit directories whose jobs to resolve.
+        options: The pipeline-specific parameters carried on every resolved descriptor.
+        host: Where the data sits, either ``local`` or ``remote``.
+        replan: Determines whether to re-estimate the cores and memory the units' plan caches already hold.
+        record: Determines whether the resolved batch is recorded under an identifier the response carries.
+
+    Returns:
+        The response dict carrying the resolved jobs, or the error response naming what failed.
+    """
+    if pipeline not in {member.value for member in BATCH_PIPELINES}:
+        return error_response(message=_unsupported_message(pipeline=pipeline))
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+
+    try:
+        with resolve_execution_host(host=host) as execution_host:
+            document = prepare_batch(
+                host=execution_host,
+                pipeline=pipeline,
+                unit_paths=session_paths,
+                options=options,
+                replan=replan,
+            )
+        batch_id = record_prepared_batch(document=document) if record else None
+    except Exception as exception:
+        return error_response(message=f"Unable to prepare the {host} '{pipeline}' batch. {exception}")
+
+    response = ok_response(
+        pipeline=document.pipeline,
+        host=document.host,
+        units=document.units,
+        total_units=len(document.units),
+        total_jobs=len(document.jobs),
+        total_blocked_jobs=len(document.blocked_jobs),
+        blocked_jobs=[project_item(item=entry, fields=_BLOCKED_SEMI_FIELDS) for entry in document.blocked_jobs],
+        jobs=document.jobs,
+    )
+    if batch_id is not None:
+        response["batch_id"] = batch_id
+    return response
 
 
 def _reset_batch_jobs(host: ExecutionHost, jobs: list[GenericPendingJob]) -> None:
@@ -710,26 +790,41 @@ def _reset_batch_jobs(host: ExecutionHost, jobs: list[GenericPendingJob]) -> Non
 def _run_and_close_local_batch(
     state: JobExecutionState[GenericPendingJob], host: ExecutionHost, batch_ids: list[str]
 ) -> None:
-    """Runs a local batch to completion, then closes every batch it held.
+    """Runs a local batch to completion and closes every batch it held, releasing the execution state behind a
+    recorded outcome.
 
     Notes:
         Closure runs in the same thread the manager did, so it happens the moment the queue drains rather than waiting
         for a caller to ask. A failure to close is reported and swallowed, because the jobs themselves have already run
         and recorded their outcomes.
 
+        The state is released only when closure recorded at least one durable outcome, and only while it is still the
+        state this run installed. A run whose closure recorded nothing therefore keeps its state, which leaves its
+        counts readable from the trackers. The identifiers outlive the state either way, so a bare status read reaches
+        the outcomes of the run that just finished.
+
     Args:
         state: The batch execution state from which the manager dispatches.
         host: The host holding the data the batch's jobs read.
         batch_ids: The identifiers of the batches this run dispatched.
     """
+    global _LOCAL_RUN
+
     job_execution_manager(state=state)
+    settled: list[str] = []
     for batch_id in batch_ids:
         try:
-            close_batch(host=host, batch_id=batch_id)
+            if close_batch(host=host, batch_id=batch_id) is not None:
+                settled.append(batch_id)
         except Exception as exception:
             console.echo(
                 message=f"Unable to close the finished batch '{batch_id}'. {exception}", level=LogLevel.WARNING
             )
+
+    # Every dispatched identifier survives the release, including one whose closure failed, so a later status read
+    # still names the batch and reports that it recorded no outcome rather than losing it from the run entirely.
+    if settled and _LOCAL_RUN.state is state:
+        _LOCAL_RUN = _LocalRun(batch_ids=tuple(batch_ids))
 
 
 def _execute_local_batch(
@@ -751,11 +846,10 @@ def _execute_local_batch(
     Returns:
         The response dict the calling tool returns.
     """
-    global _EXECUTION_STATE
+    global _LOCAL_RUN
 
-    if _EXECUTION_STATE is not None and (
-        _EXECUTION_STATE.manager_thread is not None and _EXECUTION_STATE.manager_thread.is_alive()
-    ):
+    running = _LOCAL_RUN.state
+    if running is not None and running.manager_thread is not None and running.manager_thread.is_alive():
         return error_response(
             message="A batch is already running. Wait for it to finish or cancel it before starting another."
         )
@@ -816,9 +910,9 @@ def _execute_local_batch(
         concurrency_reservations=concurrency_reservations,
         pool_size=pool_size,
     )
-    _EXECUTION_STATE = state
     thread = Thread(target=_run_and_close_local_batch, args=(state, host, batch_ids), daemon=True)
     state.manager_thread = thread
+    _LOCAL_RUN = _LocalRun(state=state, batch_ids=tuple(batch_ids))
     thread.start()
 
     return ok_response(

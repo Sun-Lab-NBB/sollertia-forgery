@@ -1,5 +1,6 @@
 """Contains tests for the resource narrowing that the generic processing tools apply to a local batch before they
-dispatch it.
+dispatch it, and for the run state that dispatch installs. A status call reads that state, so its release is tested
+alongside the narrowing.
 """
 
 from __future__ import annotations
@@ -12,7 +13,11 @@ import pytest
 from sollertia_forgery.video import CAMERA_EXTRACTION_JOB_NAME
 from sollertia_forgery.interfaces import processing_tools
 from sollertia_forgery.orchestration import GenericPendingJob
-from sollertia_forgery.interfaces.processing_tools import _execute_local_batch
+from sollertia_forgery.interfaces.processing_tools import (
+    _LocalRun,
+    _execute_local_batch,
+    get_processing_status_tool,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -111,8 +116,8 @@ def staged_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Holds the manager thread and the host's own core count out of the dispatch path.
 
     The requested budget is honored exactly, so a test states the host it means rather than inheriting whatever the
-    machine running it happens to hold. Recording the module's execution state has it restored afterwards, which
-    keeps a staged batch from being mistaken for a live one.
+    machine running it happens to hold. Recording the module's local run has it restored afterwards, which keeps a
+    staged batch from being mistaken for a live one.
 
     Args:
         monkeypatch: The fixture used to replace each dependency that the dispatch path uses.
@@ -124,7 +129,7 @@ def staged_batch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(processing_tools, "Thread", _IdleThread)
     monkeypatch.setattr(processing_tools, "resolve_worker_count", _honor_request)
-    monkeypatch.setattr(processing_tools, "_EXECUTION_STATE", None)
+    monkeypatch.setattr(processing_tools, "_LOCAL_RUN", _LocalRun())
 
 
 # Per-job core widths
@@ -204,3 +209,89 @@ def test_a_zero_width_job_is_floored_at_one_core_rather_than_widened_to_its_type
     # The pool follows the narrowest job that the batch holds, which is the floored one rather than the type's
     # reported width. A run that widened the zero-width job onto its type would spawn a single worker here.
     assert response["pool_size"] == 2
+
+
+# The run state a dispatch installs
+
+
+@pytest.fixture
+def closed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Holds the manager out of the run, so closure is reached without any job running.
+
+    Args:
+        monkeypatch: The fixture used to replace the manager the run would otherwise drain.
+    """
+    monkeypatch.setattr(processing_tools, "job_execution_manager", lambda state: None)  # noqa: ARG005
+
+
+def test_a_dispatch_installs_its_state_beside_the_batches_it_covers(staged_batch: None) -> None:
+    """Verifies that a state and the batch identifiers it covers arrive together, so neither is ever read alone."""
+    _stage_batch(jobs=[_make_job(job_id="a", cores=1)], core_budget=4)
+
+    run = processing_tools._LOCAL_RUN
+
+    assert run.state is not None
+    assert run.batch_ids == ("batch",)
+
+
+def test_a_closed_run_releases_its_state_and_keeps_the_batches_it_covered(
+    staged_batch: None,
+    closed_run: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies that a run recording a durable outcome releases its pool while staying answerable by identifier."""
+    monkeypatch.setattr(processing_tools, "close_batch", lambda host, batch_id: {"batch_id": batch_id})  # noqa: ARG005
+    _stage_batch(jobs=[_make_job(job_id="a", cores=1)], core_budget=4)
+    state = processing_tools._LOCAL_RUN.state
+
+    processing_tools._run_and_close_local_batch(state=state, host=_RecordingHost(), batch_ids=["batch"])
+
+    assert processing_tools._LOCAL_RUN.state is None
+    assert processing_tools._LOCAL_RUN.batch_ids == ("batch",)
+
+
+def test_a_run_whose_closure_recorded_nothing_keeps_its_state(
+    staged_batch: None,
+    closed_run: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies that a failed closure leaves the pool installed, so the run's counts stay readable from the trackers."""
+
+    def _refuse(host: object, batch_id: str) -> None:
+        """Fails every closure, as an unreachable host does."""
+        message = f"Unable to reach the host holding '{batch_id}'."
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(processing_tools, "close_batch", _refuse)
+    _stage_batch(jobs=[_make_job(job_id="a", cores=1)], core_budget=4)
+    state = processing_tools._LOCAL_RUN.state
+
+    processing_tools._run_and_close_local_batch(state=state, host=_RecordingHost(), batch_ids=["batch"])
+
+    assert processing_tools._LOCAL_RUN.state is state
+
+
+def test_a_bare_status_call_reports_the_run_that_just_finished(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a caller naming no batch reads the outcomes of the run whose state was already released."""
+    monkeypatch.setattr(processing_tools, "_LOCAL_RUN", _LocalRun(batch_ids=("batch",)))
+    monkeypatch.setattr(
+        processing_tools, "read_batch_outcome", lambda batch_id: {"batch_id": batch_id, "complete": True}
+    )
+
+    response = get_processing_status_tool()
+
+    assert not response["active"]
+    assert response["batch_ids"] == ["batch"]
+    assert response["outcomes"] == [{"batch_id": "batch", "complete": True}]
+
+
+def test_a_status_call_naming_no_batch_of_a_process_that_never_ran_one_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies that a process holding no run at all reports that rather than an empty outcome listing."""
+    monkeypatch.setattr(processing_tools, "_LOCAL_RUN", _LocalRun())
+
+    response = get_processing_status_tool()
+
+    assert not response["active"]
+    assert "outcomes" not in response

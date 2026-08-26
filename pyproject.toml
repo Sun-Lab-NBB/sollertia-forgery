@@ -278,6 +278,7 @@ omit = [
     "*/sollertia_forgery/interfaces/manage.py",
     "*/sollertia_forgery/interfaces/management_tools.py",
     "*/sollertia_forgery/interfaces/mcp_server.py",
+    "*/sollertia_forgery/interfaces/orchestration_tools.py",
     "*/sollertia_forgery/interfaces/plan.py",
     "*/sollertia_forgery/interfaces/planning_tools.py",
     "*/sollertia_forgery/interfaces/process.py",

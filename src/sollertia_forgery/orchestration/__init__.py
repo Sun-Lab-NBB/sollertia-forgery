@@ -37,9 +37,12 @@ from .remote import (
     remote_batch_directory,
 )
 from .batches import (
+    OUTCOME_FILE_SUFFIX,
     batch_directory,
     read_batch_outcome,
     resolve_batch_host,
+    read_prepared_batch,
+    forget_batch_records,
     read_prepared_batches,
     record_prepared_batch,
 )
@@ -50,6 +53,7 @@ from .closure import (
 from .dispatch import (
     BATCH_PIPELINES,
     run_batch_job,
+    resolve_job_cores,
     resolve_concurrency_limits,
     resolve_concurrency_reservations,
 )
@@ -79,6 +83,7 @@ __all__ = [
     "BATCH_PIPELINES",
     "DATASET_UNIT",
     "LOCAL_HOST_LABEL",
+    "OUTCOME_FILE_SUFFIX",
     "PROJECT_PLAN_SCHEMA",
     "REMOTE_HOST_LABEL",
     "REMOTE_JOB_WALLTIME_MINUTES",
@@ -98,6 +103,7 @@ __all__ = [
     "close_settled_batches",
     "connect_to_server",
     "current_timestamp",
+    "forget_batch_records",
     "generate_project_plan",
     "group_jobs_by_tracker",
     "job_execution_manager",
@@ -106,6 +112,7 @@ __all__ = [
     "query_submissions",
     "read_batch_outcome",
     "read_ledger",
+    "read_prepared_batch",
     "read_prepared_batches",
     "reconcile_local_jobs",
     "reconcile_remote_jobs",
@@ -120,6 +127,7 @@ __all__ = [
     "resolve_core_allocations",
     "resolve_dataset_plan",
     "resolve_host_memory_mb",
+    "resolve_job_cores",
     "resolve_project_root",
     "resolve_session_plan",
     "run_batch_job",

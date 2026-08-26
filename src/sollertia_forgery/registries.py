@@ -29,6 +29,7 @@ from .mesoscope_vr import (
     locate_two_photon_data,
     assemble_mesoscope_session,
     process_mesoscope_video_tracking,
+    locate_mesoscope_pose_predictions,
     resolve_multi_recording_configuration,
     resolve_single_recording_configuration,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "resolve_microcontroller_parsers",
     "resolve_multi_recording_configuration_resolver",
     "resolve_multi_recording_session_types",
+    "resolve_pose_prediction_locator",
     "resolve_runtime_binding",
     "resolve_single_recording_configuration_resolver",
     "resolve_two_photon_data_locator",
@@ -87,6 +89,13 @@ class _TwoPhotonDataLocator(Protocol):
 
     def __call__(self, session: SessionData) -> Path:
         """Resolves the session's raw two-photon imaging directory."""
+
+
+class _PosePredictionLocator(Protocol):
+    """Defines the call signature of the pose-prediction locator an acquisition system donates."""
+
+    def __call__(self, session: SessionData) -> Path | None:
+        """Resolves the session's externally-produced pose-prediction file, or None when it carries none."""
 
 
 class _VideoTracker(Protocol):
@@ -216,6 +225,15 @@ _TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, _TwoPhotonDataLocator] = {
 (calcium-imaging) directory, which the agnostic two-photon worker hands to the cindra single-recording pipeline as
 its input. Every system donates a locator, and a system that produces no two-photon data donates one returning the
 path it would use.
+"""
+
+_POSE_PREDICTION_REGISTRY: dict[AcquisitionSystems, _PosePredictionLocator] = {
+    AcquisitionSystems.MESOSCOPE_VR: locate_mesoscope_pose_predictions,
+}
+"""Maps each acquisition system to the module-level locator that resolves the externally-produced pose-prediction file
+its video-tracking stage reads. The naming of that file belongs to the system that produces it. Job discovery
+consults this locator to decide whether a session supports a tracking job, and the sizing pass consults it to charge
+the job the prediction file's byte count. A system that performs no video tracking donates a locator returning None.
 """
 
 _VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, _VideoTracker] = {
@@ -437,6 +455,23 @@ def resolve_two_photon_data_locator(system: str | AcquisitionSystems) -> _TwoPho
     return _TWO_PHOTON_DATA_REGISTRY[_resolve_system(system=system)]
 
 
+def resolve_pose_prediction_locator(system: str | AcquisitionSystems) -> _PosePredictionLocator:
+    """Resolves the pose-prediction locator registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, for example the value carried by
+            ``SessionData.acquisition_system``.
+
+    Returns:
+        The registered locator, which returns the path to the session's pose-prediction file, or None when the session
+        carries none.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return _POSE_PREDICTION_REGISTRY[_resolve_system(system=system)]
+
+
 def resolve_video_tracking(system: str | AcquisitionSystems) -> _VideoTracker:
     """Resolves the video-tracking function registered for the target acquisition system.
 
@@ -481,11 +516,11 @@ def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly, runtime-parser,
-    two-photon-data, video-tracking, microcontroller event-code, microcontroller eligibility, cindra configuration,
-    multi-recording session-type, and forging-admission registries. Confirms that every member registers at least
-    one microcontroller module parser. Confirms that every parseable microcontroller module declares the event
-    codes its parser reads, and that every session type a system admits into a dataset is a session type that
-    system records.
+    two-photon-data, video-tracking, pose-prediction, microcontroller event-code, microcontroller eligibility, cindra
+    configuration, multi-recording session-type, and forging-admission registries. Confirms that every member registers
+    at least one microcontroller module parser. Confirms that every parseable microcontroller module declares the event
+    codes its parser reads, and that every session type a system admits into a dataset is a session type that system
+    records.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable
@@ -502,6 +537,7 @@ def _assert_registry_coverage() -> None:
         ("_RUNTIME_PARSER_REGISTRY", frozenset(_RUNTIME_PARSER_REGISTRY)),
         ("_TWO_PHOTON_DATA_REGISTRY", frozenset(_TWO_PHOTON_DATA_REGISTRY)),
         ("_VIDEO_TRACKING_REGISTRY", frozenset(_VIDEO_TRACKING_REGISTRY)),
+        ("_POSE_PREDICTION_REGISTRY", frozenset(_POSE_PREDICTION_REGISTRY)),
         ("_MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(_MICROCONTROLLER_EVENT_CODE_REGISTRY)),
         ("_MICROCONTROLLER_ELIGIBILITY_REGISTRY", frozenset(_MICROCONTROLLER_ELIGIBILITY_REGISTRY)),
         ("_CINDRA_CONFIGURATION_REGISTRY", frozenset(_CINDRA_CONFIGURATION_REGISTRY)),

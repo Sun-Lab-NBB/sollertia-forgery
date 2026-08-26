@@ -33,6 +33,7 @@ from sollertia_shared_assets import (
     ProcedureData,
     DatasetSession,
 )
+from ataraxis_data_structures import read_archive_message_count
 from ataraxis_communication_interface import (
     CONTROLLER_EXTRACTION_JOB_CORES,
     size_archive_job as size_controller_extraction_job,
@@ -56,14 +57,16 @@ from sollertia_forgery.registries import (
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
+from sollertia_forgery.orchestration import footprints as footprints_module
 from sollertia_forgery.shared_assets import ProcessingPipelines, multi_recording_dataset_name
 from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 from sollertia_forgery.orchestration.footprints import (
+    _MODEL_VERSION_DIGITS,
     _POSE_PREDICTION_RATIO,
     _RETAINED_FRAME_BUFFERS,
     _SINGLE_PRECISION_BYTES,
-    _ARCHIVE_DIRECTORY_RATIO,
     _DECODER_BUFFER_MEMORY_MB,
+    _ARCHIVE_DIRECTORY_BYTES_PER_MESSAGE,
     JobFootprint,
     _apply_tolerance,
     _read_array_shape,
@@ -71,6 +74,7 @@ from sollertia_forgery.orchestration.footprints import (
     size_session_jobs,
     _round_to_gigabyte,
     _bytes_to_megabytes,
+    resolve_model_version,
     _resolve_widest_camera_frame_pixels,
 )
 
@@ -102,13 +106,18 @@ _SAMPLING_RATE: float = 10.0
 """The volume acquisition rate declared by the synthetic acquisition parameters, from which cindra derives a per-plane
 rate of half this figure across the two declared planes."""
 
-_CHECKSUM_READER_MEMORY_MB: int = 285
+_CHECKSUM_READER_MEMORY_MB: int = 190
 """The resident memory the checksum model charges one reader. The tunable terms of a model this package owns are
 stated here rather than imported back out of it, so that retuning one moves this expectation instead of moving both
 sides of the comparison together."""
 
-_ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
-"""The fluorescence columns the per-session assembly model charges one recording, anchored on the same terms."""
+_ASSEMBLY_SINGLE_DAY_COLUMNS: int = 4
+"""The fluorescence columns the per-session assembly model charges at the recording's own detected region count,
+anchored on the same terms."""
+
+_ASSEMBLY_MULTI_DAY_COLUMNS: int = 4
+"""The fluorescence columns the same model charges at the count of regions tracked across the animal's recordings,
+anchored on the same terms."""
 
 _ASSEMBLY_WRITE_COPIES: int = 1
 """The copies of the assembled fluorescence volume the same model charges at the write, anchored on the same terms."""
@@ -382,17 +391,22 @@ def cindra_multi_recording_footprint(
     return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
 
-def assembly_memory(samples: int, regions: int) -> int:
+def assembly_memory(samples: int, regions: int, tracked_regions: int | None = None) -> int:
     """Reports the figure the per-session assembly model gives a recording of the named shape.
 
     Args:
         samples: The samples each retained fluorescence column holds.
-        regions: The regions each retained fluorescence column spans.
+        regions: The regions the recording itself detected, which the single-day columns span.
+        tracked_regions: The regions tracked across the animal, which the multi-day columns span. Defaults to the
+            recording's own count.
 
     Returns:
         The reportable memory in megabytes.
     """
-    columns = _ASSEMBLY_FLUORESCENCE_COLUMNS * _ASSEMBLY_WRITE_COPIES * samples * regions * _SINGLE_PRECISION_BYTES
+    retained = _ASSEMBLY_SINGLE_DAY_COLUMNS * regions + _ASSEMBLY_MULTI_DAY_COLUMNS * (
+        regions if tracked_regions is None else tracked_regions
+    )
+    columns = retained * _ASSEMBLY_WRITE_COPIES * samples * _SINGLE_PRECISION_BYTES
     return _apply_tolerance(
         memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + samples * _SUB_DATASET_BYTES_PER_SAMPLE)
     )
@@ -426,7 +440,9 @@ def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
     core.
     """
     archive = write_log_archive(experiment_session.raw_data.behavior_data_path.joinpath("51_log.npz"), 51, [(5, b"ab")])
-    per_reader = _bytes_to_megabytes(byte_count=archive.stat().st_size * _ARCHIVE_DIRECTORY_RATIO)
+    per_reader = _bytes_to_megabytes(
+        byte_count=read_archive_message_count(archive_path=archive) * _ARCHIVE_DIRECTORY_BYTES_PER_MESSAGE
+    )
 
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.RUNTIME,
@@ -434,9 +450,11 @@ def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
         jobs=[(RUNTIME_JOB_NAME, "51", 4), (CONTROLLER_EXTRACTION_JOB_NAME, "51", 8)],
     )
 
+    # A four-core job opens four children and keeps the reader that planned their batches, so five readers hold the
+    # archive's directory while four children carry their own cost.
     assert estimates[RUNTIME_JOB_NAME, "51"] == JobFootprint(
         cores=4,
-        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + 4 * (per_reader + SPAWNED_CHILD_MEMORY_MB)),
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + 5 * per_reader + 4 * SPAWNED_CHILD_MEMORY_MB),
     )
     # The extraction stage belongs to the communication library, so both halves of its figure are that library's own
     # sizing pass, with the memory rounded to the gigabyte on which every reportable estimate lands.
@@ -539,42 +557,50 @@ def test_an_archive_above_the_parallel_threshold_earns_each_librarys_declared_wi
     assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "77"].cores == CONTROLLER_EXTRACTION_JOB_CORES
 
 
-def test_a_parse_estimate_follows_the_widest_archive_in_the_behavior_directory(
+def test_a_parse_estimate_follows_the_archive_of_its_own_controller(
     experiment_session: SessionData, write_log_archive: Callable[..., Path]
 ) -> None:
-    """Verifies a parse job reads one module's share of its controller's archive, so the widest archive bounds it."""
+    """Verifies a parse job reads one module's share of its controller's archive, so that archive alone bounds it."""
     behavior = experiment_session.raw_data.behavior_data_path
-    write_log_archive(behavior.joinpath("51_log.npz"), 51, [(1, b"a")])
-    widest = write_log_archive(behavior.joinpath("52_log.npz"), 52, [(index, bytes(400)) for index in range(20)])
+    wider = write_log_archive(
+        path=behavior.joinpath("51_log.npz"), source_id=51, messages=[(index, bytes(400)) for index in range(20)]
+    )
+    owned = write_log_archive(path=behavior.joinpath("52_log.npz"), source_id=52, messages=[(1, b"a")])
 
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.MICROCONTROLLER,
         session=experiment_session,
-        jobs=[(PARSE_JOB_NAME, "52_1_1", 1)],
+        jobs=[(PARSE_JOB_NAME, "52-1-1", 1)],
     )
 
-    assert widest.stat().st_size > behavior.joinpath("51_log.npz").stat().st_size
-    assert estimates[PARSE_JOB_NAME, "52_1_1"] == JobFootprint(
+    # A parse job is charged its own controller's archive even while a wider archive sits beside it, since a module
+    # of another controller contributes nothing the job reads.
+    assert wider.stat().st_size > owned.stat().st_size
+    assert estimates[PARSE_JOB_NAME, "52-1-1"] == JobFootprint(
         cores=1,
         memory_mb=_apply_tolerance(
-            memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * 3.4)
+            memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=owned.stat().st_size * 3.4)
         ),
     )
 
 
-def test_a_parse_estimate_is_refused_when_the_behavior_directory_holds_no_archive(
-    experiment_session: SessionData,
+def test_a_parse_estimate_is_refused_when_its_controller_recorded_no_archive(
+    experiment_session: SessionData, write_log_archive: Callable[..., Path]
 ) -> None:
-    """Verifies that a directory carrying no candidate file states nothing with which the stage scales, so the job is
-    refused rather than planned at a guess.
+    """Verifies that a module whose controller recorded no archive states nothing with which the stage scales, so the
+    job is refused rather than planned at a guess.
     """
-    experiment_session.raw_data.behavior_data_path.mkdir(parents=True, exist_ok=True)
+    write_log_archive(
+        path=experiment_session.raw_data.behavior_data_path.joinpath("51_log.npz"),
+        source_id=51,
+        messages=[(1, b"a")],
+    )
 
-    with pytest.raises(FileNotFoundError, match="Unable to size a job reading a log archive from"):
+    with pytest.raises(FileNotFoundError, match="Unable to find the log archive of source '52'"):
         size_session_jobs(
             pipeline=ProcessingPipelines.MICROCONTROLLER,
             session=experiment_session,
-            jobs=[(PARSE_JOB_NAME, "52_1_1", 1)],
+            jobs=[(PARSE_JOB_NAME, "52-1-1", 1)],
         )
 
 
@@ -586,11 +612,11 @@ def test_a_parse_estimate_is_refused_when_the_behavior_directory_is_absent(
     """
     assert not experiment_session.raw_data.behavior_data_path.is_dir()
 
-    with pytest.raises(FileNotFoundError, match="Unable to size a job reading a log archive from"):
+    with pytest.raises(FileNotFoundError):
         size_session_jobs(
             pipeline=ProcessingPipelines.MICROCONTROLLER,
             session=experiment_session,
-            jobs=[(PARSE_JOB_NAME, "52_1_1", 1)],
+            jobs=[(PARSE_JOB_NAME, "52-1-1", 1)],
         )
 
 
@@ -608,7 +634,7 @@ def test_a_video_estimate_charges_every_job_the_widest_recorded_frame(
     write_grayscale_video(camera.joinpath("51_camera.mp4"), moving_block_frames)
     write_grayscale_video(camera.joinpath("73_camera.mp4"), moving_block_frames[:, :40, :32])
     points: Mapping[str, NDArray[np.float64]] = {"eye_top": np.zeros((32, 3), dtype=np.float64)}
-    predictions = write_dlc_predictions(camera.joinpath("51_camera.h5"), points)
+    predictions = write_dlc_predictions(path=camera.joinpath("51_cameraDLC_eye_tracking.h5"), points=points)
 
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.VIDEO,
@@ -649,7 +675,7 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     experiment_session: SessionData,
 ) -> None:
     """Verifies that a session carrying no camera directory reports no frame, which leaves motion energy on the per-core
-    decoder and child cost that its model charges whatever the recording holds, and pose tracking on one worker.
+    decoder and child cost that its model charges whatever the recording holds.
     """
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(ENERGY_JOB_NAME, "51", 16)]
@@ -660,12 +686,18 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     assert energy.memory_mb == _apply_tolerance(
         memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
     )
-    # The predictions are written outside this platform, so a session holding none is charged one worker rather than
-    # refused. Refusing would drop the whole video pipeline out of the session's plan.
-    tracking = size_session_jobs(
-        pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(TRACKING_JOB_NAME, "51", 1)]
-    )
-    assert tracking[TRACKING_JOB_NAME, "51"].memory_mb == _apply_tolerance(memory_mb=WORKER_MEMORY_MB)
+
+
+def test_a_pose_estimate_is_refused_when_the_session_carries_no_prediction(
+    experiment_session: SessionData,
+) -> None:
+    """Verifies that a session holding no pose prediction states nothing with which the stage scales, so the job is
+    refused rather than planned at a guess.
+    """
+    with pytest.raises(FileNotFoundError, match="carries no pose prediction"):
+        size_session_jobs(
+            pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(TRACKING_JOB_NAME, "51", 1)]
+        )
 
 
 def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_session: SessionData) -> None:
@@ -1228,6 +1260,33 @@ def test_a_dataset_job_naming_a_stage_nothing_models_is_refused(
         size_dataset_jobs(dataset=dataset, jobs=[("a_stage_no_pipeline_declares", session.session_name, 1)])
 
     assert "routes to no sizing model" in " ".join(str(failure.value).split())
+
+
+# Sizing model identity
+
+
+def test_one_tuning_of_the_sizing_constants_answers_with_one_identifier() -> None:
+    """Verifies that the identifier holds steady while the constants behind it do, so a plan stays readable."""
+    assert resolve_model_version() == resolve_model_version()
+    assert len(resolve_model_version()) == _MODEL_VERSION_DIGITS
+
+
+def test_retuning_a_scalar_sizing_constant_answers_with_another_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a retuned ratio answers with another identifier, so every plan it stamped is estimated again."""
+    tuned = resolve_model_version()
+
+    monkeypatch.setattr(footprints_module, "_POSE_PREDICTION_RATIO", _POSE_PREDICTION_RATIO + 1.0)
+
+    assert resolve_model_version() != tuned
+
+
+def test_retuning_a_collection_constant_answers_with_another_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a constant holding a collection reaches the identifier alongside the scalar ones."""
+    tuned = resolve_model_version()
+
+    monkeypatch.setattr(footprints_module, "_ARCHIVE_JOB_NAMES", frozenset({CHECKSUM_JOB_NAME}))
+
+    assert resolve_model_version() != tuned
 
 
 # Shared conversions

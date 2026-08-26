@@ -20,10 +20,12 @@ from sollertia_forgery.managing.jobs import _PROJECT_JOBS_SCHEMA
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.interfaces.responses import (
     _DEFAULT_ITEM_LIMIT,
+    _BREAKDOWN_AXIS_LIMIT,
     _DEFAULT_DETAILED_LIMIT,
     count_values,
     project_item,
     resolve_page,
+    bounded_counts,
     reject_unknown,
     resolve_detail_limit,
     resolve_elapsed_seconds,
@@ -359,3 +361,24 @@ def test_a_project_holding_no_datasets_reports_none(project_directory: Path) -> 
     assert response["success"]
     assert response["total_datasets"] == 0
     assert response["datasets"] == []
+
+
+# Bounded breakdown axes
+
+
+def test_an_axis_within_the_limit_reports_its_counts() -> None:
+    """Verifies an axis holding few enough distinct values is counted exactly as an unbounded one is."""
+    values = [f"unit-{index}" for index in range(_BREAKDOWN_AXIS_LIMIT)]
+
+    assert bounded_counts(values=values) == count_values(values=values)
+
+
+def test_an_axis_past_the_limit_reports_its_size_instead_of_its_counts() -> None:
+    """Verifies an axis that grows with the project reports how many values it holds rather than listing them."""
+    values = [f"unit-{index}" for index in range(_BREAKDOWN_AXIS_LIMIT + 1)]
+
+    bounded = bounded_counts(values=values)
+
+    assert bounded["distinct_values"] == _BREAKDOWN_AXIS_LIMIT + 1
+    assert "elided" in bounded
+    assert "unit-0" not in bounded
