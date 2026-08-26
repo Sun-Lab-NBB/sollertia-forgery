@@ -12,7 +12,12 @@ from ataraxis_data_structures import ProcessingStatus
 from .graph import index_rows_by_unit
 from .hosts import state_artifact_paths
 from .ledger import forget_batches, batch_is_settled, current_timestamp
-from .batches import batch_directory, read_prepared_batch, record_batch_outcome
+from .batches import (
+    batch_directory,
+    read_prepared_batch,
+    record_batch_outcome,
+    retire_prepared_batch,
+)
 from .planning import DATASET_UNIT, SESSION_UNIT
 from .preparation import resolve_project_root
 from ..shared_assets import ProcessingPipelines
@@ -73,8 +78,9 @@ def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
         them, and delivers a copy of each artifact to this machine. Regenerating first is what makes the snapshot
         describe the state after the run rather than the state against which the run was prepared.
 
-        The outcome is written onto the batch's own record, so a finished batch stays answerable once nothing is
-        running and nothing is queued.
+        The outcome is written into the batch's own outcome file, so a finished batch stays answerable once nothing is
+        running and nothing is queued. The prepared document is retired behind that write, because it describes work
+        for which the outcome now answers.
 
     Args:
         host: The host that holds the data the batch's jobs read.
@@ -85,7 +91,7 @@ def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
 
     Raises:
         RuntimeError: If a step fails on the host.
-        Timeout: If the batch file's lock cannot be acquired within the timeout period.
+        Timeout: If the outcome file's lock cannot be acquired within the timeout period.
     """
     document = read_prepared_batch(batch_id=batch_id)
     if document is None:
@@ -93,6 +99,7 @@ def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
 
     outcome = _verify_batch(host=host, document=document, batch_id=batch_id)
     record_batch_outcome(batch_id=batch_id, outcome=asdict(outcome))
+    retire_prepared_batch(batch_id=batch_id)
     return outcome
 
 

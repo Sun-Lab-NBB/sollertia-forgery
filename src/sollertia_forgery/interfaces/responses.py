@@ -20,6 +20,9 @@ _DEFAULT_DETAILED_LIMIT: int = 50
 """The items a detailed page carries when the caller names no limit. Detail is meant for reading a few items closely,
 so its page is deliberately shorter."""
 
+_BREAKDOWN_AXIS_LIMIT: int = 50
+"""The distinct values one breakdown axis lists."""
+
 
 @dataclass(frozen=True, slots=True)
 class _PageWindow:
@@ -109,7 +112,34 @@ def count_values(values: Iterable[Any]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dict[str, int]]:
+def bounded_counts(values: Iterable[Any]) -> dict[str, Any]:
+    """Counts how often each value occurs, reporting the size of an axis that holds too many distinct values to list.
+
+    Notes:
+        An axis carrying one value per unit grows with the project, so listing it would eventually cost more than the
+        summary that carries it. Past the limit the axis reports how many distinct values it holds, and a caller
+        reaches the values themselves by filtering on that axis.
+
+    Args:
+        values: The column of values to count.
+
+    Returns:
+        A dictionary mapping each value to its count, or one carrying ``distinct_values`` and an ``elided`` note
+        stating why the counts are left out.
+    """
+    counts = count_values(values=values)
+    if len(counts) <= _BREAKDOWN_AXIS_LIMIT:
+        return counts
+    return {
+        "distinct_values": len(counts),
+        "elided": (
+            f"This axis holds more than {_BREAKDOWN_AXIS_LIMIT} distinct values, so its counts are left out. Filter "
+            f"on this axis to read the items carrying one of its values."
+        ),
+    }
+
+
+def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     """Counts how many rows of a stored table carry each value of every filterable axis.
 
     Notes:
@@ -121,9 +151,10 @@ def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dic
         axes: The columns to count, which are the columns by which a caller may filter.
 
     Returns:
-        A dictionary mapping each present axis to its value counts.
+        A dictionary mapping each present axis to its value counts, or to the size of an axis that holds too many
+        distinct values to list.
     """
-    return {axis: count_values(values=frame[axis].to_list()) for axis in axes if axis in frame.columns}
+    return {axis: bounded_counts(values=frame[axis].to_list()) for axis in axes if axis in frame.columns}
 
 
 def resolve_elapsed_seconds(timer: PrecisionTimer) -> float:

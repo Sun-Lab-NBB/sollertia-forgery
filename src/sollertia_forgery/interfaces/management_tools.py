@@ -54,9 +54,8 @@ _MANIFEST_AXES: tuple[str, ...] = (
     "video",
     "two_photon",
 )
-"""The manifest columns by which a caller may filter sessions, and the axes its breakdown counts. Every one holds a
-low-cardinality value, so a breakdown over it is worth reading. The five pipeline columns each hold a 0 or a 1, so their
-breakdown reports how many sessions have finished that pipeline."""
+"""The manifest columns by which a caller may filter sessions, and the axes its breakdown counts. The five pipeline
+columns each hold a 0 or a 1, so their breakdown reports how many sessions have finished that pipeline."""
 
 _MANIFEST_SEMI_FIELDS: tuple[str, ...] = (
     "animal",
@@ -154,8 +153,9 @@ def read_project_manifest_tool(
     """Reads a project's sessions out of its stored manifest, in three widening stages.
 
     A bare call reports the totals and a ``breakdown`` naming which values each filterable axis holds, so it names every
-    available filter. Naming any filter, or asking for the listing, adds a page of sessions. Opting into detail adds the
-    experimenter notes.
+    available filter. An axis holding more distinct values than the shared cap reports how many it holds in place of
+    its counts, so the response stays the same size for a project of any size. Naming any filter, or asking for the
+    listing, adds a page of sessions. Opting into detail adds the experimenter notes.
 
     Each pipeline column is a gross done indicator, so this answers which sessions are ready and nothing finer. Which
     jobs a pipeline holds, how each fared, and why one failed are read with ``read_project_jobs_tool``.
@@ -255,9 +255,11 @@ def read_project_jobs_tool(
 ) -> dict[str, Any]:
     """Reads a project's tracked jobs out of its stored job artifact, in three widening stages.
 
-    A bare call reports the totals and a ``breakdown`` naming every animal, pipeline, job type, and status the project
-    holds, which is how you find what needs attention without listing anything. Naming a filter adds a page of jobs
-    carrying identity and status. Opting into detail adds the executor, the timestamps, and any recorded error.
+    A bare call reports the totals and a ``breakdown`` over the animal, pipeline, job type, and status axes, which is
+    how you find what needs attention without listing anything. An axis holding more distinct values than the shared
+    cap reports how many it holds in place of its counts, and filtering on that axis reaches the jobs themselves.
+    Naming a filter adds a page of jobs carrying identity and status. Opting into detail adds the executor, the
+    timestamps, and any recorded error.
 
     Reads the stored artifact rather than the trackers, so a snapshot pulled from another host answers without
     any access to the data it describes.

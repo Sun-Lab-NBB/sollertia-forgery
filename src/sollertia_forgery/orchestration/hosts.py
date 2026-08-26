@@ -150,6 +150,8 @@ class LocalHost:
             recorded figures to be replaced, so a submission's sizing figures never move underneath it.
 
             A unit for which no pipeline resolves a job is reported in its own entry rather than aborting the others.
+            A unit is planned without any job that the sizing pass refuses. Each refusal's reason is reported beside
+            the figures the unit did plan.
 
         Args:
             project_root: The path to the project's root directory.
@@ -159,7 +161,10 @@ class LocalHost:
 
         Returns:
             One entry per named unit, carrying its ``unit_path``, ``unit_name``, ``job_count``, and
-            ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it.
+            ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. An
+            entry whose plan recorded a sizing refusal also carries ``unsized_jobs``, mapping each refusal to the
+            reason it gave. A refusal raised for one job is keyed by its pipeline and job, and a refusal that ended a
+            pipeline's one-pass sizing is keyed by that pipeline and ``all jobs``.
         """
         resolve = resolve_dataset_plan if unit_kind == DATASET_UNIT else resolve_session_plan
 
@@ -170,14 +175,15 @@ class LocalHost:
             except Exception as exception:
                 planned.append({"unit_path": str(unit_path), "error": str(exception), "job_count": 0})
                 continue
-            planned.append(
-                {
-                    "unit_path": str(unit_path),
-                    "unit_name": unit_plan.unit_name,
-                    "job_count": len(unit_plan.entries),
-                    "summed_memory_mb": sum(entry.memory_mb for entry in unit_plan.entries),
-                }
-            )
+            summary: dict[str, Any] = {
+                "unit_path": str(unit_path),
+                "unit_name": unit_plan.unit_name,
+                "job_count": len(unit_plan.entries),
+                "summed_memory_mb": sum(entry.memory_mb for entry in unit_plan.entries),
+            }
+            if unit_plan.unsized_jobs:
+                summary["unsized_jobs"] = dict(unit_plan.unsized_jobs)
+            planned.append(summary)
 
         generate_project_plan(project_directory=project_root)
         return planned

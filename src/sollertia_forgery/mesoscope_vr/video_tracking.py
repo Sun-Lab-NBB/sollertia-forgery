@@ -172,6 +172,26 @@ class _RingFit:
     """The mask of frames that were fitted."""
 
 
+def locate_mesoscope_pose_predictions(session: SessionData) -> Path | None:
+    """Locates the externally-produced DeepLabCut prediction file the Mesoscope-VR tracking stage reads.
+
+    Notes:
+        The acquisition rig writes the prediction beside the face-camera video during preprocessing, under a name
+        carrying the eye-tracking project. A re-run leaves several files matching, and the natural-sort-first one is
+        the file the tracking stage opens.
+
+    Args:
+        session: The loaded session whose raw camera_data directory holds the prediction.
+
+    Returns:
+        The path to the prediction file, or None when the session carries none.
+    """
+    if not session.raw_data.camera_data_path.is_dir():
+        return None
+    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{_EYE_TRACKING_PROJECT_NAME}*.h5"))
+    return matches[0] if matches else None
+
+
 def process_mesoscope_video_tracking(session: SessionData, output_directory: Path) -> None:
     """Post-processes the Mesoscope-VR face-camera DLC predictions into per-frame pupil and eye metrics.
 
@@ -198,9 +218,8 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     Raises:
         ValueError: If a DLC ``.h5`` is present but is missing a canonical bodypart or has an unrecognized layout.
     """
-    # When several prediction files match, the natural-sort-first one is used.
-    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{_EYE_TRACKING_PROJECT_NAME}*.h5"))
-    if not matches:
+    h5_path = locate_mesoscope_pose_predictions(session=session)
+    if h5_path is None:
         console.echo(
             message=(
                 f"No DeepLabCut '{_EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
@@ -209,7 +228,6 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
             level=LogLevel.INFO,
         )
         return
-    h5_path = matches[0]
 
     points = _read_points_from_h5(h5_path=h5_path, bodyparts=_CANONICAL_POINTS)
     frame_count = next(iter(points.values())).shape[0]

@@ -21,7 +21,7 @@ from sollertia_forgery.orchestration.ledger import (
     RemoteSubmission,
     record_batch,
 )
-from sollertia_forgery.orchestration.batches import read_prepared_batch, _forget_prepared_batches
+from sollertia_forgery.orchestration.batches import read_prepared_batch, forget_batch_records
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -288,7 +288,7 @@ def test_a_recorded_batch_outlives_the_process_that_prepared_it() -> None:
     assert recovered.host == "local"
     assert recovered.jobs == [{"job_id": "a"}]
 
-    assert _forget_prepared_batches(batch_ids=[batch_id]) == [batch_id]
+    assert forget_batch_records(batch_ids=[batch_id]) == [batch_id]
     assert read_prepared_batch(batch_id=batch_id) is None
 
 

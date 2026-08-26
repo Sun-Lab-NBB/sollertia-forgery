@@ -965,7 +965,7 @@ def test_a_second_microcontroller_manifest_in_the_tree_is_rejected(
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fail_if_called)
 
-    with pytest.raises(ValueError, match=r"tree holds 2\s+microcontroller_manifest"):
+    with pytest.raises(ValueError, match=r"tree holds\s+2\s+microcontroller_manifest"):
         run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
 

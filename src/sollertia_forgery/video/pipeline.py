@@ -24,7 +24,7 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, limit_worker_threads, initialize_worker_threads
 
-from ..registries import resolve_video_tracking
+from ..registries import resolve_video_tracking, resolve_pose_prediction_locator
 from .motion_energy import (
     MOTION_ENERGY_SUFFIX,
     resolve_camera_video,
@@ -288,10 +288,11 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
         one motion-energy job per registered camera, plus the single rename and tracking jobs. The possible subset is
         the job set the session's own data supports. A timestamp job is possible only when its camera's
         ``{source_id}_log.npz`` archive resolves to exactly one file, and the rename job joins them when at least one
-        is possible. The tracking and energy jobs are always possible because they read only their own inputs and
-        complete with no output when those are absent. A camera with a recording but no log archive therefore keeps its
-        energy job possible while its timestamp job stays in the universe alone. This is discovery only, reading the
-        manifest and indexing archive names while decoding no data and mutating nothing.
+        is possible. The tracking job is possible when the system's donated locator resolves a pose-prediction file,
+        so a session carrying none keeps that job in the universe alone. The energy jobs are always possible because
+        they read only their own recordings. A camera with a recording but no log archive therefore keeps its energy
+        job possible while its timestamp job stays in the universe alone. This is discovery only, reading the manifest,
+        indexing archive names, and locating the session's pose prediction, while decoding no data and mutating nothing.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -316,7 +317,8 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
     possible = [*camera_jobs.possible]
     if camera_jobs.possible:
         possible.append((RENAME_JOB_NAME, ""))
-    possible.append((TRACKING_JOB_NAME, ""))
+    if resolve_pose_prediction_locator(system=session.acquisition_system)(session=session) is not None:
+        possible.append((TRACKING_JOB_NAME, ""))
     possible.extend((ENERGY_JOB_NAME, source_id) for source_id in source_ids)
 
     return session, universe, possible
