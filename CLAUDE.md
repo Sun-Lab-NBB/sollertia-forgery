@@ -68,6 +68,12 @@ from the repository root.
 | `/project-manifest`              | Documents the project manifest and the tools that read and generate it             |
 | `/server-configuration`          | Authors and modifies the remote compute server configuration                       |
 
+**Mesoscope plugin skills** (`sollertia` marketplace, `mesoscope` plugin) document the Mesoscope-VR donations under
+`src/sollertia_forgery/mesoscope_vr/`, through `mesoscope:mesoscope-vr-module-parsing`,
+`mesoscope:mesoscope-vr-trial-decomposition`, `mesoscope:mesoscope-vr-fluorescence-alignment`,
+`mesoscope:mesoscope-vr-dataset-assembly`, and `mesoscope:mesoscope-vr-processing-schema`, which owns the
+`BehaviorDataFiles` and `DatasetColumn` rosters in `mesoscope_vr/metadata.py`.
+
 **Automation plugin skills** (`ataraxis` marketplace, `automation` plugin) provide the style guides listed above,
 `/explore-codebase`, `/explore-dependencies`, and the `/audit-*` family.
 
@@ -99,7 +105,7 @@ repositories.
 
 - `AcquisitionSystems`, `SessionTypes`, `SYSTEM_SESSION_TYPES`, `ProcessingTrackers`, `ProcessedData`, `SessionData`,
   and `DatasetData` all live in `sollertia-shared-assets`. A new acquisition system or session type gains its
-  enumeration member there first, and this library never mints one locally.
+  enumeration member there first through `assets:library-extension`, and this library never mints one locally.
 - Adding an `AcquisitionSystems` member upstream breaks every import path that reaches `registries.py`, and that break
   holds until this library wires the new system. Those paths cover every processing pipeline. Read the RuntimeError
   raised by `_assert_registry_coverage` as the remaining extension checklist.
@@ -109,7 +115,9 @@ repositories.
 - A new per-session pipeline needs an upstream tracker filename in `ProcessingTrackers` and an upstream output directory
   in `ProcessedData`, before `shared_assets/pipelines.py` is able to resolve the tracker location.
 - `sollertia-experiment` has to acquire the data before anything here can process it, so confirm that the acquisition
-  side creates sessions of a new session type and writes the artifacts a new pipeline reads.
+  side creates sessions of a new session type and writes the artifacts a new pipeline reads. `experiment:pipeline` owns
+  that acquisition lifecycle, `experiment:data-management` owns the preprocessing that materializes `raw_data`, and
+  `mesoscope:mesoscope-vr-runtime` owns the Mesoscope-VR runtime that records the session.
 
 ## Distribution model
 
@@ -166,8 +174,8 @@ API change rather than a convenience.
 ### Extension contracts
 
 Every registry is private to `registries.py` and is reached through that module's `resolve_*` accessors, so a consuming
-pipeline never indexes a registry directly. All ten registries are the designed extension point, and a new acquisition
-system supplies an entry in each.
+pipeline never indexes a registry directly. All eleven registries are the designed extension point, and a new
+acquisition system supplies an entry in each.
 
 | Registry                                 | Donation                                                         |
 |------------------------------------------|------------------------------------------------------------------|
@@ -175,6 +183,7 @@ system supplies an entry in each.
 | `_MICROCONTROLLER_EVENT_CODE_REGISTRY`   | The event codes every parsed module reads                        |
 | `_MICROCONTROLLER_ELIGIBILITY_REGISTRY`  | The modules a given session configured for use                   |
 | `_RUNTIME_PARSER_REGISTRY`               | The source id of the runtime log, paired with its parser         |
+| `_POSE_PREDICTION_REGISTRY`              | The locator for the externally-produced pose-prediction file     |
 | `_VIDEO_TRACKING_REGISTRY`               | The system's whole video-tracking pass                           |
 | `_TWO_PHOTON_DATA_REGISTRY`              | The locator for the raw two-photon imaging directory             |
 | `_CINDRA_CONFIGURATION_REGISTRY`         | The single- and multi-recording cindra config resolvers          |
