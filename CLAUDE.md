@@ -51,40 +51,40 @@ from the repository root.
 
 **Forging plugin skills** (`sollertia` marketplace, `forging` plugin):
 
-| Skill                            | Description                                                                        |
-|----------------------------------|------------------------------------------------------------------------------------|
-| `/behavior-input-format`         | Documents the raw artifacts the behavior-processing pipelines consume              |
-| `/behavior-processing`           | Orchestrates batch behavior processing through the MCP server                      |
-| `/behavior-results`              | Documents the behavior-processing outputs and how to verify them                   |
-| `/camera-timestamp-extraction`   | Documents the manifest-driven stage that extracts camera timestamps                |
-| `/checksum-verification`         | Orchestrates batch checksum verification and regeneration                          |
-| `/data-processing-design`        | Documents the design pattern that pairs agnostic workers with per-system donations |
-| `/dataset-definition`            | Composes forged datasets and reports their forging job state                       |
-| `/dataset-forging`               | Orchestrates batch dataset forging through the MCP server                          |
-| `/dataset-forging-input-format`  | Documents the inputs the forging pipeline reads                                    |
-| `/dataset-forging-results`       | Documents the forged dataset outputs and how to verify them                        |
-| `/forging-mcp-environment-setup` | Diagnoses and resolves MCP server connectivity issues                              |
-| `/microcontroller-primitives`    | Documents the agnostic microcontroller parsing primitives                          |
-| `/project-manifest`              | Documents the project manifest and the tools that read and generate it             |
-| `/server-configuration`          | Authors and modifies the remote compute server configuration                       |
+| Skill                            | Description                                                               |
+|----------------------------------|---------------------------------------------------------------------------|
+| `/batch-processing`              | Orchestrates batch processing across all six batch pipelines              |
+| `/cli-reference`                 | Documents every `slf` command, option, and its MCP counterpart            |
+| `/data-processing-design`        | Documents the agnostic-worker and per-system-donation design pattern      |
+| `/dataset-definition`            | Composes forged dataset hierarchies and reports their forging job state   |
+| `/dataset-forging`               | Documents how the forging pipeline differs from the per-session pipelines |
+| `/forging-mcp-environment-setup` | Diagnoses MCP connectivity and owns the shared response envelope          |
+| `/job-planning`                  | Sizes every runnable job and records the planned cores and memory         |
+| `/library-extension`             | Owns the extension path for systems, stages, pipelines, and MCP tools     |
+| `/pipeline`                      | Orders the end-to-end processing lifecycle and its local-remote split     |
+| `/processing-input-format`       | Documents the on-disk inputs each batch pipeline requires                 |
+| `/processing-results`            | Documents what each pipeline writes and how to verify it                  |
+| `/project-state`                 | Documents the session manifest and the job table published beside it      |
+| `/remote-execution`              | Runs work on the configured SLURM compute server through `slf mcp`        |
+| `/server-configuration`          | Authors the `ServerConfiguration` YAML authorizing SSH and SLURM access   |
 
 **Mesoscope plugin skills** (`sollertia` marketplace, `mesoscope` plugin) document the Mesoscope-VR donations under
 `src/sollertia_forgery/mesoscope_vr/`, through `mesoscope:mesoscope-vr-module-parsing`,
 `mesoscope:mesoscope-vr-trial-decomposition`, `mesoscope:mesoscope-vr-fluorescence-alignment`,
+`mesoscope:mesoscope-vr-imaging-configuration`, `mesoscope:mesoscope-vr-video-tracking`,
 `mesoscope:mesoscope-vr-dataset-assembly`, and `mesoscope:mesoscope-vr-processing-schema`, which owns the
-`BehaviorDataFiles` and `DatasetColumn` rosters in `mesoscope_vr/metadata.py`.
+`BehaviorDataFiles`, `VideoDataFiles`, and `DatasetColumn` rosters in `mesoscope_vr/metadata.py`.
 
 **Automation plugin skills** (`ataraxis` marketplace, `automation` plugin) provide the style guides listed above,
-`/explore-codebase`, `/explore-dependencies`, and the `/audit-*` family.
+`/explore-codebase`, `/explore-dependencies`, the `/audit-*` family, `/pr`, and `/release`.
 
 ## MCP server
 
-The library exposes an MCP server through the `slf mcp` command, which is defined in
-`src/sollertia_forgery/interfaces/mcp_server.py`. The server selects its transport with `-t/--transport`, defaulting to
-`stdio` and also accepting `sse` and `streamable-http` for a network client. Tool modules register their tools purely as
-an import side effect, and the server discovers them by the `_tools` filename suffix under
-`src/sollertia_forgery/interfaces/`. The `stdio` transport disables the console, because the pipelines echo progress to
-the same stream that carries the JSON-RPC messages.
+The library exposes an MCP server through the `slf mcp` command. `interfaces/entry_points.py` selects the transport with
+`-t/--transport`, defaulting to `stdio` and also accepting `sse` and `streamable-http` for a network client, and
+disables the console on the `stdio` path, because the pipelines echo progress to the same stream that carries the
+JSON-RPC messages. `interfaces/mcp_server.py` runs the server, and its import discovers every `*_tools.py` module under
+`src/sollertia_forgery/interfaces/`, each of which registers its tools purely as an import side effect.
 
 **When adding an MCP tool**, place it in the `*_tools.py` module that owns its domain and decorate it with `@mcp.tool()`
 from `.mcp_instance`. Return through the `ok_response` and `error_response` helpers in `.responses`, and give the tool a
@@ -122,8 +122,8 @@ repositories.
 ## Distribution model
 
 The package ships to PyPI as `sollertia-forgery` and installs the `slf` CLI. Its Claude Code skills and its MCP server
-registration ship separately, through the `forging` plugin of the [sollertia](https://github.com/Sun-Lab-NBB/sollertia)
-marketplace. An agent that is asked to add or change a skill edits that repository rather than this one.
+registration ship separately, through the [sollertia](https://github.com/Sun-Lab-NBB/sollertia) marketplace, in its
+`forging` and `mesoscope` plugins. An agent asked to add or change a skill edits that repository rather than this one.
 
 ## Project context
 
@@ -133,15 +133,15 @@ processed sessions into the multi-session datasets consumed by a downstream anal
 
 ### Key areas
 
-| Path                                   | Contents                                                             |
-|----------------------------------------|----------------------------------------------------------------------|
-| `src/sollertia_forgery/registries.py`  | The acquisition-system dispatch registries and their coverage check  |
-| `src/sollertia_forgery/mesoscope_vr/`  | The Mesoscope-VR system's donated parsers, resolvers, and workers    |
-| `src/sollertia_forgery/orchestration/` | Planning, preparation, dispatch, execution, closure, and maintenance |
-| `src/sollertia_forgery/managing/`      | The checksum pipeline, the project manifest, and the job artifact    |
-| `src/sollertia_forgery/server/`        | SLURM job composition, the SSH and SFTP transport, and its config    |
-| `src/sollertia_forgery/interfaces/`    | The `slf` Click CLI and the MCP tool modules                         |
-| `src/sollertia_forgery/shared_assets/` | The agnostic substrate every category package draws on               |
+| Path                                   | Contents                                                                 |
+|----------------------------------------|--------------------------------------------------------------------------|
+| `src/sollertia_forgery/registries.py`  | The acquisition-system dispatch registries and their coverage check      |
+| `src/sollertia_forgery/mesoscope_vr/`  | The Mesoscope-VR system's donated parsers, resolvers, and workers        |
+| `src/sollertia_forgery/orchestration/` | Planning, preparation, dispatch, execution, closure, and maintenance     |
+| `src/sollertia_forgery/managing/`      | The checksum pipeline, the project manifest, and the job artifact        |
+| `src/sollertia_forgery/server/`        | SLURM jobs, remote discovery, the SSH and SFTP transport, and its config |
+| `src/sollertia_forgery/interfaces/`    | The `slf` Click CLI and the MCP tool modules                             |
+| `src/sollertia_forgery/shared_assets/` | The agnostic substrate every category package draws on                   |
 
 The `video/`, `microcontrollers/`, `runtime/`, `two_photon/`, and `forging/` category packages sit beside them, one
 per pipeline.
@@ -159,13 +159,13 @@ because a per-system package never imports an agnostic category package. A categ
 `registries.py` imports every per-system package, so the reverse import is a genuine cycle rather than a style
 preference.
 
-Work reaches a host as a **job**, and every pipeline models its jobs the same way. `slf plan` reads a unit's acquisition
-data, registers on its processing tracker every job that unit is able to run, and records each job's cores, memory, and
-upstream jobs. Preparation joins the tracker state to those records into one descriptor per job under a batch
-identifier, and dispatch runs the batch either on this machine's process pool or as one SLURM allocation per job. Each
-job holds a `ProcessingStatus` on the tracker, one of `SCHEDULED`, `RUNNING`, `SUCCEEDED`, or `FAILED`. A rerun
-therefore resolves only the work still outstanding. The run reports a job as blocked rather than dispatched when it can
-neither queue that job's upstream stage nor confirm that the stage already succeeded.
+Work reaches a host as a **job**, and every pipeline models its jobs the same way. `slf plan session` and
+`slf plan dataset` read a unit's acquisition data, register on its processing tracker every job that unit is able to
+run, and record each job's cores, memory, and upstream jobs. Preparation joins the tracker state to those records into
+one descriptor per job under a batch identifier, and dispatch runs the batch either on this machine's process pool or as
+one SLURM allocation per job. Each job holds a `ProcessingStatus` on the tracker, one of `SCHEDULED`, `RUNNING`,
+`SUCCEEDED`, or `FAILED`. A rerun therefore resolves only the work still outstanding. The run reports a job as blocked
+rather than dispatched when it can neither queue that job's upstream stage nor confirm that the stage already succeeded.
 
 The public surface of the distribution is the `slf` CLI and the MCP server that CLI starts, so the top-level
 `__init__.py` re-exports no library symbol and its `__all__` is empty. Adding a name to a public listing is a deliberate
@@ -191,8 +191,8 @@ acquisition system supplies an entry in each.
 | `_FORGING_ADMISSION_REGISTRY`            | The pipelines a session of each type completes to join a dataset |
 | `_MULTI_RECORDING_SESSION_TYPE_REGISTRY` | The session types the system tracks across recordings            |
 
-Every registry is keyed by `AcquisitionSystems`, except `_MICROCONTROLLER_PARSER_REGISTRY`, whose
-`(AcquisitionSystems, module_type, module_id)` key lets a system register one parser per hardware module.
+Every registry is keyed by `AcquisitionSystems`, except `_MICROCONTROLLER_PARSER_REGISTRY`, whose `(AcquisitionSystems,
+module_type, module_id)` key lets a system register one parser per hardware module.
 
 `_assert_registry_coverage()` runs when `registries.py` is imported and raises a `RuntimeError` that names the offending
 members. It fires when a system is missing from any registry, when a parseable microcontroller module declares no event
