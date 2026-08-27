@@ -3,22 +3,22 @@
 ## Session start behavior
 
 At the beginning of each coding session, before making any code changes, you MUST build a comprehensive understanding of
-the codebase by invoking the `/explore-codebase` skill.
+the codebase by invoking the `automation:explore-codebase` skill.
 
 ## Style guide compliance
 
 You MUST invoke the appropriate style skill before performing ANY of the following tasks:
 
-| Task                                          | Skill to invoke    |
-|-----------------------------------------------|--------------------|
-| Writing or modifying Python code              | `/python-style`    |
-| Writing or modifying README files             | `/readme-style`    |
-| Writing or modifying skill files or this file | `/skill-design`    |
-| Writing or modifying pyproject.toml           | `/pyproject-style` |
-| Writing or modifying tox.ini                  | `/tox-config`      |
-| Writing or modifying Sphinx docs files        | `/api-docs`        |
-| Creating or verifying project structure       | `/project-layout`  |
-| Committing local changes                      | `/commit`          |
+| Task                                          | Skill to invoke              |
+|-----------------------------------------------|------------------------------|
+| Writing or modifying Python code              | `automation:python-style`    |
+| Writing or modifying README files             | `automation:readme-style`    |
+| Writing or modifying skill files or this file | `automation:skill-design`    |
+| Writing or modifying pyproject.toml           | `automation:pyproject-style` |
+| Writing or modifying tox.ini                  | `automation:tox-config`      |
+| Writing or modifying Sphinx docs files        | `automation:api-docs`        |
+| Creating or verifying project structure       | `automation:project-layout`  |
+| Committing local changes                      | `automation:commit`          |
 
 Each skill contains a verification checklist that you MUST complete before submitting any work.
 
@@ -51,22 +51,22 @@ from the repository root.
 
 **Forging plugin skills** (`sollertia` marketplace, `forging` plugin):
 
-| Skill                            | Description                                                               |
-|----------------------------------|---------------------------------------------------------------------------|
-| `/batch-processing`              | Orchestrates batch processing across all six batch pipelines              |
-| `/cli-reference`                 | Documents every `slf` command, option, and its MCP counterpart            |
-| `/data-processing-design`        | Documents the agnostic-worker and per-system-donation design pattern      |
-| `/dataset-definition`            | Composes forged dataset hierarchies and reports their forging job state   |
-| `/dataset-forging`               | Documents how the forging pipeline differs from the per-session pipelines |
-| `/forging-mcp-environment-setup` | Diagnoses MCP connectivity and owns the shared response envelope          |
-| `/job-planning`                  | Sizes every runnable job and records the planned cores and memory         |
-| `/library-extension`             | Owns the extension path for systems, stages, pipelines, and MCP tools     |
-| `/pipeline`                      | Orders the end-to-end processing lifecycle and its local-remote split     |
-| `/processing-input-format`       | Documents the on-disk inputs each batch pipeline requires                 |
-| `/processing-results`            | Documents what each pipeline writes and how to verify it                  |
-| `/project-state`                 | Documents the session manifest and the job table published beside it      |
-| `/remote-execution`              | Runs work on the configured SLURM compute server through `slf mcp`        |
-| `/server-configuration`          | Authors the `ServerConfiguration` YAML authorizing SSH and SLURM access   |
+| Skill                                   | Description                                                               |
+|-----------------------------------------|---------------------------------------------------------------------------|
+| `forging:batch-processing`              | Orchestrates batch processing across all six batch pipelines              |
+| `forging:cli-reference`                 | Documents every `slf` command, option, and its MCP counterpart            |
+| `forging:data-processing-design`        | Documents the agnostic-worker and per-system-donation design pattern      |
+| `forging:dataset-definition`            | Composes forged dataset hierarchies and reports their forging job state   |
+| `forging:dataset-forging`               | Documents how the forging pipeline differs from the per-session pipelines |
+| `forging:forging-mcp-environment-setup` | Diagnoses MCP connectivity and owns the shared response envelope          |
+| `forging:job-planning`                  | Sizes every runnable job and records the planned cores and memory         |
+| `forging:library-extension`             | Owns the extension path for systems, stages, pipelines, and MCP tools     |
+| `forging:pipeline`                      | Orders the end-to-end processing lifecycle and its local-remote split     |
+| `forging:processing-input-format`       | Documents the on-disk inputs each batch pipeline requires                 |
+| `forging:processing-results`            | Documents what each pipeline writes and how to verify it                  |
+| `forging:project-state`                 | Documents the session manifest and the job table published beside it      |
+| `forging:remote-execution`              | Runs work on the configured SLURM compute server through `slf mcp`        |
+| `forging:server-configuration`          | Authors the `ServerConfiguration` YAML authorizing SSH and SLURM access   |
 
 **Mesoscope plugin skills** (`sollertia` marketplace, `mesoscope` plugin) document the Mesoscope-VR donations under
 `src/sollertia_forgery/mesoscope_vr/`, through `mesoscope:mesoscope-vr-module-parsing`,
@@ -76,7 +76,8 @@ from the repository root.
 `BehaviorDataFiles`, `VideoDataFiles`, and `DatasetColumn` rosters in `mesoscope_vr/metadata.py`.
 
 **Automation plugin skills** (`ataraxis` marketplace, `automation` plugin) provide the style guides listed above,
-`/explore-codebase`, `/explore-dependencies`, the `/audit-*` family, `/pr`, and `/release`.
+`automation:explore-codebase`, `automation:explore-dependencies`, the `automation:audit-*` family, `automation:pr`, and
+`automation:release`.
 
 ## MCP server
 
@@ -121,9 +122,10 @@ repositories.
 
 ## Distribution model
 
-The package ships to PyPI as `sollertia-forgery` and installs the `slf` CLI. Its Claude Code skills and its MCP server
-registration ship separately, through the [sollertia](https://github.com/Sun-Lab-NBB/sollertia) marketplace, in its
-`forging` and `mesoscope` plugins. An agent asked to add or change a skill edits that repository rather than this one.
+The package ships to PyPI as `sollertia-forgery` and installs the `slf` CLI. Its Claude Code skills ship separately,
+through the [sollertia](https://github.com/Sun-Lab-NBB/sollertia) marketplace, in its `forging` and `mesoscope` plugins,
+and the `forging` plugin alone carries the MCP server registration. An agent asked to add or change a skill edits that
+repository rather than this one.
 
 ## Project context
 

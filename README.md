@@ -510,9 +510,12 @@ The **forging** plugin ships the skills that orchestrate the tools above:
 | `forging-mcp-environment-setup` | Diagnoses MCP connectivity and owns the response envelope every forging tool returns |
 
 Projects recorded on a specific acquisition system additionally install that system's plugin, which ships the skills for
-the processing donations it makes to this library. The **mesoscope** plugin covers the Mesoscope-VR system, whose module
-parsing, trial decomposition, fluorescence alignment, video tracking, imaging configuration, processing schema, and
-dataset assembly skills document what the agnostic pipelines above dispatch through for that system.
+the processing donations it makes to this library. The **mesoscope** plugin covers the Mesoscope-VR system, whose
+`mesoscope:mesoscope-vr-module-parsing`, `mesoscope:mesoscope-vr-trial-decomposition`,
+`mesoscope:mesoscope-vr-fluorescence-alignment`, `mesoscope:mesoscope-vr-video-tracking`,
+`mesoscope:mesoscope-vr-imaging-configuration`, `mesoscope:mesoscope-vr-processing-schema`, and
+`mesoscope:mesoscope-vr-dataset-assembly` skills document what the agnostic pipelines above dispatch through for that
+system.
 
 #### Client Registration
 
