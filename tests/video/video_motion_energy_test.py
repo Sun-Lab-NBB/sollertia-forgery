@@ -24,8 +24,8 @@ from sollertia_forgery.video import (
 import sollertia_forgery.video.pipeline as pipeline_module
 from sollertia_forgery.video.motion_energy import (
     _SPATIAL_BIN_SIZE,
+    MINIMUM_CHUNK_FRAMES,
     MOTION_ENERGY_SUFFIX,
-    _MINIMUM_CHUNK_FRAMES,
     _bin_frame,
     _join_chunks,
     _plan_chunks,
@@ -306,7 +306,7 @@ def test_plan_chunks_tiles_the_recording_exactly(frame_count: int, workers: int)
 
 def test_plan_chunks_respects_the_minimum_chunk_size() -> None:
     """Verifies a recording too short to split is decoded as a single chunk."""
-    assert _plan_chunks(frame_count=_MINIMUM_CHUNK_FRAMES - 1, workers=64) == [(0, _MINIMUM_CHUNK_FRAMES - 1)]
+    assert _plan_chunks(frame_count=MINIMUM_CHUNK_FRAMES - 1, workers=64) == [(0, MINIMUM_CHUNK_FRAMES - 1)]
 
 
 def test_missing_recording_resolves_to_none(tmp_path: Path) -> None:
@@ -471,7 +471,7 @@ def chunked_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     The frames are kept small so the encode stays cheap, since only the frame count decides the chunk plan.
     """
-    frame_count = _MINIMUM_CHUNK_FRAMES * 2
+    frame_count = MINIMUM_CHUNK_FRAMES * 2
     frames = np.zeros((frame_count, 16, 16), dtype=np.uint8)
     for index in range(frame_count):
         frames[index, index % 10 : index % 10 + 4, 2:6] = 255
@@ -486,7 +486,7 @@ def test_own_pool_multi_chunk_result_matches_the_sequential_pass(tmp_path: Path,
 
     written = pl.read_ipc(output_path)
     sequential_energy, sequential_luminance = _energy_chunk(
-        video_path=str(chunked_video), start_frame=0, frame_count=_MINIMUM_CHUNK_FRAMES * 2
+        video_path=str(chunked_video), start_frame=0, frame_count=MINIMUM_CHUNK_FRAMES * 2
     )
 
     energy = written[_MotionEnergyColumn.MOTION_ENERGY].to_numpy()

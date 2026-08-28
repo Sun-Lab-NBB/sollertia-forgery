@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 from sollertia_shared_assets import SYSTEM_SESSION_TYPES, SessionTypes, AcquisitionSystems
 
+from sollertia_forgery import registries as registries_module
 from sollertia_forgery.registries import (
     _MICROCONTROLLER_ELIGIBILITY_REGISTRY,
     resolve_video_tracking,
@@ -16,6 +17,7 @@ from sollertia_forgery.registries import (
     resolve_forging_assembly_worker,
     resolve_microcontroller_parsers,
     resolve_two_photon_data_locator,
+    resolve_assembly_geometry_resolver,
     resolve_forging_admission_pipelines,
     resolve_forging_column_descriptions,
     resolve_microcontroller_event_codes,
@@ -33,6 +35,7 @@ from sollertia_forgery.mesoscope_vr import (
     locate_two_photon_data,
     assemble_mesoscope_session,
     process_mesoscope_video_tracking,
+    resolve_mesoscope_assembly_geometry,
     resolve_multi_recording_configuration,
     resolve_single_recording_configuration,
 )
@@ -42,9 +45,12 @@ if TYPE_CHECKING:
 
 _DONOR_REGISTRY_NAMES: tuple[str, ...] = (
     "_FORGING_ASSEMBLY_REGISTRY",
+    "_ASSEMBLY_GEOMETRY_REGISTRY",
+    "_ASSEMBLY_SOURCE_REGISTRY",
     "_RUNTIME_PARSER_REGISTRY",
     "_TWO_PHOTON_DATA_REGISTRY",
     "_VIDEO_TRACKING_REGISTRY",
+    "_POSE_PREDICTION_REGISTRY",
     "_MICROCONTROLLER_EVENT_CODE_REGISTRY",
     "_MICROCONTROLLER_ELIGIBILITY_REGISTRY",
     "_CINDRA_CONFIGURATION_REGISTRY",
@@ -65,6 +71,15 @@ def test_an_unknown_acquisition_system_is_rejected_with_a_value_error():
 def test_every_acquisition_system_donates_an_eligibility_accessor():
     """Verifies that a registered system resolves through the eligibility registry instead of reaching KeyError."""
     assert set(_MICROCONTROLLER_ELIGIBILITY_REGISTRY) == set(AcquisitionSystems)
+
+
+def test_the_guarded_names_are_every_registry_the_module_declares():
+    # The tuple above is what parametrizes the guard test below, so a registry added to the module and left out of it
+    # is a registry nothing checks. Deriving the expectation from the module itself is what closes that gap: the
+    # pose-prediction registry sat unguarded here for exactly as long as nothing tied the two together.
+    declared = {name for name in vars(registries_module) if name.endswith("_REGISTRY")}
+
+    assert declared == set(_DONOR_REGISTRY_NAMES)
 
 
 @pytest.mark.parametrize("registry_name", _DONOR_REGISTRY_NAMES)
@@ -156,6 +171,7 @@ def test_a_system_resolves_the_same_assets_whether_named_by_member_or_by_value(s
     assert resolve_forging_column_descriptions(system=system) is MESOSCOPE_COLUMN_DESCRIPTIONS
     assert resolve_forging_admission_pipelines(system=system) is MESOSCOPE_ADMISSION_PIPELINES
     assert resolve_two_photon_data_locator(system=system) is locate_two_photon_data
+    assert resolve_assembly_geometry_resolver(system=system) is resolve_mesoscope_assembly_geometry
     assert resolve_video_tracking(system=system) is process_mesoscope_video_tracking
     assert resolve_runtime_binding(system=system) == (RUNTIME_SOURCE_ID, parse_runtime)
 

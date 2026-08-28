@@ -5,6 +5,7 @@ from .openmp import (
     verify_openmp_runtime,
     resolve_openmp_runtime,
 )
+from .assembly import AssemblyGeometry
 from .pipelines import (
     SESSION_PIPELINES,
     ProcessingPipelines,
@@ -13,14 +14,17 @@ from .pipelines import (
 from .utilities import (
     natural_sort,
     delay_terminal,
+    count_feather_rows,
     multi_recording_dataset_name,
 )
 from .microcontroller import merge_event_streams
 
 __all__ = [
     "SESSION_PIPELINES",
+    "AssemblyGeometry",
     "OpenMPStatus",
     "ProcessingPipelines",
+    "count_feather_rows",
     "delay_terminal",
     "merge_event_streams",
     "multi_recording_dataset_name",

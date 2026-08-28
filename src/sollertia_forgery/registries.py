@@ -30,6 +30,8 @@ from .mesoscope_vr import (
     assemble_mesoscope_session,
     process_mesoscope_video_tracking,
     locate_mesoscope_pose_predictions,
+    resolve_mesoscope_assembly_sources,
+    resolve_mesoscope_assembly_geometry,
     resolve_multi_recording_configuration,
     resolve_single_recording_configuration,
 )
@@ -42,11 +44,13 @@ if TYPE_CHECKING:
     import polars as pl
     from sollertia_shared_assets import SessionData
 
-    from .shared_assets import ProcessingPipelines
+    from .shared_assets import AssemblyGeometry, ProcessingPipelines
 
 __all__ = [
     "ForgingAssembler",
     "MicrocontrollerParser",
+    "resolve_assembly_geometry_resolver",
+    "resolve_assembly_source_resolver",
     "resolve_eligible_microcontroller_modules",
     "resolve_forging_admission_pipelines",
     "resolve_forging_assembly_worker",
@@ -68,6 +72,20 @@ class ForgingAssembler(Protocol):
 
     def __call__(self, source_session_path: Path, output_path: Path, dataset_name: str) -> None:
         """Assembles the source session's data into the target dataset's ``data.feather``."""
+
+
+class _AssemblyGeometryResolver(Protocol):
+    """Defines the call signature of the assembly-geometry resolver an acquisition system donates."""
+
+    def __call__(self, session: SessionData) -> AssemblyGeometry:
+        """Reports the heights at which the system's own assembler holds the session's frame and its sources."""
+
+
+class _AssemblySourceResolver(Protocol):
+    """Defines the call signature of the assembly-source resolver an acquisition system donates."""
+
+    def __call__(self, session: SessionData) -> tuple[int, ...]:
+        """Reports the height at which the system's own assembler holds each source it reads for the session."""
 
 
 class MicrocontrollerParser(Protocol):
@@ -176,6 +194,36 @@ _FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
 column-description mapping. Dataset definition, the cindra multi-recording stages, in-pipeline job and tracker
 preparation, the per-dataset column-description binding, and shared-asset re-export are owned by the agnostic
 ``forging`` package.
+"""
+
+_ASSEMBLY_GEOMETRY_REGISTRY: dict[AcquisitionSystems, _AssemblyGeometryResolver] = {
+    AcquisitionSystems.MESOSCOPE_VR: resolve_mesoscope_assembly_geometry,
+}
+"""Maps each acquisition system to the module-level resolver reporting the heights at which its own assembler holds a
+session's assembled frame and each source that frame is built from. Which clock the frame is placed on, which of a
+session's clocks qualify to be it, and which sources the assembler reads at all belong to the system that assembles
+the session rather than to the pass that sizes it. The sizing pass charges its per-sample terms against the reported
+heights, so a system reporting a height its assembler never works at has its job reserved at a figure that job never
+reaches, in whichever direction the difference falls.
+"""
+
+_ASSEMBLY_SOURCE_REGISTRY: dict[AcquisitionSystems, _AssemblySourceResolver] = {
+    AcquisitionSystems.MESOSCOPE_VR: resolve_mesoscope_assembly_sources,
+}
+"""Maps each acquisition system to the module-level resolver reporting the height at which its own assembler holds
+each source it reads for one session.
+
+Notes:
+    This is the narrower of the two assembly donations, and it is the one every assembly model consults. A session
+    whose assembly places its frame on an imaging clock has no camera reference clock to report, so the geometry
+    donation does not describe it, while the sources it reads are the same family of per-clock arrays every assembly
+    holds. The geometry donation therefore reports its own sources through this one, which keeps a single statement
+    of what each of a system's assemblers reads.
+
+    Which sources an assembler reads, and how that set differs between the session types one system assembles, belong
+    to the system rather than to the pass that sizes it. The sizing pass charges its per-sample term against every
+    reported height, so a system reporting a set narrower than its assembler reads has its job reserved less memory
+    than that job goes on to hold.
 """
 
 _FORGING_ADMISSION_REGISTRY: dict[AcquisitionSystems, dict[SessionTypes, frozenset[ProcessingPipelines]]] = {
@@ -297,6 +345,41 @@ def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dic
         ValueError: If the acquisition system is unknown.
     """
     return _FORGING_ASSEMBLY_REGISTRY[_resolve_system(system=system)].column_descriptions
+
+
+def resolve_assembly_geometry_resolver(system: str | AcquisitionSystems) -> _AssemblyGeometryResolver:
+    """Resolves the assembly-geometry resolver registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the dataset being forged, for example the value carried by
+            ``DatasetData.acquisition_system``.
+
+    Returns:
+        The registered resolver, which reports the samples the reference clock its system's assembler settles on
+        holds and the samples each source that assembler reads holds, and refuses a session for which that assembler
+        would settle on no reference clock at all.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return _ASSEMBLY_GEOMETRY_REGISTRY[_resolve_system(system=system)]
+
+
+def resolve_assembly_source_resolver(system: str | AcquisitionSystems) -> _AssemblySourceResolver:
+    """Resolves the assembly-source resolver registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the dataset being forged, for example the value carried by
+            ``DatasetData.acquisition_system``.
+
+    Returns:
+        The registered resolver, which reports the samples each source the system's assembler reads for one session
+        holds on that source's own clock, routed by the session's own type.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return _ASSEMBLY_SOURCE_REGISTRY[_resolve_system(system=system)]
 
 
 def resolve_single_recording_configuration_resolver(
@@ -515,12 +598,12 @@ def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
 def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
-    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly, runtime-parser,
-    two-photon-data, video-tracking, pose-prediction, microcontroller event-code, microcontroller eligibility, cindra
-    configuration, multi-recording session-type, and forging-admission registries. Confirms that every member registers
-    at least one microcontroller module parser. Confirms that every parseable microcontroller module declares the event
-    codes its parser reads, and that every session type a system admits into a dataset is a session type that system
-    records.
+    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly, assembly-geometry,
+    assembly-source, runtime-parser, two-photon-data, video-tracking, pose-prediction, microcontroller event-code,
+    microcontroller eligibility, cindra configuration, multi-recording session-type, and forging-admission registries.
+    Confirms that every member registers at least one microcontroller module parser. Confirms that every parseable
+    microcontroller module declares the event codes its parser reads, and that every session type a system admits into a
+    dataset is a session type that system records.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable
@@ -534,6 +617,8 @@ def _assert_registry_coverage() -> None:
 
     for registry_name, registered_systems in (
         ("_FORGING_ASSEMBLY_REGISTRY", frozenset(_FORGING_ASSEMBLY_REGISTRY)),
+        ("_ASSEMBLY_GEOMETRY_REGISTRY", frozenset(_ASSEMBLY_GEOMETRY_REGISTRY)),
+        ("_ASSEMBLY_SOURCE_REGISTRY", frozenset(_ASSEMBLY_SOURCE_REGISTRY)),
         ("_RUNTIME_PARSER_REGISTRY", frozenset(_RUNTIME_PARSER_REGISTRY)),
         ("_TWO_PHOTON_DATA_REGISTRY", frozenset(_TWO_PHOTON_DATA_REGISTRY)),
         ("_VIDEO_TRACKING_REGISTRY", frozenset(_VIDEO_TRACKING_REGISTRY)),
