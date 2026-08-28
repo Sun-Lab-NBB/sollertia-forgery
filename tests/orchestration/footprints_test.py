@@ -18,10 +18,13 @@ from cindra import (
     size_multi_recording_job,
     size_single_recording_job,
 )
+import polars as pl
 import pytest
 import tifffile
 from ataraxis_video_system import (
     CAMERA_EXTRACTION_JOB_CORES,
+    OutputLayout,
+    ExtractedDataColumns,
     size_archive_job as size_camera_extraction_job,
 )
 from sollertia_shared_assets import (
@@ -125,6 +128,31 @@ _ASSEMBLY_WRITE_COPIES: int = 1
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the same model charges the behavior, runtime, and video sub-datasets per sample of the clock on which
 they are placed, anchored on the same terms."""
+
+_WIDE_CLOCK_FRAMES: int = 3_000_000
+"""The frames the wider of the two synthetic camera clocks holds. Every estimate is reported at a whole gigabyte, and
+the behavior-only model charges one sub-dataset term per sample above a worker, so any clock below roughly one
+million samples reports the same single gigabyte whatever its length. This clock is long enough to clear two of those
+boundaries, which is what lets a figure taken from the wrong clock, or from fluorescence, differ from the expected
+one."""
+
+_NARROW_CLOCK_FRAMES: int = 1_200_000
+"""The frames the narrower clock holds. It spans the same duration as the wide clock at a lower rate, which makes its
+camera the slower one, and it lands one whole gigabyte below the wide clock rather than in the same bucket."""
+
+_WIDE_CLOCK_MEMORY_MB: int = 3072
+"""The memory the behavior-only model reports for the wide clock, stated outright rather than recomputed, so the
+expectation does not move with the model it checks."""
+
+_NARROW_CLOCK_MEMORY_MB: int = 2048
+"""The memory the same model reports for the narrow clock, which is the figure an estimate settling on the slower
+camera would report instead."""
+
+_WIDE_CLOCK_PERIOD_US: int = 1_000
+"""The microseconds between consecutive frames of the wide clock."""
+
+_NARROW_CLOCK_PERIOD_US: int = 2_500
+"""The microseconds between consecutive frames of the narrow clock, which spans the same duration at a lower rate."""
 
 
 def write_surgery_metadata(session: SessionData, genotype: str = "GP5.17") -> Path:
@@ -274,6 +302,29 @@ def write_processed_recording(
     write_trace_array(path=directory.joinpath("cell_fluorescence.npy"), shape=(regions, samples))
     write_combined_metadata(directory=directory, height=height, width=width)
     return directory
+
+
+def write_camera_clock(session: SessionData, *, camera: str, frames: int, period_us: int = 33_000) -> Path:
+    """Writes one camera's timestamp feather, which is the clock a session recording no imaging is assembled onto.
+
+    The feather is published under the canonical name the video library's own layout states, which is the name the
+    assembly reads and the name the estimate counts the rows of.
+
+    Args:
+        session: The session whose processed video data receives the feather.
+        camera: The colloquial camera name under which the feather is published.
+        frames: The frames the camera acquired, which is the samples its clock holds.
+        period_us: The microseconds separating consecutive frames, which sets the camera's mean rate.
+
+    Returns:
+        The path to the written feather.
+    """
+    directory = session.processed_data.video_data_path
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory.joinpath(f"{camera}{OutputLayout.TIMESTAMPS_INFIX}{OutputLayout.FILE_SUFFIX}")
+    timestamps = np.arange(frames, dtype=np.uint64) * np.uint64(period_us)
+    pl.DataFrame({ExtractedDataColumns.FRAME_TIME: timestamps}).write_ipc(file=path, compression="uncompressed")
+    return path
 
 
 def build_dataset(
@@ -1029,11 +1080,19 @@ def test_extraction_is_refused_for_a_dataset_its_system_performs_no_tracking_for
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that mesoscope-VR tracks cells across experiment sessions alone, so a training dataset resolves no
-    configuration.
+    configuration, and that the assembly of such a dataset is sized from the clock its own assembler reads.
+
+    A training session joins a dataset without completing the two-photon pipeline, so its assembly attaches no
+    fluorescence column even where a stray single-recording output happens to sit beside it. The admission policy
+    therefore selects the model rather than standing in for it when imaging is absent, which this session pins by
+    carrying a processed recording that the estimate must leave out of its figure.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     write_surgery_metadata(session=session)
     write_processed_recording(session=session, regions=64, samples=1000)
+    write_camera_clock(
+        session=session, camera="face_camera", frames=_WIDE_CLOCK_FRAMES, period_us=_WIDE_CLOCK_PERIOD_US
+    )
     dataset = build_dataset(
         project_root=project_root, name="ds_training", sessions=[session], session_type=SessionTypes.RUN_TRAINING
     )
@@ -1044,10 +1103,93 @@ def test_extraction_is_refused_for_a_dataset_its_system_performs_no_tracking_for
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
-    # Assembly needs no configuration, so it stays sized from the geometry the session's own output reports.
-    assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=1000, regions=64)
+    # Assembly needs no configuration, and this session type records no imaging, so the figure holds the camera
+    # clock's samples alone and charges none of the fluorescence the stray recording output reports. The stray
+    # recording is small enough to report a single gigabyte through the imaging model, while the camera clock reports
+    # three through this one, so a figure read off that recording could not pass this assertion.
+    assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(cores=1, memory_mb=_WIDE_CLOCK_MEMORY_MB)
+
+
+def test_the_assembly_of_a_session_recording_no_imaging_is_sized_from_its_widest_camera_clock(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """Verifies that a session whose type joins a dataset without imaging is sized from the camera clock its
+    assembly places every column on, bounded by the widest clock the session recorded.
+
+    The assembly settles on the slowest camera's clock, which the two cameras written here make the body camera. The
+    estimate charges the widest clock instead, since the cameras of one session run over the same span and counting
+    the rows of each feather bounds the slower clock from above without reading a timestamp.
+
+    The two clocks span the same duration at different rates and are written far enough apart to report different
+    whole gigabytes, so the figure states which clock the estimate settled on rather than collapsing both onto the
+    quantum every estimate is rounded to.
+    """
+    session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
+    write_camera_clock(
+        session=session, camera="face_camera", frames=_WIDE_CLOCK_FRAMES, period_us=_WIDE_CLOCK_PERIOD_US
     )
+    write_camera_clock(
+        session=session, camera="body_camera", frames=_NARROW_CLOCK_FRAMES, period_us=_NARROW_CLOCK_PERIOD_US
+    )
+    dataset = build_dataset(
+        project_root=project_root, name="ds_clocked", sessions=[session], session_type=SessionTypes.RUN_TRAINING
+    )
+
+    estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+    # No fluorescence column is attached at all, so the sub-dataset term the widest clock implies is the whole
+    # data-dependent charge the stage carries above its worker. The slower camera's own clock reports a gigabyte less,
+    # so an estimate bounded by it rather than by the wide clock reports the narrow figure and fails here.
+    assert _WIDE_CLOCK_MEMORY_MB != _NARROW_CLOCK_MEMORY_MB
+    assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(cores=1, memory_mb=_WIDE_CLOCK_MEMORY_MB)
+
+
+def test_the_assembly_of_a_session_recording_no_imaging_is_refused_without_a_camera_clock(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """Verifies that a session recording no imaging and no usable camera clock is refused rather than sized at a
+    floor, which is the answer its assembly worker gives for it as well.
+
+    A clock is defined by a mean frame rate, so a feather holding a single frame states none. Such a session is
+    refused on the same terms as one whose cameras wrote no feather at all.
+    """
+    session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
+    dataset = build_dataset(
+        project_root=project_root, name="ds_clockless", sessions=[session], session_type=SessionTypes.RUN_TRAINING
+    )
+
+    with pytest.raises(FileNotFoundError, match="no camera timestamp feather"):
+        size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+    write_camera_clock(session=session, camera="face_camera", frames=1)
+
+    with pytest.raises(FileNotFoundError, match="no camera timestamp feather"):
+        size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+
+def test_the_assembly_of_a_dataset_whose_session_type_joins_no_dataset_is_refused(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """Verifies that a dataset whose session type the acquisition system's admission policy omits is refused rather
+    than sized from the behavior model.
+
+    The policy maps a type to the pipelines it must complete, and a type it omits joins no dataset at all. Reading
+    that absence as an empty requirement would size such a dataset as though it were admitted while recording no
+    imaging. This pass is public and runs no admission check of its own, so a marker naming an unadmitted type reaches
+    it directly and must be refused there. The session carries a usable camera clock, so the refusal can only come
+    from the type rather than from data the pass could not read.
+    """
+    session = session_factory(animal_id="321", session_type=SessionTypes.WINDOW_CHECKING)
+    write_camera_clock(session=session, camera="face_camera", frames=2500)
+    dataset = build_dataset(
+        project_root=project_root,
+        name="ds_unadmitted",
+        sessions=[session],
+        session_type=SessionTypes.WINDOW_CHECKING,
+    )
+
+    with pytest.raises(ValueError, match="joins no dataset"):
+        size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
 
 def test_a_dataset_naming_no_session_resolves_no_tracking_configuration(

@@ -11,6 +11,7 @@ from dataclasses import replace
 import numpy as np
 import polars as pl
 import pytest
+from ataraxis_video_system import OutputLayout, ExtractedDataColumns
 from sollertia_shared_assets import DatasetData, SessionData, SessionTypes, DatasetSession
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
@@ -76,25 +77,24 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     raise RuntimeError(message)
 
 
-def write_processed_recording(session: SessionData, *, regions: int, samples: int) -> Path:
-    """Writes the single-recording outputs from which a dataset's assembly job is sized.
+def write_camera_clock(session: SessionData, *, frames: int, period_us: int = 33_000) -> Path:
+    """Writes the camera timestamp feather from which a training dataset's assembly job is sized.
 
-    The assembly stage reads the trace array's header and the presence of the combination stage's archive, so writing
-    both is what makes the session's own fluorescence resolvable without decoding anything.
+    A training session records no imaging, so its assembly places every column on a camera clock and the estimate
+    counts that feather's rows. Writing one is therefore what makes the session's own assembly job sizable.
 
-    Args: session: The session whose processed data receives the outputs. regions: The regions the recording's traces
-    hold. samples: The samples each trace holds.
+    Args: session: The session whose processed video data receives the feather. frames: The frames the camera
+    acquired, which is the samples its clock holds. period_us: The microseconds separating consecutive frames.
 
-    Returns: The path to the session's cindra output directory.
+    Returns: The path to the written feather.
     """
-    directory = session.processed_data.cindra_data_path
+    directory = session.processed_data.video_data_path
     directory.mkdir(parents=True, exist_ok=True)
-    with directory.joinpath("cell_fluorescence.npy").open("wb") as array_file:
-        np.lib.format.write_array(array_file, np.zeros((regions, samples), dtype=np.float32))
-    np.savez(
-        directory.joinpath("combined_metadata.npz"), combined_height=np.array([128]), combined_width=np.array([96])
-    )
-    return directory
+    path = directory.joinpath(f"face_camera{OutputLayout.TIMESTAMPS_INFIX}{OutputLayout.FILE_SUFFIX}")
+    pl.DataFrame(
+        {ExtractedDataColumns.FRAME_TIME: np.arange(frames, dtype=np.uint64) * np.uint64(period_us)}
+    ).write_ipc(file=path, compression="uncompressed")
+    return path
 
 
 def define_planned_dataset(project_root: Path, session: SessionData) -> DatasetData:
@@ -926,10 +926,13 @@ def test_planning_an_acquired_session_records_the_pipelines_that_resolve_jobs(
 
 
 def test_planning_a_defined_dataset_records_its_forging_jobs(project_root: Path, training_session: SessionData) -> None:
-    """Verifies that a dataset is plannable as soon as its sessions carry the single-day outputs its jobs consume,
-    since every figure it records follows from those outputs.
+    """Verifies that a dataset is plannable as soon as its sessions carry the outputs its jobs consume, since every
+    figure it records follows from those outputs.
+
+    A training session records no imaging at all, so what its assembly job consumes is the camera clock its columns
+    are placed on rather than any fluorescence.
     """
-    write_processed_recording(session=training_session, regions=64, samples=1200)
+    write_camera_clock(session=training_session, frames=1200)
     dataset = define_planned_dataset(project_root=project_root, session=training_session)
 
     plan = resolve_dataset_plan(dataset_path=dataset.dataset_data_path.parent, display_progress=True)
@@ -946,10 +949,10 @@ def test_a_dataset_whose_session_carries_no_processed_output_is_refused(
 ) -> None:
     """Verifies that a dataset whose assembly job has nothing to read is dropped rather than planned at a floor.
 
-    The assembly stage is charged the shape of the session's own fluorescence, so a session that has not reached the
-    end of the single-recording pipeline states nothing from which the stage could be sized. Recording it at an
-    unmodeled figure would hand a scheduler a reservation nothing measured, so the whole dataset drops out of the
-    plan and the refusal names the session it could not read.
+    The assembly stage is charged the frame it builds, which a training session places on the clock of the camera it
+    recorded, so a session whose video processing has written no clock states nothing from which the stage could be
+    sized. Recording it at an unmodeled figure would hand a scheduler a reservation nothing measured, so the whole
+    dataset drops out of the plan and the refusal names the session it could not read.
     """
     dataset = define_planned_dataset(project_root=project_root, session=training_session)
 

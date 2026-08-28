@@ -23,12 +23,16 @@ from cindra import (
     size_multi_recording_job,
     size_single_recording_job,
 )
+import polars as pl
 import psutil
 from natsort import natsorted
 from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
-from ataraxis_video_system import size_archive_job as size_camera_extraction_job
+from ataraxis_video_system import (
+    OutputLayout,
+    size_archive_job as size_camera_extraction_job,
+)
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SessionData
+from sollertia_shared_assets import SessionData, SessionTypes
 from ataraxis_data_structures import find_log_archives, read_archive_message_count
 from ataraxis_communication_interface import size_archive_job as size_controller_extraction_job
 
@@ -39,6 +43,7 @@ from ..managing import CHECKSUM_JOB_NAME
 from ..registries import (
     resolve_pose_prediction_locator,
     resolve_two_photon_data_locator,
+    resolve_forging_admission_pipelines,
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
@@ -110,6 +115,11 @@ rather than rebuilding it, so the stage peaks at the columns the assembly alread
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the behavior, runtime, and video sub-datasets hold per sample of the clock on which they are placed.
 Each emits one array per column and the interpolation that aligns them holds double-precision transients."""
+
+_MINIMUM_CLOCK_SAMPLES: int = 2
+"""The fewest samples a camera timestamp feather must hold for the assembly of a session that records no imaging to
+settle on it. That assembly places its columns on a camera clock, and a clock is defined by a mean frame rate, which
+needs at least two timestamps to state one."""
 
 _PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
@@ -287,8 +297,8 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
     """Sizes every possible forging job from the processed data it will read, reporting its cores and its memory.
 
     Notes:
-        Reads array headers and the presence of the recording metadata alone, so sizing a dataset decodes no
-        fluorescence and opens no binary. Each cross-recording stage scales with the processed data the
+        Reads array headers, feather metadata and the presence of the recording metadata alone, so sizing a dataset
+        decodes no fluorescence and reads no timestamp. Each cross-recording stage scales with the processed data the
         single-recording pipeline wrote for the sessions that carry two-photon data.
 
         Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
@@ -298,7 +308,10 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
         dataset cannot run until its recordings are complete.
 
         The per-session assembly stage is this package's own, so no dependency models it and its projection stays
-        here. Its width holds one value whatever data it reads, so it reports the allocation its type declared.
+        here. Its width holds one value whatever data it reads, so it reports the allocation its type declared. Which
+        of its two models applies follows from the acquisition system's admission policy: a session type that joins a
+        dataset without completing the two-photon pipeline is assembled from its behavior sources onto a camera clock,
+        so it is sized from that clock rather than from fluorescence it never recorded.
 
     Args:
         dataset: The resolved dataset on which the jobs operate.
@@ -311,8 +324,8 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
     Raises:
         FileNotFoundError: If a job's processed input cannot be read, in which case the job that reads it cannot run
             either.
-        ValueError: If the dataset's acquisition system donates no multi-recording configuration, or if a job name
-            routes to no sizing model.
+        ValueError: If the dataset's acquisition system donates no multi-recording configuration, if a job name
+            routes to no sizing model, or if the dataset's session type joins no dataset for its acquisition system.
     """
     project_root = dataset.dataset_data_path.parent.parent
     animals = {entry.session: entry.animal for entry in dataset.sessions}
@@ -807,6 +820,28 @@ def _two_photon_output_root(project_root: Path, animal: str, session: str) -> Pa
     return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data_path
 
 
+@cache
+def _video_output_root(project_root: Path, animal: str, session: str) -> Path:
+    """Resolves the directory into which a session's video processing wrote its per-camera timestamp feathers.
+
+    Notes:
+        The directory is read from the shared hierarchy's own accessor rather than rebuilt here, which is the same
+        contract every other location this pass reads follows.
+
+        Cached on the same terms as the two-photon output root, because a session's marker is otherwise re-read for
+        every stage that resolves a location beneath it.
+
+    Args:
+        project_root: The path to the project's root directory.
+        animal: The animal that owns the session.
+        session: The session name whose processed video directory is resolved.
+
+    Returns:
+        The path to the session's processed video-data directory.
+    """
+    return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data.video_data_path
+
+
 def _animal_recording_directories(dataset: DatasetData, animal: str, project_root: Path) -> tuple[Path, ...]:
     """Resolves the cindra output directory of every recording one animal contributes to a dataset.
 
@@ -990,7 +1025,9 @@ def _size_forging_job(
         type declared.
 
         A session carrying no fluorescence has nothing to assemble, so its refusal propagates rather than resolving
-        to a floor.
+        to a floor. That holds for a session whose type must complete the two-photon pipeline before it joins a
+        dataset at all. A type admitted without that pipeline records no imaging by design, and its assembly attaches
+        no fluorescence column, so this model does not describe its job and the behavior-only model sizes it instead.
 
     Args:
         dataset: The resolved dataset that holds the session.
@@ -1005,9 +1042,19 @@ def _size_forging_job(
         The job's footprint, holding the declared width and the memory the assembled frame holds at it.
 
     Raises:
-        FileNotFoundError: If the session carries no processed imaging output, in which case the job assembling it
-            cannot run either.
+        FileNotFoundError: If a session whose type requires imaging carries no processed imaging output, or if a
+            session whose type requires none carries no camera clock, in which case the job assembling it cannot run
+            either.
+        ValueError: If the dataset's acquisition system is unknown, if its session type falls outside the platform
+            vocabulary, or if that type joins no dataset for the system and therefore matches neither model.
     """
+    # The admission policy states which pipelines a session type must complete before it joins a dataset, so a type
+    # that joins without the two-photon pipeline is one the assembler builds from behavior sources alone. Sizing it
+    # from fluorescence would charge columns its job never attaches, so the model is selected by the policy rather
+    # than falling back to it when imaging happens to be absent.
+    if not _requires_imaging(dataset=dataset):
+        return _size_behavior_assembly_job(project_root=project_root, animal=animal, session=session, cores=cores)
+
     geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=session)
     if geometry is None:
         message = (
@@ -1025,4 +1072,138 @@ def _size_forging_job(
     return JobFootprint(
         cores=cores,
         memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + sub_datasets)),
+    )
+
+
+def _requires_imaging(dataset: DatasetData) -> bool:
+    """Reports whether the sessions a dataset holds must carry two-photon output to have joined it.
+
+    Notes:
+        Read from the acquisition system's own admission policy rather than from a session-type literal, so a system
+        that admits a behavior-only session type inherits the behavior-only estimate with no change here. A dataset
+        holds one session type, which the shared hierarchy enforces both when a dataset is defined and when a session
+        is added to one, so the policy is read once for the dataset rather than once per session.
+
+        A session type the policy omits joins no dataset at all, so neither model describes the assembly of a
+        dataset carrying it. Such a type is refused here rather than read as requiring no imaging, because this pass
+        is public and does not itself run the admission check: a hand-made dataset marker naming an unadmitted type
+        reaches it directly, and answering it with a behavior-only figure would reserve memory for a job the forging
+        pipeline never plans.
+
+    Args:
+        dataset: The resolved dataset whose session type is examined.
+
+    Returns:
+        True when the dataset's session type must complete the two-photon pipeline before joining a dataset, and
+        False when it joins carrying no imaging at all.
+
+    Raises:
+        ValueError: If the dataset's acquisition system is unknown, if its session type falls outside the platform
+            vocabulary, or if that type joins no dataset for the system.
+    """
+    requirements = resolve_forging_admission_pipelines(system=dataset.acquisition_system)
+
+    # An absent entry states that the type joins no dataset, which is a different answer from a type admitted while
+    # requiring no imaging. Collapsing the two would size a dataset the pipeline refuses to forge, so the absence is
+    # reported on the same terms the admission check reports it.
+    required = requirements.get(SessionTypes(dataset.session_type))
+    if required is None:
+        admissible = ", ".join(sorted(str(session_type) for session_type in requirements))
+        message = (
+            f"Unable to size the assembly job of dataset '{dataset.name}'. Its session type "
+            f"'{dataset.session_type}' joins no dataset for the '{dataset.acquisition_system}' acquisition system, "
+            f"which admits the session type(s): {admissible}, so no model describes the job assembling it."
+        )
+        console.error(message=message, error=ValueError)
+
+    return ProcessingPipelines.TWO_PHOTON in required
+
+
+def _resolve_widest_camera_clock_samples(video_data_path: Path) -> int:
+    """Reads how many samples the widest camera clock a session recorded holds.
+
+    Notes:
+        Every camera the video pipeline processed writes one timestamp per frame it acquired, under the filename that
+        library's own layout states, so a feather's row count is that camera's sample count and the filenames are
+        read from the layout rather than rebuilt here. The pipeline publishes each parsed feather under its canonical
+        name as well, and both names carry the same rows, so counting one twice moves no figure.
+
+        The pattern matches every camera the pipeline published a feather for, including one whose name a given
+        acquisition system's own assembler does not read. Counting those keeps this module free of any system's
+        camera manifest and keeps the figure an upper bound, which is the direction a reservation may err in.
+
+        Only each feather's metadata is read, which states the rows it holds without decoding one of them.
+
+    Args:
+        video_data_path: The processed video-data directory holding the session's per-camera timestamp feathers.
+
+    Returns:
+        The samples the widest camera clock holds, or zero when the session carries no timestamp feather at all.
+    """
+    return max(
+        (
+            int(pl.scan_ipc(source=timestamps_path).select(pl.len()).collect().item())
+            for timestamps_path in video_data_path.glob(f"*{OutputLayout.TIMESTAMPS_INFIX}{OutputLayout.FILE_SUFFIX}")
+        ),
+        default=0,
+    )
+
+
+def _size_behavior_assembly_job(project_root: Path, animal: str, session: str, cores: int) -> JobFootprint:
+    """Sizes one per-session assembly job of a session type that records no imaging.
+
+    Notes:
+        The assembly of such a session attaches no fluorescence column at all. It places its behavior, runtime and
+        video columns on the clock of the slowest camera the session recorded, so the samples that clock holds are the
+        height of the frame the job builds and the whole data-dependent charge follows from them. The clock is settled
+        after the columns are stacked and before they are clipped to the session bounds, so the job peaks at the full
+        recorded height rather than at the height it writes.
+
+        Which camera is the slowest follows from the mean rate each one held, which its timestamps alone state. The
+        cameras of one session run over the same span, so the widest clock holds at least the samples the slowest one
+        does and bounds the frame from above at the cost of a metadata read. Charging that bound keeps the estimate on
+        the safe side while leaving the timestamps themselves unread.
+
+        A session whose cameras left no usable clock has nothing to place its columns on, so its refusal propagates
+        rather than resolving to a floor.
+
+        The clock read here is a deliberate upper bound taken from the video pipeline's output contract rather than a
+        replay of the assembler's own clock resolution, and the two do not agree in every case. This pass counts the
+        rows of every timestamp feather that pipeline published and accepts any feather holding the samples a mean
+        rate needs. The assembler a system donates is stricter: it reads the cameras its own manifest names and
+        accepts a clock only where its timestamps span a positive duration. So a session whose only feather comes
+        from a camera outside that manifest, or whose timestamps span no duration, is sized here and refused there.
+        The residual surfaces as a job that was planned and then failed on its own missing clock rather than as a
+        planning refusal, which is the direction an estimate may err in, since a figure this pass reports only
+        reserves memory.
+
+    Args:
+        project_root: The path to the project's root directory.
+        animal: The animal that owns the session.
+        session: The session name whose assembly job is sized.
+        cores: The cores the job is allocated, which its type declares.
+
+    Returns:
+        The job's footprint, holding the declared width and the memory the assembled frame holds at it.
+
+    Raises:
+        FileNotFoundError: If the session carries no camera timestamp feather holding the samples a clock needs, in
+            which case nothing states the height of the frame the job builds.
+    """
+    samples = _resolve_widest_camera_clock_samples(
+        video_data_path=_video_output_root(project_root=project_root, animal=animal, session=session)
+    )
+    if samples < _MINIMUM_CLOCK_SAMPLES:
+        message = (
+            f"Unable to size the assembly job of session '{session}'. The session carries no camera timestamp feather "
+            f"holding at least {_MINIMUM_CLOCK_SAMPLES} frames, so nothing states the reference clock the job places "
+            f"its columns on and the job could not run either."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    return JobFootprint(
+        cores=cores,
+        memory_mb=_apply_tolerance(
+            memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=samples * _SUB_DATASET_BYTES_PER_SAMPLE)
+        ),
     )
