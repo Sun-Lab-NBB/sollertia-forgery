@@ -1,5 +1,5 @@
-"""Contains tests for the Mesoscope-VR training-session data assembler against on-disk sessions built from real
-feathers.
+"""Contains tests for the Mesoscope-VR training-session data assembler, and for the geometry resolver reporting the
+heights that assembler works at, against on-disk sessions built from real feathers.
 """
 
 from __future__ import annotations
@@ -12,7 +12,10 @@ import pytest
 
 from sollertia_forgery.mesoscope_vr.forging import assemble_mesoscope_session
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
-from sollertia_forgery.mesoscope_vr.training_dataset import assemble_training_dataset
+from sollertia_forgery.mesoscope_vr.training_dataset import (
+    assemble_training_dataset,
+    resolve_mesoscope_assembly_geometry,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,6 +34,18 @@ _FACE_FRAME_PERIOD_US: int = 100_000
 
 _FACE_FRAME_COUNT: int = 60
 """The number of frames the face camera records."""
+
+_VALVE_SAMPLE_COUNT: int = 4
+"""The samples the synthetic valve feather holds, which is the height at which the assembly reads it."""
+
+_LICK_SAMPLE_COUNT: int = 3
+"""The samples the synthetic lick feather holds."""
+
+_ENCODER_SAMPLE_COUNT: int = 60
+"""The samples the synthetic encoder feather holds, one every hundred milliseconds over the recorded span."""
+
+_STATE_SAMPLE_COUNT: int = 3
+"""The samples each of the two synthetic runtime state feathers holds."""
 
 _SESSION_START_US: int = 1_000_000
 """The timestamp at which the acquisition system first leaves idle, which anchors the head of the clipped dataset."""
@@ -105,7 +120,7 @@ def _write_behavior_sources(session: SessionData) -> None:
             "lick_state": np.array([0, 1, 0], dtype=np.uint8),
         },
     )
-    encoder_time = np.arange(0, 6_000_000, 100_000, dtype=np.uint64)
+    encoder_time = np.arange(_ENCODER_SAMPLE_COUNT, dtype=np.uint64) * np.uint64(100_000)
     _write_feather(
         path=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER),
         columns={
@@ -284,3 +299,57 @@ def test_assemble_training_dataset_rejects_a_session_without_a_camera_clock(
         assemble_training_dataset(source_session_path=training_session.raw_data_path.parent, output_path=output_path)
 
     assert not output_path.parent.exists()
+
+
+def test_resolve_mesoscope_assembly_geometry_reports_the_reference_clock_and_every_source(
+    prepared_training_session: SessionData,
+) -> None:
+    """Verifies the geometry reports both heights the assembly works at: the reference clock its columns are placed
+    on, and the height each source it reads stands at.
+
+    The face camera runs at twice the body camera's rate, so the assembly settles on the body camera's clock while
+    holding the face camera's feathers at twice that height. The two heights are reported separately because neither
+    states the other.
+    """
+    geometry = resolve_mesoscope_assembly_geometry(session=prepared_training_session)
+
+    assert geometry.reference_samples == _BODY_FRAME_COUNT
+
+    # One entry per clock the assembly reads, in the order it reads them: the face and body cameras, whose three
+    # feathers each share one clock, then the valve, lick and encoder feathers, then the two runtime state feathers.
+    # The optional screen, brake and torque feathers a run-training session never writes are absent from both.
+    assert geometry.source_samples == (
+        _FACE_FRAME_COUNT,
+        _BODY_FRAME_COUNT,
+        _VALVE_SAMPLE_COUNT,
+        _LICK_SAMPLE_COUNT,
+        _ENCODER_SAMPLE_COUNT,
+        _STATE_SAMPLE_COUNT,
+        _STATE_SAMPLE_COUNT,
+    )
+
+
+def test_resolve_mesoscope_assembly_geometry_counts_the_sources_a_session_actually_wrote(
+    training_session: SessionData,
+) -> None:
+    """Verifies a session that wrote none of its behavior feathers reports its camera clocks alone, since a source
+    the assembler never opens holds nothing for the job to be charged.
+    """
+    _write_camera_clocks(session=training_session)
+
+    geometry = resolve_mesoscope_assembly_geometry(session=training_session)
+
+    assert geometry.reference_samples == _BODY_FRAME_COUNT
+    assert geometry.source_samples == (_FACE_FRAME_COUNT, _BODY_FRAME_COUNT)
+
+
+def test_resolve_mesoscope_assembly_geometry_refuses_a_session_without_a_reference_clock(
+    training_session: SessionData,
+) -> None:
+    """Verifies a session whose cameras left no usable clock is refused rather than measured at a floor, which is the
+    answer its assembler gives for it as well.
+    """
+    _write_behavior_sources(session=training_session)
+
+    with pytest.raises(FileNotFoundError, match="no camera clock"):
+        resolve_mesoscope_assembly_geometry(session=training_session)

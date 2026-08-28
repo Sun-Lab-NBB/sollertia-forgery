@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 from hashlib import sha256
+from numbers import Integral
+from zipfile import BadZipFile
 from functools import cache
 from dataclasses import dataclass
 
@@ -18,17 +20,15 @@ from cindra import (
     SingleRecordingJobNames,
     resolve_array_path,
     resolve_output_path,
-    resolve_dataset_path,
-    is_recording_processed,
     size_multi_recording_job,
     size_single_recording_job,
+    read_tracked_recording_geometry,
 )
-import polars as pl
+import pandas as pd
 import psutil
-from natsort import natsorted
 from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
 from ataraxis_video_system import (
-    OutputLayout,
+    resolve_jobs,
     size_archive_job as size_camera_extraction_job,
 )
 from ataraxis_base_utilities import console
@@ -43,12 +43,22 @@ from ..managing import CHECKSUM_JOB_NAME
 from ..registries import (
     resolve_pose_prediction_locator,
     resolve_two_photon_data_locator,
+    resolve_assembly_source_resolver,
+    resolve_assembly_geometry_resolver,
     resolve_forging_admission_pipelines,
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
-from ..shared_assets import ProcessingPipelines, multi_recording_dataset_name
+from ..shared_assets import ProcessingPipelines
 from ..microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
+
+# The chunk threshold is bound under a private name so that the sizing model's identifier digests it. The
+# threshold decides how many decoders a motion-energy job opens, so retuning it moves every motion-energy figure
+# and every plan stamped with the previous identifier has to be estimated again.
+from ..video.motion_energy import (
+    MINIMUM_CHUNK_FRAMES as _MINIMUM_CHUNK_FRAMES,
+    resolve_camera_video,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,14 +83,32 @@ _ARCHIVE_DIRECTORY_BYTES_PER_MESSAGE: int = 768
 directory entry per logged message, and that directory dominates the decoded payload itself, so the cost follows the
 message count rather than the bytes those messages occupy."""
 
-_MODULE_TABLE_RATIO: float = 3.4
-"""The resident memory a module parse job holds per byte of the archive from which its module came. One module holds
-a share of its controller's archive, and partitioning and merging its event streams materializes that share several
-times over, so the whole archive bounds the job from above."""
+_CONTROLLER_ARCHIVE_TABLE_RATIO: float = 3.4
+"""The resident memory a module parse job holds per byte of the whole log archive its controller recorded. A parse
+job reads one module's share of that archive, and partitioning and merging the module's event streams materializes
+that share several times over.
 
-_POSE_PREDICTION_RATIO: float = 6.0
-"""The resident memory the pose-tracking job holds per byte of its prediction file. The table is promoted to double
-precision and expanded into per-bodypart and per-metric arrays."""
+Notes:
+    The term is charged against the whole archive rather than against the module's share of it, because no per-module
+    share is derivable at plan time. It is therefore a bound every parse job of one controller carries in common, not
+    a figure taken from the data any one of them reads.
+"""
+
+_DOUBLE_PRECISION_BYTES: int = 8
+"""The width of one double-precision element, the type a pose prediction table holds on disk and the type every array
+the pose-tracking stage reads out of it carries."""
+
+_POSE_TABLE_COPIES: float = 6.0
+"""The copies of a pose prediction table the pose-tracking job holds at its peak, each at the width the table itself
+carries.
+
+Notes:
+    DeepLabCut writes the table in double precision already, so nothing is promoted on the way in and this figure
+    counts copies alone. The reader sorts the table by its index, which holds the sorted copy beside the table it
+    sorted, materializes the whole table again as a dense matrix beside that sorted copy, and stacks one array per
+    bodypart out of that matrix, which comes to a third table between them. The per-metric arrays the pupil stage
+    derives from those points are charged in the margin this figure carries above the three copies it counts.
+"""
 
 _DECODER_BUFFER_MEMORY_MB: int = 96
 """The resident memory one decode worker holds for its codec reference frames and its decoder state, beyond the frame
@@ -90,13 +118,45 @@ _RETAINED_FRAME_BUFFERS: int = 2
 """The number of full-resolution single-precision frame buffers a decode worker keeps live. Binning produces a
 strided view that retains its full-frame base, and the current and previous binned frames are live at once."""
 
-_CHECKSUM_READER_MEMORY_MB: int = 190
-"""The resident memory one checksum worker holds, covering its fixed read chunk and the interpreter and import graph
-loaded at its start. The figure holds steady across sessions of any size, because a worker streams its file in fixed
-chunks and never holds more than one at a time."""
+_UNRESOLVED_FRAME_PIXELS: int = 0
+"""The pixels charged to a motion-energy job whose camera left no recording this pass could read. The stage skips a
+camera whose recording is absent and completes, so such a job still holds its decoders and is charged them rather than
+being refused."""
+
+_UNRESOLVED_FRAME_COUNT: int = -1
+"""The frame count charged to a motion-energy job whose camera left no recording this pass could read. A container no
+pass opened reports no length, and the length is what decides how many decoders the stage opens, so such a job is
+charged the full width its type declared rather than the single decoder a short recording earns. No container reports
+a negative length, which is what makes this value unambiguous as the answer for a recording that was never read."""
+
+_CHECKSUM_CHUNK_MEMORY_MB: int = 8
+"""The read buffer one checksum worker allocates, which is the fixed chunk the data-structures library streams every
+file through. The buffer is allocated once per worker and reused for every chunk of every file that worker hashes, so
+it is the whole data-dependent term a worker carries."""
+
+_CHECKSUM_READER_MEMORY_MB: int = SPAWNED_CHILD_MEMORY_MB + _CHECKSUM_CHUNK_MEMORY_MB
+"""The resident memory one checksum worker holds. The pool that opens the workers is spawn-started, so each of them
+pays the interpreter and import graph a spawned child carries, and each holds its own read buffer above that. Stating
+the figure as the shared spawned-child cost plus the buffer is what makes a retune of that shared cross-library figure
+reach this model as well, rather than leaving a checksum worker modeled as cheaper than the spawned child it is."""
 
 _TRACE_ARRAY_DIMENSIONS: int = 2
 """The axes a cindra trace array carries, which are its regions and its samples."""
+
+_UNREADABLE_OUTPUT_ERRORS: tuple[type[Exception], ...] = (OSError, EOFError, LookupError, ValueError, BadZipFile)
+"""The failures a recording's combined metadata archive raises when it stands on disk but cannot be read.
+
+Notes:
+    The archive is a compressed entry store, so a truncated, emptied, or overwritten one fails in the shape of
+    whichever layer first reaches the damage: the file layer, the archive layer, or the entry lookup that expects the
+    field the geometry is read from. The four are unrelated types and none of them shares a base narrower than
+    Exception, so the set is named here rather than approximated by one branch of it.
+
+    Every one of them means the same thing to the sizing pass, which is that the recording carries no readable
+    processed output. They are caught rather than propagated because the pass that reads them classifies OSError as
+    an unreadable session marker, and a damaged archive would otherwise be reported under a remedy that would not
+    repair it.
+"""
 
 _ASSEMBLY_SINGLE_DAY_COLUMNS: int = 4
 """The fluorescence columns an experiment assembly retains at the recording's own detected region count. Every column
@@ -112,21 +172,68 @@ _ASSEMBLY_WRITE_COPIES: int = 1
 """The copies of the assembled fluorescence volume charged at the write. The write streams the frame it was handed
 rather than rebuilding it, so the stage peaks at the columns the assembly already holds."""
 
-_SUB_DATASET_BYTES_PER_SAMPLE: int = 512
-"""The memory the behavior, runtime, and video sub-datasets hold per sample of the clock on which they are placed.
-Each emits one array per column and the interpolation that aligns them holds double-precision transients."""
+_ASSEMBLY_LOAD_TRANSIENT_COLUMNS: int = 1
+"""The extra fluorescence columns, at the recording's own detected region count, that an assembly holds while it loads
+one single-day column.
 
-_MINIMUM_CLOCK_SAMPLES: int = 2
-"""The fewest samples a camera timestamp feather must hold for the assembly of a session that records no imaging to
-settle on it. That assembly places its columns on a camera clock, and a clock is defined by a mean frame rate, which
-needs at least two timestamps to state one."""
+Notes:
+    A single-day column is loaded by selecting the recording's cell rows out of the memory-mapped trace array and then
+    making that selection contiguous in single precision. Both arrays are live at once, because the transposed copy is
+    built from the masked selection and the selection is only released afterwards, so loading the k-th single-day
+    column peaks at the k-1 columns already attached plus two more. The last of the four single-day columns therefore
+    peaks at five, one above the four the retained-column term charges, and that one column is what this figure adds.
+
+    The term is charged at the single-day region count alone. A multi-day column is loaded with no mask, so its
+    contiguous copy is made straight off the memory map and only one copy of it is ever live, and by the time those
+    columns load the single-day peak has already passed.
+
+    It is added to the retained columns rather than compared against them, because the two peaks fall at different
+    moments and the sum bounds both: the load peak carries no assembled sub-dataset yet, while the terminal peak
+    carries every column and every sub-dataset but none of this transient. Adding therefore over-reserves the terminal
+    peak by one single-day column, which is the safe direction, while a model taking neither peak's part under-reserves
+    the load whenever a session's single-day column stands above its four multi-day columns and its sub-datasets
+    together. Tracking prunes hard, so that is the ordinary case rather than the extreme one: a recording detecting two
+    thousand regions of which five hundred are tracked holds one single-day column of eight hundred megabytes against
+    four multi-day columns of a hundred and sixty and a sub-dataset term of fifty, which the fifteen percent tolerance
+    and the gigabyte rounding cannot absorb.
+"""
+
+_SUB_DATASET_BYTES_PER_SAMPLE: int = 512
+"""The memory the assembled behavior, runtime, and video columns hold per sample of the reference clock on which they
+are placed. Each sub-dataset emits one array per column at that height, the interpolation that lifts a column onto the
+clock holds double-precision transients there, and the clip that closes the assembly copies the stacked frame once.
+The figure charges the assembly's output alone: the source arrays those columns are interpolated from sit at their own
+clocks and are charged separately."""
+
+_SOURCE_INPUT_BYTES_PER_SAMPLE: int = 128
+"""The memory an assembly holds per sample of one input source, at that source's own clock rather than at the clock
+the assembled frame is placed on. The widest source is the camera carrying the eye, which is read through three
+feathers of one height at once: its timestamp column at eight bytes a frame, its two single-precision motion-energy
+columns at eight, and its nineteen pupil columns at seventy. The interpolation that lifts one of those columns onto
+the reference clock holds a double-precision copy of that column and of the timestamps beside it, which adds sixteen.
+That comes to a hundred and two bytes a frame, which this figure rounds up, and every other source an assembly reads
+is narrower."""
 
 _PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
 
+# This multiple belongs to the model this library keeps for its own assembly job, which is charged the multi-day
+# columns the assembled frame holds. cindra keeps a separate model for its own multi-day tracking jobs, and answers
+# the same question there for a different job. The two figures agreeing is the same domain reasoning reached twice
+# rather than either copying the other, so retuning one carries no obligation to retune the other.
+_TRACKED_REGION_HEADROOM: float = 1.5
+"""The multiple of the most populated recording's region count that ceilings the templates multi-day tracking keeps.
+
+Notes:
+    The domain reading of the multiple, in the words of the model cindra states it in: "we have at most every cell in
+    the most populated recording + maybe half of it coming from other recordings. That should be getting us very close
+    to the actual maximum."
+"""
+
 _MODULE_SPECIFIER_SEPARATOR: str = "-"
 """The separator joining the controller, type, and identifier segments of a module parse job's specifier. The leading
-segment names the controller that recorded the module. The job's estimate reads that controller's archive."""
+segment names the controller that recorded the module. The job's estimate reads that controller's archive, which
+every parse job of that controller reads in common."""
 
 _ARCHIVE_JOB_NAMES: frozenset[str] = frozenset(
     {CAMERA_EXTRACTION_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME, RUNTIME_JOB_NAME}
@@ -159,10 +266,11 @@ def resolve_model_version() -> str:
     """Resolves the identifier of the sizing model this module implements.
 
     Notes:
-        The identifier digests the name and the value of every private constant this module defines, so retuning any
-        one of them answers with a new identifier and every plan stamped with the old one is estimated again. A
-        constant holding a collection is ordered before it is digested, which keeps one tuning answering with one
-        identifier across processes.
+        The identifier digests the name and the value of every private constant this module holds, so retuning any one
+        of them answers with a new identifier and every plan stamped with the old one is estimated again. A stage
+        constant this module binds from the pipeline it models is held under a private name for that reason, so
+        retuning the stage reaches the plans its model stamped. A constant holding a collection is ordered before it
+        is digested, which keeps one tuning answering with one identifier across processes.
 
     Returns:
         The hexadecimal identifier of the sizing model.
@@ -194,6 +302,11 @@ def size_session_jobs(
         Reads on-disk metadata alone, so sizing a session never decodes a frame. The two extraction stages read their
         archive's central directory, which decodes no message and loads no payload. Every estimate scales with the
         input it describes, which keeps it correct on recordings longer, wider, or denser than any previously seen.
+
+        One job is the exception, and it is charged a bound rather than an estimate. A module parse job reads a table
+        the extraction job it is scheduled behind has yet to write, and the archive that table comes from attributes
+        no message to a module, so every parse job of one controller is charged that whole archive. The figure is a
+        bound those jobs share, and the model that charges it names what it would take to make it per-job.
 
         Every term is read from the session's raw acquisition data, so a footprint is available before any stage has
         run. Estimates cover anonymous memory, the term that forces a host to swap and a scheduler to kill a job, so
@@ -229,7 +342,9 @@ def size_session_jobs(
             located.
         ValueError: If a two-photon job's specifier names an imaging plane the recording does not hold, or if the
             recording's acquisition metadata cannot be parsed. Also raised when the session's raw behavior data holds
-            more than one archive for a source, or when a job name routes to no sizing model.
+            more than one archive for a source or more than one camera manifest, when a camera manifest registers no
+            camera, when the session's pose prediction states no table width, or when a job name routes to no sizing
+            model.
     """
     # Every job of the two-photon pipeline runs a cindra stage, so the whole pipeline is sized by cindra's own pass
     # and the recording's configuration and raw imaging location are resolved once for the session that carries them.
@@ -250,11 +365,14 @@ def size_session_jobs(
         }
 
     behavior_directory = session.raw_data.behavior_data_path
-    camera_directory = session.raw_data.camera_data_path
-    widest_frame_pixels = (
-        _resolve_widest_camera_frame_pixels(camera_directory=camera_directory)
-        if pipeline is ProcessingPipelines.VIDEO
-        else 0
+
+    # A motion-energy job reads the recording of the one camera its specifier names, so every such job's container
+    # is read before any job is sized. A session planning no motion-energy job resolves nothing and opens nothing.
+    energy_recordings = _resolve_energy_recordings(
+        behavior_directory=behavior_directory,
+        camera_directory=session.raw_data.camera_data_path,
+        session_name=session.session_name,
+        jobs=jobs,
     )
 
     # Locating a source's archive belongs to the library that writes it, and one pass answers every archive-reading
@@ -273,10 +391,12 @@ def size_session_jobs(
         elif job_name == RUNTIME_JOB_NAME:
             footprint = _size_runtime_job(archive_path=archives[specifier], cores=cores)
         elif job_name == ENERGY_JOB_NAME:
-            footprint = _size_motion_energy_job(frame_pixels=widest_frame_pixels, cores=cores)
+            footprint = _size_motion_energy_job(recording=energy_recordings[specifier], cores=cores)
         elif job_name == TRACKING_JOB_NAME:
             footprint = _size_pose_tracking_job(session=session, cores=cores)
         elif job_name == PARSE_JOB_NAME:
+            # Every parse job of one controller resolves to that controller's archive, because nothing at plan time
+            # states which share of it each module holds. The figure they receive is therefore one they share.
             footprint = _size_module_parse_job(
                 archive_path=archives[specifier.split(_MODULE_SPECIFIER_SEPARATOR)[0]], cores=cores
             )
@@ -293,7 +413,9 @@ def size_session_jobs(
     return footprints
 
 
-def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+def size_dataset_jobs(
+    dataset: DatasetData, jobs: list[tuple[str, str, int]], *, planned_roi_count: int | None = None
+) -> dict[tuple[str, str], JobFootprint]:
     """Sizes every possible forging job from the processed data it will read, reporting its cores and its memory.
 
     Notes:
@@ -305,17 +427,37 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
         per job. The two cross-recording stages belong to cindra, so both halves of their figures are cindra's own
         sizing pass, which refuses a dataset that any recording leaves short rather than sizing it from the recordings
         that happen to be complete. That refusal propagates, because a stage that cindra will not size is a stage the
-        dataset cannot run until its recordings are complete.
+        dataset cannot run until its recordings are complete. The recording set handed to that pass is the set the
+        dataset names, and an animal whose sessions this host does not all hold is refused here on the same terms
+        rather than measured over the subset the host happens to carry.
 
         The per-session assembly stage is this package's own, so no dependency models it and its projection stays
         here. Its width holds one value whatever data it reads, so it reports the allocation its type declared. Which
         of its two models applies follows from the acquisition system's admission policy: a session type that joins a
         dataset without completing the two-photon pipeline is assembled from its behavior sources onto a camera clock,
-        so it is sized from that clock rather than from fluorescence it never recorded.
+        so it is sized from that clock and from the heights those sources stand at rather than from fluorescence it
+        never recorded. Both models charge that source family, since an assembly reads the same per-source feathers
+        at the same per-source clocks whichever clock it goes on to place its frame on; the two differ in the frame
+        alone.
+
+        The one figure the assembly model cannot read from data this pass consumes is the count of regions the
+        multi-day tracking goes on to keep, because that tracking is planned in the same universe as the jobs sized
+        here and has therefore not run. It is bounded from the animal's recording set instead, and a caller that
+        reasonably knows the count its animals carry states it and is charged it, which is the same override cindra's
+        own sizing takes in place of the bound it would otherwise draw. The count is stated for the whole batch rather
+        than per job, since one dataset's tracking runs at one configuration.
+
+        A stated count reaches the two cross-recording stages as well as the assembly stage, because those are the
+        stages that produce the templates the assembly reads. It is the same count for all three: one dataset tracks
+        one set of templates, and a caller stating how many that set holds states it about the stage that builds it
+        before the stage that consumes it.
 
     Args:
         dataset: The resolved dataset on which the jobs operate.
         jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
+        planned_roi_count: The tracked templates to charge every job in the batch that spans them, which are the
+            multi-day columns of an assembly job and the whole working set of a cross-recording job. Use None to
+            accept the bound each animal's recording set carries, which is what the forging pipeline itself passes.
 
     Returns:
         A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job occupies and the memory it
@@ -323,9 +465,14 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
 
     Raises:
         FileNotFoundError: If a job's processed input cannot be read, in which case the job that reads it cannot run
-            either.
+            either. Also raised when a cross-recording job's animal holds fewer sessions under the project root than
+            the dataset names for it, since the set this host can measure is then narrower than the set the job runs
+            over and sizing it would under-reserve the job. An assembly job raises it on those same terms while no
+            region count is stated, since the bound it would otherwise draw spans that whole set.
         ValueError: If the dataset's acquisition system donates no multi-recording configuration, if a job name
-            routes to no sizing model, or if the dataset's session type joins no dataset for its acquisition system.
+            routes to no sizing model, if the dataset's session type joins no dataset for its acquisition system, or
+            if a stated region count is not a positive integer, which cindra's own sizing refuses for the
+            cross-recording stages the count is handed to.
     """
     project_root = dataset.dataset_data_path.parent.parent
     animals = {entry.session: entry.animal for entry in dataset.sessions}
@@ -342,6 +489,7 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
                     dataset=dataset, animal=specifier, project_root=project_root
                 ),
                 configuration=configuration,
+                planned_roi_count=planned_roi_count,
             )
         elif job_name == MULTIDAY_EXTRACTION_JOB_NAME:
             footprint = _size_multi_recording_job(
@@ -351,6 +499,7 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
                     dataset=dataset, animal=animals.get(specifier, ""), project_root=project_root
                 ),
                 configuration=configuration,
+                planned_roi_count=planned_roi_count,
             )
         elif job_name == FORGING_JOB_NAME:
             footprint = _size_forging_job(
@@ -360,6 +509,7 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
                 project_root=project_root,
                 configuration=configuration,
                 cores=cores,
+                planned_roi_count=planned_roi_count,
             )
         else:
             message = (
@@ -380,6 +530,16 @@ class _RecordingGeometry:
     """The regions the single-recording pipeline detected."""
     samples: int
     """The samples each region's trace holds."""
+
+
+@dataclass(frozen=True, slots=True)
+class _EnergyRecording:
+    """Describes the recording one motion-energy job decodes, as that recording's own container metadata reports it."""
+
+    frame_pixels: int
+    """The pixels one frame of the recording holds."""
+    frame_count: int
+    """The frames the recording's container reports, or ``_UNRESOLVED_FRAME_COUNT`` when no container was read."""
 
 
 def _resolve_job_archives(behavior_directory: Path, jobs: list[tuple[str, str, int]]) -> dict[str, Path]:
@@ -555,9 +715,16 @@ def _size_checksum_job(cores: int) -> JobFootprint:
 
     Notes:
         Each worker streams its file in fixed chunks and holds one at a time, so the figure is flat across every
-        session size. The parent retains one pending result per file, which stays below the rounding this estimate
-        already carries. The stage is this package's own and gains nothing from a width the data picks, so it runs at
-        the allocation its type declared.
+        session size. The stage is this package's own and gains nothing from a width the data picks, so it runs at the
+        allocation its type declared.
+
+        The flatness rests on one precondition. The parent retains a pending result per *file* under the session's raw
+        data, and for an assembled session that is hundreds to a few thousand entries, which stays below the rounding
+        this estimate already carries. That holds only because the acquisition runtime consolidates each logger's
+        per-message arrays into one archive per source before the session reaches this pipeline, which no stage this
+        package owns performs. A session whose behavior logs were left unconsolidated carries one file per logged
+        message instead, at which point the parent's per-file retention dominates everything this model charges and
+        the figure is no longer flat.
 
     Args:
         cores: The cores the job is allocated, which is how many files it hashes at once.
@@ -587,59 +754,159 @@ def _size_rename_job(cores: int) -> JobFootprint:
     return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB))
 
 
-def _resolve_widest_camera_frame_pixels(camera_directory: Path) -> int:
-    """Reads the pixel count of the largest frame among a video session's camera recordings.
+def _resolve_energy_recordings(
+    behavior_directory: Path, camera_directory: Path, session_name: str, jobs: list[tuple[str, str, int]]
+) -> dict[str, _EnergyRecording]:
+    """Reads the container metadata of the one recording each motion-energy job of a session decodes.
 
     Notes:
-        Reads container metadata only, so no frame is decoded. The largest frame is a property of the session rather
-        than of any one job, so it is read once and shared by every motion-energy job the session dispatches.
+        A motion-energy job is specified by the source identifier of the single camera it measures, and that camera's
+        own recording is the only input it reads, so each job is charged the frame of that recording rather than the
+        widest frame the session holds. The two figures diverge by the ratio between the session's cameras, which for
+        a rig pairing a fast small-sensor camera with a slow large-sensor one is most of the reservation.
+
+        The colloquial name that locates a camera's recording on disk lives in the acquisition-time camera manifest,
+        so the source identifiers the jobs carry are mapped through the video library's own resolver rather than
+        through a camera vocabulary rebuilt here. One read of that manifest answers every motion-energy job of the
+        session, and the recording it names is then resolved through the same resolver the stage itself calls, so the
+        container this pass measures is the container the job opens.
+
+        Each recording is opened once, for the one job that decodes it, so the pass reads one container per job rather
+        than one per recording the session holds, and it reads none at all for a session that plans no motion-energy
+        job. Both figures the model needs come off that one open: the frame decides what a decoder holds, and the
+        length decides how many decoders the stage opens, so the length is read where the frame already is rather than
+        being charged at the job's full width for want of a second read.
+
+        A camera the manifest does not register, and a registered camera that left no recording, contribute no pixels.
+        Neither is refused: the stage skips a camera whose recording is absent and completes, so the job runs and
+        holds its decoders whatever that camera recorded.
 
     Args:
-        camera_directory: The raw camera directory holding the session's recordings.
+        behavior_directory: The session's raw behavior data directory, whose tree holds the camera manifest.
+        camera_directory: The session's raw camera data directory, which holds the recordings themselves.
+        session_name: The name of the session, which prefixes every recording filename.
+        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples, whose motion-energy members
+            carry the source identifier of the camera they measure.
 
     Returns:
-        The pixels the largest recorded frame holds, or zero when the session holds no readable recordings.
+        The frame and the length of each motion-energy job's recording, keyed by that job's specifier. Empty when the
+        jobs measure no camera.
+
+    Raises:
+        OSError: If any directory beneath the behavior data directory cannot be read while the camera manifest is
+            located.
+        ValueError: If the tree holds more than one camera manifest, or if the manifest registers no camera, in which
+            case the video pipeline refuses the session at discovery and plans none of these jobs either.
     """
-    if not camera_directory.is_dir():
-        return 0
+    specifiers = {specifier for job_name, specifier, _ in jobs if job_name == ENERGY_JOB_NAME}
+    if not specifiers:
+        return {}
 
-    widest = 0
-    for recording in natsorted(camera_directory.glob("*.mp4")):
-        capture = cv2.VideoCapture(str(recording))
-        try:
-            width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        finally:
-            capture.release()
-        widest = max(widest, max(0, width) * max(0, height))
-    return widest
+    # A session that recorded no behavior data at all registers no camera, which is the same answer the resolver gives
+    # for a tree holding no manifest. The directory is checked here because the resolver refuses an absent one, and a
+    # refusal would drop a job the stage itself would run and complete.
+    sources = resolve_jobs(log_directory=behavior_directory).sources if behavior_directory.is_dir() else ()
+    camera_names = {source.source_id: source.name for source in sources}
+
+    recordings: dict[str, _EnergyRecording] = {}
+    for specifier in specifiers:
+        camera_name = camera_names.get(specifier)
+        recording = (
+            resolve_camera_video(
+                camera_data_directory=camera_directory, session_name=session_name, camera_name=camera_name
+            )
+            if camera_name is not None
+            else None
+        )
+        recordings[specifier] = (
+            _EnergyRecording(frame_pixels=_UNRESOLVED_FRAME_PIXELS, frame_count=_UNRESOLVED_FRAME_COUNT)
+            if recording is None
+            else _read_recording_metadata(recording=recording)
+        )
+    return recordings
 
 
-def _size_motion_energy_job(frame_pixels: int, cores: int) -> JobFootprint:
-    """Sizes one video motion-energy job from the frame it decodes.
+def _read_recording_metadata(recording: Path) -> _EnergyRecording:
+    """Reads the frame and the length one camera recording's container reports.
+
+    Notes:
+        Reads container metadata only, so no frame is decoded. The length is read from the same property the stage
+        itself reads, off the same open, so the chunk plan this pass models is the chunk plan the job runs.
+
+        A container reporting either frame extent as non-positive describes no frame at all, which is charged as no
+        pixels rather than as a negative area. A length is passed through as the container reports it, including a
+        negative one, which the sizing model reads as the same unplannable recording an unread container describes.
+
+    Args:
+        recording: The path to the camera recording whose container is read.
+
+    Returns:
+        The frame and the length the recording's container reports.
+    """
+    capture = cv2.VideoCapture(str(recording))
+    try:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        capture.release()
+    return _EnergyRecording(frame_pixels=max(0, width) * max(0, height), frame_count=frame_count)
+
+
+def _size_motion_energy_job(recording: _EnergyRecording, cores: int) -> JobFootprint:
+    """Sizes one video motion-energy job from the frame it decodes and the chunks its length earns.
 
     Notes:
         Each decode worker holds the binned frame and its predecessor. Binning slices a strided view out of a
-        full-resolution buffer, and a view retains its base, so both cost the whole frame. The frame buffers are a
-        small share of a worker's memory next to the cost of the worker itself. Charging every job of a session its
-        widest frame therefore stays on the safe side at a cost well inside the tolerance.
+        full-resolution buffer, and a view retains its base, so both cost the whole frame. The frame charged is the
+        frame of the one recording this job decodes, so a session pairing cameras of different sensors reserves each
+        of their jobs the memory that job holds rather than reserving every one of them the widest camera's frame.
 
-        The stage is this package's own and opens one decoder per core it holds, so it runs at the allocation its
-        type declared and the per-core decoder and child cost is charged at that width.
+        The decoders charged are the decoders the stage opens rather than the cores the job was allocated. The stage
+        splits its recording into chunks no shorter than the shared minimum and opens one worker per chunk, so a
+        recording holding fewer frames than that minimum times the allocation opens fewer workers than the allocation
+        names, and one holding fewer than the minimum itself decodes in the job's own process and opens no pool at
+        all. A short clip therefore holds one decoder and no spawned child, which for a rig recording calibration and
+        training clips beside full sessions is most of what charging the allocation would have reserved. The
+        allocation still bounds the chunk count, so it is the width the estimate assumes the job runs at.
+
+        The recording's length reaches this model from the same container property the stage reads, so the chunk plan
+        modeled here is the chunk plan the job runs rather than a rule restated beside it. A recording this pass could
+        not read states no length, and is charged the full width instead, since the stage that skips such a camera
+        would otherwise be reserved less than the job whose camera did record.
+
+        The parent collects one energy and one luminance array per chunk, which together span the recording once at
+        single precision and stay below the rounding this estimate already carries.
 
     Args:
-        frame_pixels: The pixels held by the frame this job decodes.
+        recording: The frame and the length of the recording this job decodes, which the pre-pass read from the
+            container of the camera the job's specifier names.
         cores: The cores the job is allocated, which bounds how many chunks it decodes at once.
 
     Returns:
-        The job's footprint, holding the declared width and the memory its decoders hold at it.
+        The job's footprint, holding the declared width and the memory the decoders it opens hold at it.
     """
-    per_worker = (
-        _bytes_to_megabytes(byte_count=frame_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS)
-        + _DECODER_BUFFER_MEMORY_MB
-        + SPAWNED_CHILD_MEMORY_MB
+    frame_buffers = _bytes_to_megabytes(
+        byte_count=recording.frame_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS
     )
-    return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * per_worker))
+
+    # Mirrors the stage's own chunk plan, which it builds from this same allocation and this same threshold. A
+    # recording whose container this pass could not read reports a non-positive length, and is charged the full width
+    # rather than the single chunk that a length of nothing would otherwise imply. The test is non-positive rather
+    # than negative because a capture carrying no backend reports zero as readily as it reports a negative, and zero
+    # would otherwise route the job to the cheapest branch of the two.
+    chunks = cores if recording.frame_count <= 0 else max(1, min(cores, recording.frame_count // _MINIMUM_CHUNK_FRAMES))
+
+    # A single chunk decodes in the job's own process, which opens no pool, so the job holds one decoder and starts
+    # no child at all.
+    if chunks == 1:
+        return JobFootprint(
+            cores=cores,
+            memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB),
+        )
+
+    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB
+    return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + chunks * per_worker))
 
 
 def _size_two_photon_job(
@@ -655,6 +922,23 @@ def _size_two_photon_job(
         cindra reads the recording once and answers both halves of its model from that read, so the width at which a
         stage runs is the measured knee of its own scaling curve rather than a figure this package repeats. Taking
         both figures whole is what keeps a retune of either half reaching slf without a change here.
+
+        The binarization, registration and processing stages are sized from the recording's own geometry, and the two
+        per-plane stages additionally from the plane their specifier names, so each of them receives a figure taken
+        from what it reads. The combination stage is not: its whole data-dependent term is the region count, and no
+        recording states that count until its detection stage has run. What cindra charges the combination stage is
+        therefore the ceiling the recording's own configuration allows, which is the multiplier the detection loop
+        applies to its configured iteration limit, taken across the recording's planes. Every recording of one
+        acquisition system carrying the same plane count therefore receives the identical figure whatever it went on
+        to detect, so this is a configuration bound the stage shares rather than an estimate taken from the recording,
+        and it stands above what a recording detects by whatever margin its configured limit stands above its data.
+
+        The bound stands because the region count is not a raw input. It is written by a stage scheduled ahead of this
+        one, so at plan time no reading of the recording answers it, and a plan has to size every stage before any of
+        them runs. Passing cindra a measured count off a recording whose combination output already exists is what
+        would turn this into a per-recording estimate, and it would additionally have to gate on the detection
+        settings being unchanged, since a re-detection under widened settings can exceed the count the previous pass
+        recorded.
 
         cindra rejects a stage it cannot size, either because the recording carries no readable raw imaging data or
         because a per-plane specifier names a plane the recording does not hold. Both refusals propagate, since a
@@ -692,6 +976,8 @@ def _size_multi_recording_job(
     specifier: str,
     recording_directories: tuple[Path, ...],
     configuration: MultiRecordingConfiguration | None,
+    *,
+    planned_roi_count: int | None = None,
 ) -> JobFootprint:
     """Sizes one cross-recording job through cindra's own per-stage sizing pass.
 
@@ -703,6 +989,12 @@ def _size_multi_recording_job(
         be complete, and that refusal propagates. A dataset whose recordings carry no combined output cannot run
         either stage yet, so it is dropped from the workflow rather than planned at a floor.
 
+        A stated template count is handed on to cindra rather than spent on this package's own assembly model alone.
+        The count a caller states is a property of the tracking the dataset will run, and these two stages are the
+        stages that run it, so the caller who knows it knows it first about them. Withholding it here would leave the
+        jobs that produce the templates bounded from the recordings while the job that merely reads them is charged
+        the stated figure, which is the one arrangement of the two that cannot be right.
+
     Args:
         job_name: The cindra stage the job runs.
         specifier: The job's tracker specifier, which names a session for the extraction stage and an animal for the
@@ -710,6 +1002,8 @@ def _size_multi_recording_job(
         recording_directories: The cindra output directory of every recording the job spans.
         configuration: The dataset's resolved multi-recording configuration, or None when its acquisition system
             donates none.
+        planned_roi_count: The tracked templates to plan the stage for, counting the dataset as a whole. Use None to
+            accept the bound cindra draws from the per-recording region counts.
 
     Returns:
         The job's footprint, holding cindra's own width for the stage and its memory at that width.
@@ -719,7 +1013,7 @@ def _size_multi_recording_job(
             archive, or if any recording reports no regions in its combined trace array, in which case neither
             cross-recording stage can run.
         ValueError: If the dataset's acquisition system donates no multi-recording configuration, which leaves the
-            stage without the parameters its sizing needs.
+            stage without the parameters its sizing needs, or if a stated template count is not a positive integer.
     """
     if configuration is None:
         message = (
@@ -734,6 +1028,7 @@ def _size_multi_recording_job(
         specifier=specifier,
         recording_directories=recording_directories,
         configuration=configuration,
+        planned_roi_count=planned_roi_count,
     )
     return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
@@ -747,16 +1042,24 @@ def _size_pose_tracking_job(session: SessionData, cores: int) -> JobFootprint:
         locator. That locator answers with the file that the tracking worker opens. The stage is this package's own and
         its own fan-out is fixed, so it runs at the allocation its type declared.
 
+        The table is charged at the width it holds rather than at the size its file occupies on disk. The two agree
+        only for a prediction the writer left uncompressed, while a compressed one occupies a fraction of its table and
+        is still expanded to full width the moment the stage reads it, so charging the file would understate exactly
+        the prediction most able to exhaust the node. The row and column counts come from the table's own metadata, so
+        no prediction is loaded to read them and the figure holds whatever the writer compressed.
+
     Args:
         session: The loaded session whose pose predictions the job reads.
         cores: The cores the job is allocated, which its type declares.
 
     Returns:
-        The job's footprint, holding the declared width and the memory the prediction file implies.
+        The job's footprint, holding the declared width and the memory the prediction table implies.
 
     Raises:
         FileNotFoundError: If the session carries no pose prediction, in which case the job reading one cannot run
             either.
+        ValueError: If the prediction holds other than one table, or holds one whose row and column counts its own
+            metadata does not report, in which case nothing states how wide the job's working set stands.
     """
     prediction = resolve_pose_prediction_locator(system=session.acquisition_system)(session=session)
     if prediction is None:
@@ -765,35 +1068,107 @@ def _size_pose_tracking_job(session: SessionData, cores: int) -> JobFootprint:
             f"prediction, so nothing states how much the job holds and the job could not run either."
         )
         console.error(message=message, error=FileNotFoundError)
+    rows, columns = _read_pose_table_shape(prediction=prediction)
     return JobFootprint(
         cores=cores,
         memory_mb=_apply_tolerance(
             memory_mb=WORKER_MEMORY_MB
-            + _bytes_to_megabytes(byte_count=prediction.stat().st_size * _POSE_PREDICTION_RATIO)
+            + _bytes_to_megabytes(byte_count=rows * columns * _DOUBLE_PRECISION_BYTES * _POSE_TABLE_COPIES)
         ),
     )
 
 
-def _size_module_parse_job(archive_path: Path, cores: int) -> JobFootprint:
-    """Sizes one module parse job from the log archive its own controller recorded.
+def _read_pose_table_shape(prediction: Path) -> tuple[int, int]:
+    """Reads the row and column counts a pose prediction table reports in its own metadata.
 
     Notes:
-        One module holds a share of its controller's archive, and the whole archive bounds that share from above, so
-        the archive of the controller that recorded the module is what the job is charged. The stage is a single pass
-        over one module's extracted table, so it runs at the allocation its type declared.
+        Reads the table's description alone, so no prediction is loaded and the read costs the same on a prediction of
+        any length. The counts are what the stage's working set scales with, and unlike the size the file occupies on
+        disk they do not move with whatever compression the writer applied.
+
+        The stage reads the prediction through a call that names no key, which requires the file to hold exactly one
+        frame, so a file holding another number of them is refused here on the terms the stage would refuse it.
+
+        A frame written in the fixed layout rather than the table layout DeepLabCut writes reports neither count, and
+        is refused rather than charged a figure taken from the file's size, which is the read this model exists to
+        replace.
 
     Args:
-        archive_path: The path to the log archive the job's controller recorded.
+        prediction: The path to the pose prediction file whose table is measured.
+
+    Returns:
+        The rows and the columns the table holds.
+
+    Raises:
+        ValueError: If the file holds other than one frame, or holds one whose row and column counts its metadata does
+            not report.
+    """
+    with pd.HDFStore(path=str(prediction), mode="r") as store:
+        keys = store.keys()
+        if len(keys) != 1:
+            message = (
+                f"Unable to size the pose-tracking job reading '{prediction.name}'. The prediction file must hold "
+                f"exactly one table for the stage to read it without naming a key, but it holds {len(keys)}."
+            )
+            console.error(message=message, error=ValueError)
+        # The published pandas stubs declare no 'get_storer', so the call resolves through the store's catch-all
+        # attribute hook and is read as an attribute rather than as a method. The runtime call is the documented one.
+        storer = store.get_storer(key=keys[0])  # type: ignore[operator]
+        rows = getattr(storer, "nrows", None)
+        columns = getattr(storer, "ncols", None)
+
+    # The counts come back as whatever integral type the table's own reader carries, which for the row count is a
+    # numpy width rather than a builtin one, so they are admitted by the numeric tower and narrowed here.
+    if not isinstance(rows, Integral) or not isinstance(columns, Integral):
+        message = (
+            f"Unable to size the pose-tracking job reading '{prediction.name}'. The prediction table reports no row "
+            f"and column count in its own metadata, which is what a frame written in the fixed layout rather than "
+            f"the table layout DeepLabCut writes reports. The job's working set stands at the width of that table, "
+            f"so a prediction that does not state it cannot be sized without charging the file's compressed size in "
+            f"its place, which would under-reserve the job."
+        )
+        console.error(message=message, error=ValueError)
+    return int(rows), int(columns)
+
+
+def _size_module_parse_job(archive_path: Path, cores: int) -> JobFootprint:
+    """Charges one module parse job the upper bound its controller's whole log archive states.
+
+    Notes:
+        This figure is a bound shared by every parse job of one controller, not an estimate of what this job holds.
+        A controller carrying several parsed modules produces one parse job per module, and each of them is charged
+        the same whole archive, so their reservations sum to that archive once per module while the tables they read
+        sum to at most one archive between them. A controller pairing a continuously polled module with a sparse
+        event-driven one therefore reserves the sparse module's job the memory the polled module's job holds. The
+        bound is a per-job figure only where the controller carries a single parsed module.
+
+        The bound stands because no per-module figure exists at plan time. A parse job reads the raw per-module
+        feather its controller's extraction job writes, and it is scheduled behind that job, so its own input is
+        absent while the plan is made. The archive that input is extracted from is present but states nothing about
+        the module: the archive's index names each message by the recording source and the acquisition timestamp
+        alone, and a message names its module only inside its own body, so attributing messages to modules costs one
+        payload read per message, which is the pass the extraction job itself makes. The event codes the acquisition
+        system registers do not separate the modules either, since the modules of one controller reuse them.
+
+        A per-module message count carried by the archive index is what would turn this into a per-job estimate. The
+        library that assembles the archive is the one that could carry each message's module into its entry name or
+        into an index beside it, at which point this model would charge each job the share its own module holds.
+
+        The stage is a single pass over one module's extracted table, so it runs at the allocation its type declared.
+
+    Args:
+        archive_path: The path to the log archive the job's controller recorded, which every parse job of that
+            controller is charged in full.
         cores: The cores the job is allocated, which its type declares.
 
     Returns:
-        The job's footprint, holding the declared width and the memory its controller's archive implies.
+        The job's footprint, holding the declared width and the memory its controller's whole archive implies.
     """
     return JobFootprint(
         cores=cores,
         memory_mb=_apply_tolerance(
             memory_mb=WORKER_MEMORY_MB
-            + _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _MODULE_TABLE_RATIO)
+            + _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _CONTROLLER_ARCHIVE_TABLE_RATIO)
         ),
     )
 
@@ -806,8 +1181,13 @@ def _two_photon_output_root(project_root: Path, animal: str, session: str) -> Pa
         This is the root under which cindra creates its own output directory, so every location beneath it is resolved
         through cindra's own resolvers rather than by rebuilding its layout here.
 
+        Read off the same cached marker a system's donated resolvers are handed, rather than loading a second copy of
+        it. One assembly estimate reaches both, since it reads the session's own imaging geometry through this root
+        and its assembly sources through that donation, and a marker read twice for one session is one YAML read per
+        session more than the pass needs.
+
         Cached, because one dataset's estimates resolve the same session from several stages and each resolution
-        otherwise re-reads that session's marker.
+        otherwise re-resolves that session's root.
 
     Args:
         project_root: The path to the project's root directory.
@@ -817,16 +1197,17 @@ def _two_photon_output_root(project_root: Path, animal: str, session: str) -> Pa
     Returns:
         The path to the session's processed-data root, which is the output root its cindra jobs were given.
     """
-    return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data_path
+    return _session_marker(project_root=project_root, animal=animal, session=session).processed_data_path
 
 
 @cache
-def _video_output_root(project_root: Path, animal: str, session: str) -> Path:
-    """Resolves the directory into which a session's video processing wrote its per-camera timestamp feathers.
+def _session_marker(project_root: Path, animal: str, session: str) -> SessionData:
+    """Loads the marker of one session a dataset holds.
 
     Notes:
-        The directory is read from the shared hierarchy's own accessor rather than rebuilt here, which is the same
-        contract every other location this pass reads follows.
+        The marker is what a system's donated sizer reads, and it is the same object that system's assembler is handed
+        when the job actually runs, so a donation reads the locations its assembler reads rather than locations this
+        pass resolved on its behalf.
 
         Cached on the same terms as the two-photon output root, because a session's marker is otherwise re-read for
         every stage that resolves a location beneath it.
@@ -834,12 +1215,12 @@ def _video_output_root(project_root: Path, animal: str, session: str) -> Path:
     Args:
         project_root: The path to the project's root directory.
         animal: The animal that owns the session.
-        session: The session name whose processed video directory is resolved.
+        session: The session name whose marker is loaded.
 
     Returns:
-        The path to the session's processed video-data directory.
+        The loaded session.
     """
-    return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data.video_data_path
+    return SessionData.load(session_path=project_root.joinpath(animal, session))
 
 
 def _animal_recording_directories(dataset: DatasetData, animal: str, project_root: Path) -> tuple[Path, ...]:
@@ -848,7 +1229,15 @@ def _animal_recording_directories(dataset: DatasetData, animal: str, project_roo
     Notes:
         This is the recording set named by the animal's materialized multi-recording configuration, resolved from the
         project root rather than read back from that file, so a dataset whose configurations have not been written
-        yet is still sizable. A session that has moved to long-term storage contributes no directory.
+        yet is still sizable. The dataset's own session list states which recordings that configuration names, because
+        the configuration is written from every session the dataset holds for the animal, and the job that reads it
+        back runs over every directory it names.
+
+        A planning host that holds fewer of those sessions than the dataset names is refused rather than sized from
+        the ones it holds. The discovery stage is quadratic in the pooled region count of the set it runs over, so an
+        animal planned from half its sessions is reserved a quarter of what the job goes on to hold, and a job that
+        is reserved less than it holds is killed by the scheduler and cancels every dependent scheduled behind it.
+        The refusal names the sessions the host is missing, which are the ones to stage before the animal is planned.
 
     Args:
         dataset: The resolved dataset that holds the animal.
@@ -856,27 +1245,53 @@ def _animal_recording_directories(dataset: DatasetData, animal: str, project_roo
         project_root: The path to the project's root directory.
 
     Returns:
-        The cindra output directory of every recording still present under the project root.
+        The cindra output directory of every recording the dataset names for the animal.
+
+    Raises:
+        FileNotFoundError: If the project root holds fewer of the animal's dataset sessions than the dataset names, in
+            which case the set this host can measure is narrower than the set the job runs over.
     """
-    directories: list[Path] = []
-    for entry in dataset.get_sessions_for_animal(animal=animal):
-        if not project_root.joinpath(animal, entry.session).is_dir():
-            continue
-        directories.append(
-            resolve_output_path(
-                output_root=_two_photon_output_root(project_root=project_root, animal=animal, session=entry.session)
-            )
+    entries = dataset.get_sessions_for_animal(animal=animal)
+    missing = sorted(entry.session for entry in entries if not project_root.joinpath(animal, entry.session).is_dir())
+    if missing:
+        message = (
+            f"Unable to size the cross-recording jobs of animal '{animal}' in dataset '{dataset.name}'. The dataset "
+            f"names {len(entries)} session(s) for the animal and both cross-recording stages run over every one of "
+            f"them, but {len(missing)} of them are absent under the project root '{project_root}': "
+            f"{', '.join(missing)}. The discovery stage is quadratic in the pooled region count of the recordings it "
+            f"spans, so sizing this animal from the sessions this host holds would reserve the job less memory than "
+            f"it goes on to hold. Stage the named session(s) under the project root, or rebuild the dataset without "
+            f"them, then plan the animal again."
         )
-    return tuple(directories)
+        console.error(message=message, error=FileNotFoundError)
+    return tuple(
+        resolve_output_path(
+            output_root=_two_photon_output_root(project_root=project_root, animal=animal, session=entry.session)
+        )
+        for entry in entries
+    )
 
 
 def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -> _RecordingGeometry | None:
-    """Reads a processed recording's shape from the arrays the single-recording pipeline wrote.
+    """Reads a processed recording's shape from the output the single-recording pipeline wrote.
 
     Notes:
-        cindra's own completion predicate gates the result alongside the trace array, because a recording that has
-        not reached the end of the combination stage carries no output the forging stages can read. Neither file's
-        contents are loaded, so the resolution reads one array header and one directory entry.
+        The region count is read through cindra's own tracked-geometry reader rather than resolved here, so the
+        regions this package bounds a tracked count from are the regions cindra's multi-recording stages go on to
+        read from that same recording. The reader carries the completion gate along with them, reporting an
+        unresolved geometry for a recording that has not reached the end of the combination stage and therefore
+        carries no output the forging stages can read.
+
+        The sample count is not taken from the same reader, because the frame count it reports is read from the
+        combined metadata archive while a sample is a column of the trace array. cindra writes that frame count only
+        from the release that introduced it and documents a missing one as reading back zero, so a recording
+        processed by an earlier release reports no frames while its traces stand at their full width. The assembly
+        model multiplies every retained column by the sample count, so accepting that zero would collapse the whole
+        fluorescence term for exactly the recordings that are oldest and least likely to be reprocessed. The traces
+        are therefore measured at their own header, which reports what the assembly will actually load.
+
+        No file's contents are loaded. The resolution reads the archive's own entries and the trace array's header,
+        so a recording of any length costs the same pair of small reads.
 
     Args:
         project_root: The path to the project's root directory.
@@ -884,19 +1299,34 @@ def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -
         session: The session name whose processed output is read.
 
     Returns:
-        The recording's geometry, or None when the session holds no processed imaging output.
+        The recording's geometry, or None when the session holds no readable processed imaging output.
     """
-    output_root = _two_photon_output_root(project_root=project_root, animal=animal, session=session)
-    if not is_recording_processed(output_root=output_root):
+    cindra_root = resolve_output_path(
+        output_root=_two_photon_output_root(project_root=project_root, animal=animal, session=session)
+    )
+    try:
+        geometry = read_tracked_recording_geometry(cindra_root=cindra_root)
+    except _UNREADABLE_OUTPUT_ERRORS:
+        # A recording whose archive stands but cannot be read is as unmeasured as one carrying no archive at all, so
+        # both answer None and are named in the same clause of the refusal.
         return None
+
+    # cindra reports an unresolved geometry both for a recording carrying no combined metadata archive and for one
+    # whose archive describes an empty combined field. Its own multi-recording sizing refuses that second recording
+    # on the same terms, so treating the two alike keeps the set this bound is drawn from equal to the set the
+    # tracking stages will accept.
+    if not geometry.resolved:
+        return None
+
+    # The reader resolves a geometry from the metadata archive alone and reports a zero region count for a recording
+    # whose trace array is absent or carries another rank, so the traces are gated here rather than left to answer a
+    # region count of zero. That gate is the sample count's own read, which the reader does not supply.
     traces = _read_array_shape(
-        array_path=resolve_array_path(
-            root_path=resolve_output_path(output_root=output_root), array=RecordingArrays.CELL_FLUORESCENCE
-        )
+        array_path=resolve_array_path(root_path=cindra_root, array=RecordingArrays.CELL_FLUORESCENCE)
     )
     if traces is None:
         return None
-    return _RecordingGeometry(regions=traces[0], samples=traces[1])
+    return _RecordingGeometry(regions=geometry.region_count, samples=traces[1])
 
 
 def _read_array_shape(array_path: Path) -> tuple[int, int] | None:
@@ -952,14 +1382,59 @@ def _resolve_tracked_regions(
     session: str,
     project_root: Path,
     configuration: MultiRecordingConfiguration | None,
+    *,
+    planned_roi_count: int | None = None,
 ) -> int:
-    """Resolves how many regions a session's multi-day arrays hold.
+    """Resolves how many regions the multi-day columns of a session's assembled frame span.
 
     Notes:
-        Reads the multi-day array directly once the session's multi-day extraction job has written it, and bounds the
-        count from the single-recording geometries until then. Tracking keeps a cluster whenever it appears in enough
-        of the animal's recordings, so the pooled region count divided by that minimum bounds the templates, narrowed
-        again to the widest single recording the animal holds.
+        The count is bounded from the single-recording geometries of the animal's recording set rather than read back
+        from the multi-day arrays the tracking writes. The forging pipeline plans its cross-recording stages and its
+        per-session assembly jobs in one universe, so the tracking has not run when either is sized and the arrays it
+        writes do not exist to be read. Every input this bound takes is a single-recording output, which the pipeline
+        consumes rather than produces. The bound is therefore the whole model here rather than a fallback standing in
+        for a read that happens to be unavailable.
+
+        This bound belongs to this library, which charges its assembly job the multi-day columns that job assembles.
+        cindra bounds the same templates for its own multi-day tracking jobs, and keeps that model private to itself.
+        Neither stands in for the other, and neither waits on the other to expose anything: two jobs are sized, and
+        the same domain reasoning answers both.
+
+        The bound is the smaller of two ceilings, because neither covers the other. The headroom ceiling allows every
+        region of the most populated recording and half as many again, which is the domain reading of a template. The
+        pooled ceiling divides the pooled region count by the recordings a cluster must span, which is combinatorial:
+        every template consumes at least that many regions and consumes them exclusively. The pooled term is the
+        tighter one over few recordings, where two recordings of a thousand regions at a minimum of two admit a
+        thousand templates against the fifteen hundred the headroom term allows. The headroom term is the tighter one
+        over many, where twenty recordings of fifteen thousand regions at half prevalence pool to thirty thousand
+        templates against a real ceiling near fifteen thousand, which is twice the memory such an animal holds. A
+        pooled-only bound was tried on those terms and rejected, so both are kept and the smaller is taken.
+
+        The bound is only honest over the animal's whole recording set. Every one of its terms falls when the
+        planning host holds a subset of that set: prevalence divides the pooled regions by a minimum drawn from the
+        recording count, and the pooled sum and the most populated recording are both taken over the recordings this
+        host can read, so a subset bound can land far below the count the job goes on to attach. The dataset's own
+        session list states which recordings the tracking spans, so a host that cannot measure any of them is refused
+        rather than bounded from the ones it can.
+
+        Completeness is judged on the geometries the bound is actually drawn from rather than on the session
+        directories those geometries live under, because the two disagree. A session whose directory stands while its
+        processed output has been removed passes a directory check and then contributes nothing to the pooled sum or
+        to the recording count the prevalence divides, so it is dropped from the bound while the gate meant to guard
+        that bound reports the set as whole.
+
+        An entry yielding no geometry is an anomaly rather than a normal planning state. The acquisition system's
+        admission policy holds a session out of a dataset until every pipeline it names has completed, and for a
+        session type reaching this bound at all that set includes the two-photon pipeline, whose completion is what
+        writes the output a geometry is read from. An entry therefore carried that output when it was admitted, and
+        its absence now means the output was removed afterwards, which the operator remedies rather than the sizing
+        pass estimating around.
+
+        The three ways an entry fails to resolve are reported apart, because they are remedied apart: an absent
+        session directory is staged back under the project root, a directory standing without readable output is
+        restored or reprocessed through the two-photon pipeline, and a directory whose own session marker cannot be
+        read is one whose transfer is incomplete or whose hierarchy holds more than one marker, which is repaired
+        before any pipeline reads it.
 
     Args:
         dataset: The resolved dataset that holds the session.
@@ -967,43 +1442,112 @@ def _resolve_tracked_regions(
         session: The session name whose tracked regions are resolved.
         project_root: The path to the project's root directory.
         configuration: The resolved multi-recording configuration, which reports the prevalence a cluster must reach.
+        planned_roi_count: The regions to plan the multi-day columns for. Use None to accept the bound the animal's
+            recording set carries. A stated count is the count the columns are charged, and the recording set is then
+            neither gathered nor gated, since the bound those steps exist to protect is not drawn.
 
     Returns:
-        The tracked region count, or the bound standing in for it.
+        The tracked region count the multi-day columns are charged.
+
+    Raises:
+        FileNotFoundError: If no count is stated and any session the dataset names for the animal yields no recording
+            geometry, whether because its directory is absent under the project root, because that directory carries
+            no readable processed imaging output, or because its own session marker cannot be read. The recording set
+            this host can measure is then narrower than the set the tracking runs over, and the bound drawn from it
+            would under-reserve the job.
     """
+    # A caller that knows the count states it and is charged it, which mirrors the override cindra's single-recording
+    # sizing takes in place of its own detection ceiling. The recording set is gathered for the bound alone, so a
+    # stated count skips the gathering and the completeness gate guarding it together with the bound they serve.
+    if planned_roi_count is not None:
+        return planned_roi_count
+
+    # Only the bound needs the recording set, and it needs all of it. The refusal mirrors the one the cross-recording
+    # sizer raises for the same reason: a job reserved less memory than it goes on to hold is killed by the scheduler
+    # and cancels every dependent scheduled behind it. An unresolved recording's own region count cannot be recovered
+    # without its geometry, so there is nothing to estimate it from and the session is refused instead.
     entries = dataset.get_sessions_for_animal(animal=animal)
-    geometries = [
-        geometry
-        # A session that has moved to long-term storage cannot be loaded at all, so it is skipped before its geometry
-        # is read rather than failing the whole animal's estimate. A dataset outlives the source data of the animals it
-        # has already forged, and the recording set from which this bound is drawn skips a relocated session on the
-        # same terms, so reading one here would make an estimate depend on data the dataset no longer needs.
-        for entry in entries
-        if project_root.joinpath(animal, entry.session).is_dir()
-        and (geometry := _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session))
-        is not None
-    ]
+    absent: list[str] = []
+    unreadable: list[str] = []
+    unmarked: list[str] = []
+    geometries: list[_RecordingGeometry] = []
+    for entry in entries:
+        # The geometry resolver loads the session's own marker to reach the output root, and that marker is gone along
+        # with the session directory, so directory presence is settled here rather than inside the resolver's read.
+        if not project_root.joinpath(animal, entry.session).is_dir():
+            absent.append(entry.session)
+            continue
+        try:
+            geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session)
+        except OSError:
+            # A standing directory can still fail the marker load behind the resolver, which refuses a hierarchy
+            # holding no session marker or more than one. That leaves the entry as unmeasured as an unreadable one,
+            # so it is classified here rather than propagating a message that names neither this bound nor the entry.
+            unmarked.append(entry.session)
+            continue
+        # The gate is placed on the geometry rather than on the directory that holds it, because the bound is summed
+        # and counted over the geometries alone. A session counted as present while resolving no geometry is therefore
+        # dropped from every term of the bound, which is exactly the under-estimate the gate exists to stop.
+        if geometry is None:
+            unreadable.append(entry.session)
+            continue
+        geometries.append(geometry)
+
+    # Reported apart because they are remedied apart, and each clause names its own sessions so the operator does not
+    # have to work out which of the three remedies each one needs.
+    clauses: list[str] = []
+    if absent:
+        clauses.append(
+            f"{len(absent)} of them are absent under the project root '{project_root}': {', '.join(sorted(absent))}"
+        )
+    if unreadable:
+        clauses.append(
+            f"{len(unreadable)} of them stand under the project root carrying no readable processed imaging output: "
+            f"{', '.join(sorted(unreadable))}"
+        )
+    if unmarked:
+        clauses.append(
+            f"{len(unmarked)} of them stand under the project root carrying no readable session marker: "
+            f"{', '.join(sorted(unmarked))}"
+        )
+
+    if clauses:
+        message = (
+            f"Unable to size the assembly job of session '{session}'. Its multi-day columns span the regions tracked "
+            f"across animal '{animal}', the dataset names {len(entries)} session(s) for that animal, and the tracking "
+            f"runs over every one of them, but {', and '.join(clauses)}. The tracking has not run when this job is "
+            f"planned, so the tracked count can only be bounded from the geometries of that recording set, and the "
+            f"bound falls when the set is narrowed, so bounding it from the geometries this host can read would "
+            f"reserve the job less memory than it goes on to hold. Stage any absent session(s) under the project "
+            f"root, restore or reprocess the two-photon output of any session that carries none, repair the "
+            f"hierarchy of any session whose marker cannot be read, or rebuild the dataset without them, then plan "
+            f"the session again."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    # Defensive: the forging job universe never reaches this floor. '_build_forging_universe' emits an assembly job
+    # only for a session the dataset lists, so a specifier always resolves a real animal and a non-empty entry list.
+    # The floor is kept for a caller reaching this pass directly with a specifier naming no session of the dataset,
+    # which resolves no animal and therefore no recording set. That is a narrower answer rather than an
+    # under-estimate of one: every named entry above resolved, so an empty list here is an empty entry list rather
+    # than a set this host could not measure.
     if not geometries:
         return 1
 
-    tracked = _read_array_shape(
-        array_path=resolve_array_path(
-            root_path=resolve_dataset_path(
-                output_root=_two_photon_output_root(project_root=project_root, animal=animal, session=session),
-                dataset_name=multi_recording_dataset_name(animal_id=animal, dataset_name=dataset.name),
-            ),
-            array=RecordingArrays.CELL_FLUORESCENCE,
-        )
-    )
-    if tracked is not None:
-        return tracked[0]
-
+    # The floor is load-bearing rather than defensive. A system donating no multi-recording configuration states no
+    # prevalence at all, which reads as zero here and carries the ceiling to zero with it, so an unfloored divisor
+    # divides by nothing. One recording is also the honest answer in that state: nothing states how many recordings a
+    # cluster has to span, so the pooled term relaxes to the whole pooled sum, which the headroom term then caps for
+    # any set pooling past the headroom its widest recording allows.
     prevalence = configuration.roi_tracking.mask_prevalence if configuration is not None else 0.0
     minimum_recordings = max(1, math.ceil(prevalence / _PERCENT_PER_FRACTION * len(geometries)))
-    pooled = sum(geometry.regions for geometry in geometries) // minimum_recordings
-    # A template is one cluster of regions drawn from several recordings, so the count settles at the scale of a
-    # single recording's own regions rather than the pooled total the prevalence term alone allows.
-    return max(1, min(pooled, max(geometry.regions for geometry in geometries)))
+    # Combinatorial: every template consumes at least the recordings a cluster must span, and consumes their regions
+    # exclusively, so the pooled region count divided by that minimum ceilings the templates the tracking can keep.
+    pooled_ceiling = sum(geometry.regions for geometry in geometries) // minimum_recordings
+    # The domain reading of the same count: every cell the most populated recording detected, plus the headroom the
+    # other recordings contribute through cells that recording does not hold.
+    headroom_ceiling = math.ceil(max(geometry.regions for geometry in geometries) * _TRACKED_REGION_HEADROOM)
+    return max(1, min(pooled_ceiling, headroom_ceiling))
 
 
 def _size_forging_job(
@@ -1013,6 +1557,8 @@ def _size_forging_job(
     project_root: Path,
     configuration: MultiRecordingConfiguration | None,
     cores: int,
+    *,
+    planned_roi_count: int | None = None,
 ) -> JobFootprint:
     """Sizes one per-session assembly job from the processed output it reads.
 
@@ -1021,8 +1567,22 @@ def _size_forging_job(
         frame it was handed rather than rebuilding it, so the shape of the session's own fluorescence is what the job
         is charged. The columns fall into two groups, each spanning its own region count. A single-day column spans
         every region the recording detected, while a multi-day column spans only the regions tracked across the animal.
-        The stage is this package's own, and its fan-out is a fixed handful of threads, so it runs at the allocation its
-        type declared.
+        Loading a single-day column holds one column above those it has already attached, which is charged on top of
+        them. The stage is this package's own, and its fan-out is a fixed handful of threads, so it runs at the
+        allocation its type declared.
+
+        The fluorescence is not the whole of what the job holds. An imaging assembly builds its behavior, runtime and
+        video sub-datasets from the same per-source feathers a behavior-only assembly reads, and reads each of them at
+        the clock that source was sampled on before interpolating it onto the reference clock. A camera faster than
+        the fluorescence clock therefore contributes arrays taller than the frame the job builds, and charging the
+        fluorescence clock alone drops that whole family. Those heights belong to the system that assembles the
+        session, so they are read through that system's donated source resolver, which routes the source set by the
+        session's own type.
+
+        The frame itself stays on the fluorescence clock. The system's experiment assembler builds the fluorescence
+        sub-dataset first and takes its ``time_us`` column as the reference every other sub-dataset is interpolated
+        onto, so the samples the recording's own traces hold are the height of every retained column and of every
+        assembled sub-dataset column, and no camera clock stands in for them here.
 
         A session carrying no fluorescence has nothing to assemble, so its refusal propagates rather than resolving
         to a floor. That holds for a session whose type must complete the two-photon pipeline before it joins a
@@ -1037,23 +1597,31 @@ def _size_forging_job(
         configuration: The dataset's resolved multi-recording configuration, or None when its acquisition system
             donates none.
         cores: The cores the job is allocated, which its type declares.
+        planned_roi_count: The regions to plan the multi-day columns for. Use None to accept the bound the animal's
+            recording set carries, which is what the forging pipeline itself passes.
 
     Returns:
         The job's footprint, holding the declared width and the memory the assembled frame holds at it.
 
     Raises:
         FileNotFoundError: If a session whose type requires imaging carries no processed imaging output, or if a
-            session whose type requires none carries no camera clock, in which case the job assembling it cannot run
-            either.
+            session whose type requires none carries no reference clock, in which case the job assembling it cannot
+            run either. Also raised when any session the dataset names for the session's animal yields no recording
+            geometry, since the tracked-region bound the multi-day columns are charged spans the animal's whole
+            recording set and would under-reserve the job if drawn from part of it.
         ValueError: If the dataset's acquisition system is unknown, if its session type falls outside the platform
-            vocabulary, or if that type joins no dataset for the system and therefore matches neither model.
+            vocabulary, if that type joins no dataset for the system and therefore matches neither model, or if the
+            system's own source resolver does not cover that type and therefore states none of the heights the job's
+            sources stand at.
     """
     # The admission policy states which pipelines a session type must complete before it joins a dataset, so a type
     # that joins without the two-photon pipeline is one the assembler builds from behavior sources alone. Sizing it
     # from fluorescence would charge columns its job never attaches, so the model is selected by the policy rather
     # than falling back to it when imaging happens to be absent.
     if not _requires_imaging(dataset=dataset):
-        return _size_behavior_assembly_job(project_root=project_root, animal=animal, session=session, cores=cores)
+        return _size_behavior_assembly_job(
+            system=dataset.acquisition_system, project_root=project_root, animal=animal, session=session, cores=cores
+        )
 
     geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=session)
     if geometry is None:
@@ -1063,15 +1631,34 @@ def _size_forging_job(
         )
         console.error(message=message, error=FileNotFoundError)
     regions = _resolve_tracked_regions(
-        dataset=dataset, animal=animal, session=session, project_root=project_root, configuration=configuration
+        dataset=dataset,
+        animal=animal,
+        session=session,
+        project_root=project_root,
+        configuration=configuration,
+        planned_roi_count=planned_roi_count,
+    )
+
+    # Resolved through the system's own donation, and handed the same cached marker the recording geometry above was
+    # resolved from, so the session's marker is read once for the whole estimate. A session whose sources the system
+    # cannot resolve is refused by that donation rather than reported as sourceless, since a job charged no source
+    # family at all is reserved a fraction of what it holds.
+    resolve_assembly_sources = resolve_assembly_source_resolver(system=dataset.acquisition_system)
+    source_samples = resolve_assembly_sources(
+        session=_session_marker(project_root=project_root, animal=animal, session=session)
     )
 
     retained_regions = _ASSEMBLY_SINGLE_DAY_COLUMNS * geometry.regions + _ASSEMBLY_MULTI_DAY_COLUMNS * regions
     columns = retained_regions * _ASSEMBLY_WRITE_COPIES * geometry.samples * _SINGLE_PRECISION_BYTES
+    load_transient = _ASSEMBLY_LOAD_TRANSIENT_COLUMNS * geometry.regions * geometry.samples * _SINGLE_PRECISION_BYTES
     sub_datasets = geometry.samples * _SUB_DATASET_BYTES_PER_SAMPLE
+    source_arrays = sum(source_samples) * _SOURCE_INPUT_BYTES_PER_SAMPLE
     return JobFootprint(
         cores=cores,
-        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + sub_datasets)),
+        memory_mb=_apply_tolerance(
+            memory_mb=WORKER_MEMORY_MB
+            + _bytes_to_megabytes(byte_count=columns + load_transient + sub_datasets + source_arrays)
+        ),
     )
 
 
@@ -1119,91 +1706,60 @@ def _requires_imaging(dataset: DatasetData) -> bool:
     return ProcessingPipelines.TWO_PHOTON in required
 
 
-def _resolve_widest_camera_clock_samples(video_data_path: Path) -> int:
-    """Reads how many samples the widest camera clock a session recorded holds.
-
-    Notes:
-        Every camera the video pipeline processed writes one timestamp per frame it acquired, under the filename that
-        library's own layout states, so a feather's row count is that camera's sample count and the filenames are
-        read from the layout rather than rebuilt here. The pipeline publishes each parsed feather under its canonical
-        name as well, and both names carry the same rows, so counting one twice moves no figure.
-
-        The pattern matches every camera the pipeline published a feather for, including one whose name a given
-        acquisition system's own assembler does not read. Counting those keeps this module free of any system's
-        camera manifest and keeps the figure an upper bound, which is the direction a reservation may err in.
-
-        Only each feather's metadata is read, which states the rows it holds without decoding one of them.
-
-    Args:
-        video_data_path: The processed video-data directory holding the session's per-camera timestamp feathers.
-
-    Returns:
-        The samples the widest camera clock holds, or zero when the session carries no timestamp feather at all.
-    """
-    return max(
-        (
-            int(pl.scan_ipc(source=timestamps_path).select(pl.len()).collect().item())
-            for timestamps_path in video_data_path.glob(f"*{OutputLayout.TIMESTAMPS_INFIX}{OutputLayout.FILE_SUFFIX}")
-        ),
-        default=0,
-    )
-
-
-def _size_behavior_assembly_job(project_root: Path, animal: str, session: str, cores: int) -> JobFootprint:
+def _size_behavior_assembly_job(system: str, project_root: Path, animal: str, session: str, cores: int) -> JobFootprint:
     """Sizes one per-session assembly job of a session type that records no imaging.
 
     Notes:
-        The assembly of such a session attaches no fluorescence column at all. It places its behavior, runtime and
-        video columns on the clock of the slowest camera the session recorded, so the samples that clock holds are the
-        height of the frame the job builds and the whole data-dependent charge follows from them. The clock is settled
-        after the columns are stacked and before they are clipped to the session bounds, so the job peaks at the full
-        recorded height rather than at the height it writes.
+        The assembly of such a session attaches no fluorescence column at all, so its whole data-dependent charge is
+        the two families of arrays it holds while it runs, and those two are counted on different clocks.
 
-        Which camera is the slowest follows from the mean rate each one held, which its timestamps alone state. The
-        cameras of one session run over the same span, so the widest clock holds at least the samples the slowest one
-        does and bounds the frame from above at the cost of a metadata read. Charging that bound keeps the estimate on
-        the safe side while leaving the timestamps themselves unread.
+        The first family is the frame it builds. Its behavior, runtime and video columns are all placed on the
+        reference clock its acquisition system's own assembler settles on, so the samples that clock holds are the
+        height of every one of them. The clock is settled after the columns are stacked and before they are clipped to
+        the session bounds, so the job peaks at the full recorded height rather than at the height it writes.
 
-        A session whose cameras left no usable clock has nothing to place its columns on, so its refusal propagates
-        rather than resolving to a floor.
+        The second family is the sources those columns are interpolated from. Each source arrives at the clock it was
+        sampled on, which is its own: a camera's timestamp, motion-energy and pupil feathers are read at that camera's
+        frame count and only then interpolated onto the reference clock. A camera faster than the reference one
+        therefore holds arrays taller than the frame the job builds, and a rig pairing a five-hundred-frame-a-second
+        camera with a ten-frame-a-second one holds them fifty times taller. Charging the reference clock alone drops
+        that family entirely and reserves a fraction of what the job holds, while charging every source at the widest
+        clock instead of at its own overcharges the frame by that same ratio. Both terms are needed, and each is
+        charged at the height its own arrays stand at.
 
-        The clock read here is a deliberate upper bound taken from the video pipeline's output contract rather than a
-        replay of the assembler's own clock resolution, and the two do not agree in every case. This pass counts the
-        rows of every timestamp feather that pipeline published and accepts any feather holding the samples a mean
-        rate needs. The assembler a system donates is stricter: it reads the cameras its own manifest names and
-        accepts a clock only where its timestamps span a positive duration. So a session whose only feather comes
-        from a camera outside that manifest, or whose timestamps span no duration, is sized here and refused there.
-        The residual surfaces as a job that was planned and then failed on its own missing clock rather than as a
-        planning refusal, which is the direction an estimate may err in, since a figure this pass reports only
-        reserves memory.
+        Which clock the frame is placed on, and which sources are read at all, belong to the system that assembles the
+        session rather than to this pass, so both heights are read through that system's donated resolver.
+
+        A session whose system settles on no reference clock has nothing to place its columns on, so the refusal the
+        resolver raises propagates rather than resolving to a floor. That is the same answer the assembler gives for
+        such a session, because both read one selection.
 
     Args:
+        system: The acquisition system that recorded the dataset being forged, which donates the assembly-geometry
+            resolver.
         project_root: The path to the project's root directory.
         animal: The animal that owns the session.
         session: The session name whose assembly job is sized.
         cores: The cores the job is allocated, which its type declares.
 
     Returns:
-        The job's footprint, holding the declared width and the memory the assembled frame holds at it.
+        The job's footprint, holding the declared width and the memory the assembled frame and its sources hold at it.
 
     Raises:
-        FileNotFoundError: If the session carries no camera timestamp feather holding the samples a clock needs, in
-            which case nothing states the height of the frame the job builds.
+        FileNotFoundError: If the session carries no reference clock its system's assembler would settle on, in which
+            case nothing states the height of the frame the job builds.
+        ValueError: If the acquisition system is unknown.
     """
-    samples = _resolve_widest_camera_clock_samples(
-        video_data_path=_video_output_root(project_root=project_root, animal=animal, session=session)
+    resolve_assembly_geometry = resolve_assembly_geometry_resolver(system=system)
+    geometry = resolve_assembly_geometry(
+        session=_session_marker(project_root=project_root, animal=animal, session=session)
     )
-    if samples < _MINIMUM_CLOCK_SAMPLES:
-        message = (
-            f"Unable to size the assembly job of session '{session}'. The session carries no camera timestamp feather "
-            f"holding at least {_MINIMUM_CLOCK_SAMPLES} frames, so nothing states the reference clock the job places "
-            f"its columns on and the job could not run either."
-        )
-        console.error(message=message, error=FileNotFoundError)
 
+    assembled_columns = geometry.reference_samples * _SUB_DATASET_BYTES_PER_SAMPLE
+    source_arrays = sum(geometry.source_samples) * _SOURCE_INPUT_BYTES_PER_SAMPLE
     return JobFootprint(
         cores=cores,
         memory_mb=_apply_tolerance(
-            memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=samples * _SUB_DATASET_BYTES_PER_SAMPLE)
+            memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=assembled_columns + source_arrays)
         ),
     )

@@ -1,4 +1,6 @@
-"""Contains tests for the Mesoscope-VR video sub-dataset assembler and its training-session camera-clock resolver."""
+"""Contains tests for the Mesoscope-VR video sub-dataset assembler, its training-session camera-clock resolver, and
+the readers reporting the heights at which an assembly holds that session's video sources.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +16,9 @@ from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles
 from sollertia_forgery.mesoscope_vr.video_dataset import (
     _BODY_CAMERA_NAME,
     assemble_video_dataset,
+    count_camera_source_samples,
     resolve_slowest_camera_clock,
+    resolve_reference_clock_samples,
 )
 from sollertia_forgery.mesoscope_vr.video_tracking import (
     PUPIL_CAMERA_NAME,
@@ -271,6 +275,18 @@ def test_resolve_slowest_camera_clock_rejects_a_directory_holding_no_clock(video
         resolve_slowest_camera_clock(video_data_path=video_data_path)
 
 
+def test_resolve_slowest_camera_clock_rejects_a_clock_holding_no_frame(
+    video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
+) -> None:
+    # A feather holding no row is the only input the frame-count condition ever decides. Every shorter clock a session
+    # can carry holds one row, which spans no duration and is refused on the span condition instead, so this is the
+    # case that pins the count being weighed before the endpoints are read: an empty feather has no endpoint to read.
+    write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock())
+
+    with pytest.raises(FileNotFoundError, match=re.escape("at least two frames")):
+        resolve_slowest_camera_clock(video_data_path=video_data_path)
+
+
 def test_resolve_slowest_camera_clock_rejects_a_single_frame_clock(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
@@ -328,3 +344,45 @@ def test_resolve_slowest_camera_clock_keeps_the_face_camera_when_the_body_camera
     resolved = resolve_slowest_camera_clock(video_data_path=video_data_path)
 
     assert resolved.tolist() == face_clock.tolist()
+
+
+def test_resolve_reference_clock_samples_reports_the_height_of_the_settled_clock(
+    video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
+) -> None:
+    # The body camera runs at half the face camera's rate over the same span, so the assembly settles on its clock and
+    # the height reported here is the height of the frame that assembly builds rather than of the wider clock.
+    write_camera_timestamps(
+        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000, 3000, 4000)
+    )
+    write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 2000, 4000))
+
+    assert resolve_reference_clock_samples(video_data_path=video_data_path) == 3
+
+
+def test_resolve_reference_clock_samples_answers_with_nothing_when_no_clock_qualifies(
+    video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
+) -> None:
+    write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 0, 0))
+
+    assert resolve_reference_clock_samples(video_data_path=video_data_path) is None
+    assert resolve_reference_clock_samples(video_data_path=video_data_path.joinpath("missing")) is None
+
+
+def test_count_camera_source_samples_counts_every_camera_the_assembler_reads(
+    video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
+) -> None:
+    # The assembler reads a camera's feathers whatever its timestamps span, so the face camera's rows stand in the
+    # source count even though its clock spans no duration and cannot serve as the reference. The camera outside the
+    # fixed set is read by neither, so its feather contributes nothing however many rows it holds.
+    write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 0, 0, 0))
+    write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 2000, 4000))
+    write_camera_timestamps(video_data_path.joinpath("left_camera_timestamps.feather"), _clock(*range(0, 9000, 1000)))
+
+    assert count_camera_source_samples(video_data_path=video_data_path) == (4, 3)
+
+
+def test_count_camera_source_samples_answers_empty_without_a_camera_feather(
+    video_data_path: Path, tmp_path: Path
+) -> None:
+    assert count_camera_source_samples(video_data_path=video_data_path) == ()
+    assert count_camera_source_samples(video_data_path=tmp_path.joinpath("missing")) == ()

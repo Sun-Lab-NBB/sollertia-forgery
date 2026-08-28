@@ -9,6 +9,7 @@ from natsort import natsorted
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Sequence
 
 _NATURAL_RANK_PREFIX: str = "__natural_rank_"
@@ -71,3 +72,20 @@ def multi_recording_dataset_name(animal_id: str, dataset_name: str) -> str:
         The ``{animal_id}_{dataset_name}`` name under which cindra records the animal's multi-recording output.
     """
     return f"{animal_id}_{dataset_name}"
+
+
+def count_feather_rows(feather_path: Path) -> int:
+    """Counts the rows one feather holds, reading the file's own metadata rather than its values.
+
+    Notes:
+        A feather's IPC footer states the rows every record batch it carries holds, so a length query projects no
+        column at all and answers from that footer. The read therefore costs the same on a feather of any height,
+        which is what lets a sizing pass measure a session's sources without loading one of them.
+
+    Args:
+        feather_path: The path to the feather whose height is read.
+
+    Returns:
+        The rows the feather holds.
+    """
+    return int(pl.scan_ipc(source=feather_path).select(pl.len()).collect().item())

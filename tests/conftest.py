@@ -575,9 +575,13 @@ def write_dlc_predictions() -> Callable[..., Path]:
     The columns carry the scorer, bodypart, and coordinate levels DeepLabCut emits, so the reader that reads a real
     prediction file reads this file back.
 
+    The writer optionally compresses the table, which is a setting a DeepLabCut deployment can carry and which shrinks
+    the file without narrowing the table it holds. It is what separates a model charged the table from one charged the
+    file the table was written into.
+
     Returns:
         A callable taking the output path, the mapping of bodypart to its per-frame array of horizontal position,
-        vertical position, and likelihood, and the scorer name, and returning the written path.
+        vertical position, and likelihood, the scorer name, and the compression level, and returning the written path.
     """
 
     def _write(
@@ -585,6 +589,7 @@ def write_dlc_predictions() -> Callable[..., Path]:
         points: Mapping[str, NDArray[np.float64]],
         *,
         scorer: str = "DLC_resnet50_eye_tracking",
+        compression_level: int = 0,
     ) -> Path:
         columns = pd.MultiIndex.from_tuples(
             [(scorer, bodypart, coordinate) for bodypart in points for coordinate in ("x", "y", "likelihood")],
@@ -592,7 +597,11 @@ def write_dlc_predictions() -> Callable[..., Path]:
         )
         matrix = np.concatenate([np.asarray(points[bodypart], dtype=np.float64) for bodypart in points], axis=1)
         path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(data=matrix, columns=columns).to_hdf(path_or_buf=path, key="df_with_missing", format="table")
+        # A zero level leaves the table uncompressed, which is the layout a stock DeepLabCut deployment writes.
+        compression = {"complevel": compression_level, "complib": "zlib"} if compression_level > 0 else {}
+        pd.DataFrame(data=matrix, columns=columns).to_hdf(
+            path_or_buf=path, key="df_with_missing", format="table", **compression
+        )
         return path
 
     return _write

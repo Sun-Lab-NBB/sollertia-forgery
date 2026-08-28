@@ -1,5 +1,5 @@
-"""Provides the Mesoscope-VR video sub-dataset assembler and camera-clock resolver donated to the system-agnostic
-forging pipeline.
+"""Provides the Mesoscope-VR video sub-dataset assembler, its camera-clock resolver, and the readers that report
+the heights at which the assembly holds that session's video sources.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
 from .metadata import VideoDataFiles
+from ..shared_assets import count_feather_rows
 from .video_tracking import PUPIL_CAMERA_NAME, PupilColumn
 
 if TYPE_CHECKING:
@@ -78,6 +79,20 @@ _CAMERA_SOURCES: tuple[_CameraSource, ...] = (
 )
 """The fixed Mesoscope-VR camera set, each entry naming a camera and the feathers read for it. The face camera carries
 the eye, so only it contributes a pupil feather."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ClockSelection:
+    """Describes the camera clock the assembly of a session recording no imaging settles on."""
+
+    camera: str
+    """The colloquial name of the camera that recorded the clock."""
+    timestamps_path: Path
+    """The path to that camera's timestamp feather, which holds the clock itself."""
+    samples: int
+    """The samples the clock holds, which is one per frame the camera acquired."""
+    mean_rate: float
+    """The camera's mean frame rate, in frames per second, on which the selection turned."""
 
 
 def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uint64]) -> pl.DataFrame:
@@ -174,35 +189,8 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
         FileNotFoundError: If no camera timestamp feather with at least two frames spanning a positive duration is
             present, so no camera clock can serve as the reference.
     """
-    slowest_clock: NDArray[np.uint64] | None = None
-    slowest_rate = float("inf")
-    slowest_camera = ""
-
-    if video_data_path.is_dir():
-        for camera in _CAMERA_SOURCES:
-            timestamps_path = video_data_path.joinpath(camera.timestamps_file)
-            if not timestamps_path.is_file():
-                continue
-
-            frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[
-                ExtractedDataColumns.FRAME_TIME
-            ].to_numpy()
-
-            # A mean frame rate needs at least two frames spanning a positive duration. Casts the endpoints to float
-            # first, since the timestamps are unsigned and their difference would wrap on an out-of-order feather.
-            if frame_time.size < _MINIMUM_CLOCK_FRAMES:
-                continue
-            duration_seconds = (float(frame_time[-1]) - float(frame_time[0])) / _MICROSECONDS_PER_SECOND
-            if duration_seconds <= 0:
-                continue
-
-            mean_rate = frame_time.size / duration_seconds
-            if mean_rate < slowest_rate:
-                slowest_rate = mean_rate
-                slowest_clock = frame_time
-                slowest_camera = camera.name
-
-    if slowest_clock is None:
+    selection = _select_reference_camera(video_data_path=video_data_path)
+    if selection is None:
         message = (
             f"Unable to resolve the reference clock for the training session. No camera timestamp feather with at "
             f"least two frames spanning a positive duration was found under '{video_data_path}', so no camera clock "
@@ -210,8 +198,119 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
         )
         console.error(message=message, error=FileNotFoundError)
 
-    console.echo(message=f"Resolved the '{slowest_camera}' clock ({slowest_rate:.2f} fps) as the reference clock.")
-    return slowest_clock
+    console.echo(
+        message=f"Resolved the '{selection.camera}' clock ({selection.mean_rate:.2f} fps) as the reference clock."
+    )
+    return pl.read_ipc(source=selection.timestamps_path, memory_map=True)[ExtractedDataColumns.FRAME_TIME].to_numpy()
+
+
+def resolve_reference_clock_samples(video_data_path: Path) -> int | None:
+    """Reports the samples held by the clock ``resolve_slowest_camera_clock`` settles on for a session.
+
+    Notes:
+        Answers from the selection both functions share: the same fixed camera set, the same requirement of at least
+        two frames spanning a positive duration, and the same lowest mean rate. A count taken from any other clock of
+        the same session states the height of a frame the assembly never builds, so a sizing pass reading this reads
+        the clock the assembler itself settles on.
+
+        Reads each candidate feather's IPC metadata for its row count and exactly two of its timestamps, its first and
+        its last. No timestamp column is materialized, so the read costs the same on a session of any length.
+
+    Args:
+        video_data_path: The path to the processed video-data directory holding the per-camera timestamp feathers.
+
+    Returns:
+        The samples the reference clock holds, or None when no camera of the set qualifies as the reference and the
+        assembly of the session could not run either.
+    """
+    selection = _select_reference_camera(video_data_path=video_data_path)
+    return None if selection is None else selection.samples
+
+
+def count_camera_source_samples(video_data_path: Path) -> tuple[int, ...]:
+    """Counts the frames each camera ``assemble_video_dataset`` reads acquired for a session.
+
+    Notes:
+        Counts every camera of the fixed set whose timestamp feather is present, which is exactly the set the
+        assembler loops over. The requirements the reference selection imposes are deliberately not imposed here: the
+        assembler reads a camera's feathers whatever its timestamps span, so a camera that cannot serve as the
+        reference clock still contributes the arrays its frames fill. A camera's timestamp, motion-energy and pupil
+        feathers all carry one row per acquired frame, so one count describes every array that camera contributes.
+
+        Reads each feather's IPC metadata for its row count alone, so no timestamp is materialized.
+
+    Args:
+        video_data_path: The path to the processed video-data directory holding the per-camera timestamp feathers.
+
+    Returns:
+        The frames each present camera acquired, one entry per camera, in the order the fixed set names them. Empty
+        when the session carries no camera feather at all.
+    """
+    if not video_data_path.is_dir():
+        return ()
+
+    return tuple(
+        count_feather_rows(feather_path=timestamps_path)
+        for camera in _CAMERA_SOURCES
+        if (timestamps_path := video_data_path.joinpath(camera.timestamps_file)).is_file()
+    )
+
+
+def _select_reference_camera(video_data_path: Path) -> _ClockSelection | None:
+    """Selects the slowest camera of the fixed Mesoscope-VR set, reading each candidate's metadata and endpoints only.
+
+    Notes:
+        A camera qualifies when its timestamp feather holds at least two frames spanning a positive duration, which is
+        what a mean frame rate needs to be stated. The qualifying camera with the lowest mean rate is selected, and a
+        tie is settled in favour of the first camera the set names.
+
+        Reads the row count from the feather's IPC footer and exactly two of its timestamps, its first and its last. No
+        timestamp column is materialized here, so the selection costs the same on a session of any length and the
+        caller that needs the clock itself loads one camera's column rather than every camera's.
+
+    Args:
+        video_data_path: The path to the processed video-data directory holding the per-camera timestamp feathers.
+
+    Returns:
+        The selected camera's clock description, or None when no camera qualifies.
+    """
+    if not video_data_path.is_dir():
+        return None
+
+    selection: _ClockSelection | None = None
+    for camera in _CAMERA_SOURCES:
+        timestamps_path = video_data_path.joinpath(camera.timestamps_file)
+        if not timestamps_path.is_file():
+            continue
+
+        # The IPC footer states the rows every record batch holds, so the height is read without projecting a
+        # column. A feather holding fewer rows than a mean rate needs is dropped before its endpoints are read, since
+        # an empty one holds no endpoint to read at all.
+        samples = count_feather_rows(feather_path=timestamps_path)
+        if samples < _MINIMUM_CLOCK_FRAMES:
+            continue
+
+        clock = pl.scan_ipc(source=timestamps_path)
+
+        # A one-row slice pushes down into the scan, which then reads the single record batch holding that row and
+        # leaves every other batch on disk. These two timestamps are the whole input a mean rate takes.
+        endpoints = clock.select(ExtractedDataColumns.FRAME_TIME)
+        first_time = endpoints.slice(0, 1).collect().item()
+        last_time = endpoints.slice(samples - 1, 1).collect().item()
+
+        # The endpoints arrive as Python integers, whose difference cannot wrap the way the unsigned column's would,
+        # so an out-of-order feather states a negative span here and is dropped rather than read as the slowest clock.
+        duration_seconds = (float(last_time) - float(first_time)) / _MICROSECONDS_PER_SECOND
+        if duration_seconds <= 0:
+            continue
+
+        mean_rate = samples / duration_seconds
+        if selection is None or mean_rate < selection.mean_rate:
+            selection = _ClockSelection(
+                camera=camera.name, timestamps_path=timestamps_path, samples=samples, mean_rate=mean_rate
+            )
+
+    return selection
 
 
 def _interpolate_linear(

@@ -33,10 +33,16 @@ block averages out the single-pixel sensor and codec noise that the later absolu
 into a positive bias, while staying small enough to leave the measured movement intact. An odd edge keeps the box
 filter's anchor on the pixel at each block's center, so the strided sampling reads those block means correctly."""
 
-_MINIMUM_CHUNK_FRAMES: int = 4000
+MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
 preceding keyframe, so each chunk discards up to one group of frames' worth of decoded frames. The floor sits high
-enough relative to the keyframe interval to keep those discarded frames a small fraction of the chunk."""
+enough relative to the keyframe interval to keep those discarded frames a small fraction of the chunk.
+
+Notes:
+    Public because it is what decides how many decoders one motion-energy job opens, which the orchestration sizing
+    pass has to know to reserve the job the memory it holds rather than the memory the job's full core allocation
+    would hold. A recording shorter than this threshold decodes in the job's own process and opens no pool at all.
+"""
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
 """The dimension count that identifies a decoded frame as a single grayscale plane. A frame matching it is used as-is,
@@ -220,7 +226,7 @@ def _plan_chunks(frame_count: int, workers: int) -> list[tuple[int, int]]:
     Returns:
         A list of ``(start_frame, frame_count)`` pairs covering the recording with no gap and no overlap.
     """
-    chunk_count = max(1, min(workers, frame_count // _MINIMUM_CHUNK_FRAMES))
+    chunk_count = max(1, min(workers, frame_count // MINIMUM_CHUNK_FRAMES))
     base_frame_count, remainder = divmod(frame_count, chunk_count)
 
     chunks: list[tuple[int, int]] = []

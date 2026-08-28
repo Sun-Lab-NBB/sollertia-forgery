@@ -48,7 +48,7 @@ from sollertia_forgery.orchestration.planning import (
     _dataset_plan_path,
     _session_plan_path,
 )
-from sollertia_forgery.orchestration.footprints import _POSE_PREDICTION_RATIO, JobFootprint
+from sollertia_forgery.orchestration.footprints import _POSE_TABLE_COPIES, JobFootprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -383,9 +383,7 @@ def test_retuning_a_sizing_constant_re_estimates_a_recorded_figure(
         ],
     )
 
-    monkeypatch.setattr(
-        "sollertia_forgery.orchestration.footprints._POSE_PREDICTION_RATIO", _POSE_PREDICTION_RATIO + 1.0
-    )
+    monkeypatch.setattr("sollertia_forgery.orchestration.footprints._POSE_TABLE_COPIES", _POSE_TABLE_COPIES + 1.0)
     replanned = plan_session(
         unit=session,
         dispatches=[
