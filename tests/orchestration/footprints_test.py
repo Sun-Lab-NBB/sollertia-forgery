@@ -1785,6 +1785,44 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
     )
 
 
+def test_an_imaging_assembly_is_charged_the_sources_it_reads_at_their_own_heights(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """Verifies that the assembly of an imaging session is charged its behavior sources at the heights those sources
+    stand at, rather than at the fluorescence clock its assembled frame is placed on.
+
+    The assembler places every column on the fluorescence clock, but it reads each source at that source's own rate
+    first and interpolates onto that clock afterwards, and it reads the sources together rather than one at a time.
+    A camera running far faster than the imaging therefore holds an array far taller than the frame it lands in, and
+    charging that array at the imaging rate reserves a fraction of what the job holds.
+
+    The four million samples the camera clock here holds carry the estimate a whole gigabyte bucket above what the
+    same session reports with no source at all, so the reported figure names the source family as its own term
+    rather than one the fluorescence clock already covered.
+    """
+    session = session_factory(animal_id="305", experiment_name="test_experiment")
+    write_surgery_metadata(session=session)
+    write_processed_recording(session=session, regions=48, samples=20_000)
+    write_camera_clock(session=session, camera="face_camera", frames=4_000_000, period_us=1)
+    dataset = build_dataset(
+        project_root=project_root,
+        name="ds_imaging_sources",
+        sessions=[session],
+        session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+    )
+
+    estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+    assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
+        cores=1, memory_mb=assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,))
+    )
+    # Charging the same session no source family at all lands a whole gigabyte lower, so the assertion above could
+    # not have been met by an estimate that omitted the term.
+    assert assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,)) != assembly_memory(
+        samples=20_000, regions=48
+    )
+
+
 def test_dataset_stages_are_refused_for_a_session_carrying_no_processed_output(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
