@@ -44,8 +44,8 @@ nonrigid_registration:
   maximum_block_offset: 5.0
 roi_detection:
   enabled: true
-  preclassification_threshold: 0.5
-  threshold_scaling: 2.0
+  preclassification_threshold: 0.0
+  threshold_scaling: 1.0
   spatial_highpass_window: 25
   maximum_overlap: 0.75
   temporal_highpass_window: 100

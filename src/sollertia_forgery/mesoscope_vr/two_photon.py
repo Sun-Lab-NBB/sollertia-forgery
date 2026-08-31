@@ -262,8 +262,8 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
         ),
         roi_detection=ROIDetection(
             enabled=True,
-            preclassification_threshold=0.5,
-            threshold_scaling=2.0,
+            preclassification_threshold=0.0,
+            threshold_scaling=1.0,
             spatial_highpass_window=25,
             maximum_overlap=0.75,
             temporal_highpass_window=100,
@@ -335,7 +335,7 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
             repeat_registration=False,
         ),
         roi_tracking=ROITracking(
-            threshold=0.75,
+            threshold=0.5,
             mask_prevalence=50,
             pixel_prevalence=50,
             step_sizes=(200, 200),

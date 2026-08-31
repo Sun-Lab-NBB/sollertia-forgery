@@ -22,7 +22,7 @@ diffeomorphic_registration:
   speed_factor: 3
   repeat_registration: false
 roi_tracking:
-  threshold: 0.75
+  threshold: 0.5
   mask_prevalence: 50
   pixel_prevalence: 50
   step_sizes:
