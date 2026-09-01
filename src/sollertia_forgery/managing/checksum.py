@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
+from sollertia_shared_assets import CHECKSUM_EXCLUDED_FILES, SessionData
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
 from ..shared_assets import verify_openmp_runtime
@@ -13,22 +13,6 @@ from ..shared_assets import verify_openmp_runtime
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name identifying the checksum resolution job in the checksum processing tracker
 (``ProcessingTrackers.CHECKSUM``), where this pipeline records the job's state."""
-
-_CHECKSUM_TRACKER_LOCK_FILENAME: str = Path(
-    ProcessingTracker(file_path=Path(ProcessingTrackers.CHECKSUM)).lock_path
-).name
-"""The lock filename associated with the checksum processing tracker, taken from the tracker's own derivation so the
-excluded set cannot disagree with the file the tracker actually locks."""
-
-_CHECKSUM_EXCLUDED_FILES: set[str] = {
-    str(RawDataFiles.CHECKSUM),
-    str(ProcessingTrackers.CHECKSUM),
-    _CHECKSUM_TRACKER_LOCK_FILENAME,
-}
-"""The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
-tracker, and its lock file to prevent the tracker's presence from altering the checksum value. Only includes files
-canonically found under the 'raw_data' session data directory."""
-
 
 def run_checksum_processing_pipeline(
     session_path: Path,
@@ -121,7 +105,7 @@ def run_checksum_processing_pipeline(
             num_processes=resolved_workers,
             progress=display_progress,
             save_checksum=regenerate_checksum,
-            excluded_files=_CHECKSUM_EXCLUDED_FILES,
+            excluded_files=CHECKSUM_EXCLUDED_FILES,
         )
 
         with checksum_path.open() as file:
@@ -217,4 +201,4 @@ def _has_checksummable_data(raw_data_path: Path) -> bool:
     """
     if not raw_data_path.is_dir():
         return False
-    return any(path.is_file() and path.name not in _CHECKSUM_EXCLUDED_FILES for path in raw_data_path.rglob("*"))
+    return any(path.is_file() and path.name not in CHECKSUM_EXCLUDED_FILES for path in raw_data_path.rglob("*"))
