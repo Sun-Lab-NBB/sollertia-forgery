@@ -115,21 +115,19 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
-    # cindra owns the four single-recording stages, and its own resolver answers each one with the measured knee of
-    # that stage's scaling curve.
+    # cindra owns the four single-recording stages, and its own resolver answers each one with the width that stage
+    # holds while a session dispatches at its full concurrency.
     str(SingleRecordingJobNames.BINARIZE): resolve_stage_workers(job_name=SingleRecordingJobNames.BINARIZE),
     str(SingleRecordingJobNames.REGISTER): resolve_stage_workers(job_name=SingleRecordingJobNames.REGISTER),
     str(SingleRecordingJobNames.PROCESS): resolve_stage_workers(job_name=SingleRecordingJobNames.PROCESS),
     str(SingleRecordingJobNames.COMBINE): resolve_stage_workers(job_name=SingleRecordingJobNames.COMBINE),
-    # cindra's resolver reports this stage as having no parallel critical path, where quadrupling the allocation
-    # shortens a twenty-recording dataset by two percent, so the width it reports covers the deformation pool
-    # alone. The forging pipeline dispatches the stage under a name of its own, so the entry is keyed by that name
-    # while its width is cindra's.
+    # cindra's resolver reports the width this stage holds at full session concurrency, which is wide enough to open
+    # its deformation pool. The forging pipeline dispatches the stage under a name of its own, so the entry is keyed
+    # by that name while its width is cindra's.
     MULTIDAY_DISCOVERY_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.DISCOVER),
-    # cindra's resolver sizes this stage for the concurrency a host sustains rather than for a plateau, since the
-    # stage keeps shortening well past this width. The width it reports leaves room for the datasets a compute node
-    # extracts at once while still reaching a sevenfold speedup on one job, and the entry is keyed by the name under
-    # which the forging pipeline dispatches it.
+    # cindra's resolver sizes this stage for the concurrency a host sustains, so the width it reports leaves room
+    # for the datasets a compute node extracts at once. The entry is keyed by the name under which the forging
+    # pipeline dispatches it.
     MULTIDAY_EXTRACTION_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.EXTRACT),
     # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
     # threads, so the stage gains nothing from a wider allocation.

@@ -920,8 +920,8 @@ def _size_two_photon_job(
 
     Notes:
         cindra reads the recording once and answers both halves of its model from that read, so the width at which a
-        stage runs is the measured knee of its own scaling curve rather than a figure this package repeats. Taking
-        both figures whole is what keeps a retune of either half reaching slf without a change here.
+        stage runs is the width cindra declares for that stage rather than a figure this package repeats. Taking both
+        figures whole is what keeps a retune of either half reaching slf without a change here.
 
         The binarization, registration and processing stages are sized from the recording's own geometry, and the two
         per-plane stages additionally from the plane their specifier names, so each of them receives a figure taken
