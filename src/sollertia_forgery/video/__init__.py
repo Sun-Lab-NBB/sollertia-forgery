@@ -10,13 +10,16 @@ from .pipeline import (
     video_job_prerequisites,
     run_video_processing_pipeline,
 )
+from .motion_energy import MINIMUM_CHUNK_FRAMES, resolve_camera_video
 
 __all__ = [
     "CAMERA_EXTRACTION_JOB_NAME",
     "ENERGY_JOB_NAME",
+    "MINIMUM_CHUNK_FRAMES",
     "RENAME_JOB_NAME",
     "TRACKING_JOB_NAME",
     "discover_video_jobs",
+    "resolve_camera_video",
     "run_video_processing_pipeline",
     "video_job_prerequisites",
 ]

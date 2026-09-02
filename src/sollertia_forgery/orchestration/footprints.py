@@ -36,7 +36,17 @@ from sollertia_shared_assets import SessionData, SessionTypes
 from ataraxis_data_structures import find_log_archives, read_archive_message_count
 from ataraxis_communication_interface import size_archive_job as size_controller_extraction_job
 
-from ..video import ENERGY_JOB_NAME, RENAME_JOB_NAME, TRACKING_JOB_NAME, CAMERA_EXTRACTION_JOB_NAME
+from ..video import (
+    ENERGY_JOB_NAME,
+    RENAME_JOB_NAME,
+    TRACKING_JOB_NAME,
+    # The chunk threshold is bound under a private name so that the sizing model's identifier digests it. The
+    # threshold decides how many decoders a motion-energy job opens, so retuning it moves every motion-energy figure
+    # and every plan stamped with the previous identifier has to be estimated again.
+    MINIMUM_CHUNK_FRAMES as _MINIMUM_CHUNK_FRAMES,
+    CAMERA_EXTRACTION_JOB_NAME,
+    resolve_camera_video,
+)
 from ..forging import FORGING_JOB_NAME, MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME
 from ..runtime import RUNTIME_JOB_NAME
 from ..managing import CHECKSUM_JOB_NAME
@@ -51,14 +61,6 @@ from ..registries import (
 )
 from ..shared_assets import ProcessingPipelines
 from ..microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
-
-# The chunk threshold is bound under a private name so that the sizing model's identifier digests it. The
-# threshold decides how many decoders a motion-energy job opens, so retuning it moves every motion-energy figure
-# and every plan stamped with the previous identifier has to be estimated again.
-from ..video.motion_energy import (
-    MINIMUM_CHUNK_FRAMES as _MINIMUM_CHUNK_FRAMES,
-    resolve_camera_video,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
