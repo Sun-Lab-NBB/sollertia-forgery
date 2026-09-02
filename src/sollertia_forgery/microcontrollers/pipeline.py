@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from sollertia_shared_assets import SessionData, ProcessingTrackers
+from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker, limit_worker_threads, initialize_worker_threads
 from ataraxis_communication_interface import (
     CONTROLLER_EXTRACTION_JOB_NAME,
@@ -134,12 +134,13 @@ def run_microcontroller_processing_pipeline(
         )
     )
 
-    # Co-locates the tracker with the extracted and parsed data in ``microcontroller_data``. The same job universe
-    # drives foreign-entry detection in both local and remote modes, so a single concurrent remote job aligns the
-    # tracker without resetting its sibling jobs.
+    # Co-locates the tracker with the extracted and parsed data in ``microcontroller_data``, taking its location
+    # from the session rather than rebuilding it. The same job universe drives foreign-entry detection in both
+    # local and remote modes, so a single concurrent remote job aligns the tracker without resetting its
+    # sibling jobs.
     tracker_directory = session.processed_data.microcontroller_data_path
     tracker_directory.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=tracker_directory.joinpath(ProcessingTrackers.MICROCONTROLLER))
+    tracker = ProcessingTracker(file_path=session.processed_data.microcontroller_tracker_path)
     tracker.align_jobs(jobs=requested, universe=universe)
 
     # Writes the configuration before any job is dispatched, in both modes, since the extraction binding reads each

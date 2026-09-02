@@ -21,7 +21,7 @@ from ataraxis_video_system import (
     resolve_timestamps_path,
 )
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from sollertia_shared_assets import SessionData, ProcessingTrackers
+from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker, limit_worker_threads, initialize_worker_threads
 
 from ..registries import resolve_video_tracking, resolve_pose_prediction_locator
@@ -148,11 +148,11 @@ def run_video_processing_pipeline(
     universe = [*camera_jobs.universe, (RENAME_JOB_NAME, ""), (TRACKING_JOB_NAME, "")]
     universe.extend((ENERGY_JOB_NAME, source_id) for source_id in camera_names)
 
-    # All four job kinds write into the single processed video-data directory. The processing tracker lives
-    # there too, matching SessionData.processed_data.video_tracker_path.
+    # All four job kinds write into the single processed video-data directory, and the session resolves the tracker
+    # that sits beside them, so relocating it upstream moves this pipeline with it.
     video_data_directory = session.processed_data.video_data_path
     video_data_directory.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=video_data_directory.joinpath(ProcessingTrackers.VIDEO))
+    tracker = ProcessingTracker(file_path=session.processed_data.video_tracker_path)
 
     if job_id is not None:
         # Remote mode: registers the requested job alone while detecting foreign entries against the full universe, so

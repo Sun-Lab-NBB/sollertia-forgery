@@ -12,7 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from sollertia_shared_assets import SessionData, ProcessingTrackers
+from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import (
     LogArchiveReader,
     ProcessingTracker,
@@ -98,7 +98,7 @@ def run_runtime_processing_pipeline(
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
     output_directory.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
+    tracker = ProcessingTracker(file_path=session.processed_data.runtime_tracker_path)
     tracker.align_jobs(jobs=possible, universe=universe)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")
