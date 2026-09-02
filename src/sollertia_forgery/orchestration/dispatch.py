@@ -298,9 +298,9 @@ def resolve_job_command(job: GenericPendingJob) -> tuple[str, ...]:
     """Renders the command line that runs one prepared job on a host holding the data it processes.
 
     Notes:
-        Rendered from the same dispatch table on which the in-process worker routes, so a job runs the same stage at
-        the same width whichever way it is executed. Progress reporting is suppressed, since a scheduled allocation
-        writes its output to a log file rather than to a terminal.
+        Rendered from the same dispatch table on which the in-process worker routes, so a job runs the same stage
+        whichever way it is executed. Progress reporting is suppressed, since a scheduled allocation writes its output
+        to a log file rather than to a terminal.
 
     Args:
         job: The pending job carrying its pipeline, its target job identifier, and its planned cores.

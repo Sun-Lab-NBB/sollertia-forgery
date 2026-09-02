@@ -176,7 +176,7 @@ API change rather than a convenience.
 ### Extension contracts
 
 Every registry is private to `registries.py` and is reached through that module's `resolve_*` accessors, so a consuming
-pipeline never indexes a registry directly. All eleven registries are the designed extension point, and a new
+pipeline never indexes a registry directly. All thirteen registries are the designed extension point, and a new
 acquisition system supplies an entry in each.
 
 | Registry                                 | Donation                                                         |
@@ -190,6 +190,8 @@ acquisition system supplies an entry in each.
 | `_TWO_PHOTON_DATA_REGISTRY`              | The locator for the raw two-photon imaging directory             |
 | `_CINDRA_CONFIGURATION_REGISTRY`         | The single- and multi-recording cindra config resolvers          |
 | `_FORGING_ASSEMBLY_REGISTRY`             | The per-session assembler and its column descriptions            |
+| `_ASSEMBLY_GEOMETRY_REGISTRY`            | The heights at which its assembler holds a frame and its sources |
+| `_ASSEMBLY_SOURCE_REGISTRY`              | The height at which its assembler holds each source it reads     |
 | `_FORGING_ADMISSION_REGISTRY`            | The pipelines a session of each type completes to join a dataset |
 | `_MULTI_RECORDING_SESSION_TYPE_REGISTRY` | The session types the system tracks across recordings            |
 

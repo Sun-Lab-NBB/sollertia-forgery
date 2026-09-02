@@ -137,6 +137,8 @@ donated by that member:
 | Two-photon data locator        | The raw imaging directory the two-photon pipeline hands to cindra                          |
 | Cindra configuration resolvers | The single-recording and multi-recording configurations passed to cindra                   |
 | Forging assembler              | The per-session worker that assembles the dataset row, plus its column meanings            |
+| Assembly geometry resolver     | The heights at which the system's own assembler holds a session's frame and its sources    |
+| Assembly source resolver       | The height at which that assembler holds each source it reads for a session                |
 | Forging admission policy       | The pipelines a session of each type completes before it joins a dataset                   |
 | Multi-recording session types  | The session types the system tracks across recordings                                      |
 
@@ -614,6 +616,9 @@ package supplies:
 5. The per-session forging assembler, the mapping from each emitted column to that column's meaning, the admission
    policy that names the pipelines required for each session type, and the session types the system tracks across
    recordings.
+6. The two resolvers that report the shape of the system's own assembly, one giving the heights at which the assembler
+   holds a session's frame and its sources, and one giving the height at which it holds each source it reads. The
+   sizing pass charges its per-sample terms against those heights.
 
 A system that produces none of a given data class still donates an entry for that class. A no-op tracking function, a
 pose-prediction locator that returns `None`, and a multi-recording resolver that returns `None` are the donations a
