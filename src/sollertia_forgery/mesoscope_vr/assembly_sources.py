@@ -10,8 +10,8 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import SessionTypes
 
 from .metadata import BehaviorDataFiles
-from ..shared_assets import count_feather_rows
 from .video_dataset import count_camera_source_samples
+from ..shared_assets import count_feather_rows
 
 if TYPE_CHECKING:
     from pathlib import Path

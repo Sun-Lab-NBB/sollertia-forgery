@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from ataraxis_base_utilities import console
+from sollertia_shared_assets import CHECKSUM_EXCLUDED_FILES
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.managing import (
@@ -17,7 +18,7 @@ from sollertia_forgery.managing import (
     run_checksum_processing_pipeline,
 )
 import sollertia_forgery.managing.checksum as checksum_module
-from sollertia_forgery.managing.checksum import _CHECKSUM_EXCLUDED_FILES, _has_checksummable_data
+from sollertia_forgery.managing.checksum import _has_checksummable_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -212,7 +213,7 @@ def test_a_directory_holding_only_bookkeeping_files_has_nothing_to_checksum(tmp_
     """
     raw_data = tmp_path.joinpath("raw_data")
     raw_data.mkdir()
-    for name in _CHECKSUM_EXCLUDED_FILES:
+    for name in CHECKSUM_EXCLUDED_FILES:
         raw_data.joinpath(name).write_text("bookkeeping")
 
     assert not _has_checksummable_data(raw_data_path=raw_data)

@@ -18,8 +18,8 @@ from .video_dataset import (
 )
 from ..shared_assets import AssemblyGeometry
 from .runtime_dataset import clip_to_session_bounds
-from .behavior_dataset import assemble_behavior_dataset
 from .assembly_sources import resolve_mesoscope_assembly_sources
+from .behavior_dataset import assemble_behavior_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path

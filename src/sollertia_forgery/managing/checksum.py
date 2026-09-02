@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import CHECKSUM_EXCLUDED_FILES, SessionData
@@ -10,9 +10,13 @@ from ataraxis_data_structures import ProcessingTracker, calculate_directory_chec
 
 from ..shared_assets import verify_openmp_runtime
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name identifying the checksum resolution job in the checksum processing tracker
 (``ProcessingTrackers.CHECKSUM``), where this pipeline records the job's state."""
+
 
 def run_checksum_processing_pipeline(
     session_path: Path,

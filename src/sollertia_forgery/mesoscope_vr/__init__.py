@@ -10,6 +10,7 @@ from .two_photon import (
     resolve_single_recording_configuration,
 )
 from .video_tracking import process_mesoscope_video_tracking, locate_mesoscope_pose_predictions
+from .assembly_sources import resolve_mesoscope_assembly_sources
 from .microcontrollers import (
     parse_lick,
     parse_brake,
@@ -23,7 +24,6 @@ from .microcontrollers import (
     get_module_event_codes,
 )
 from .training_dataset import resolve_mesoscope_assembly_geometry
-from .assembly_sources import resolve_mesoscope_assembly_sources
 
 __all__ = [
     "MESOSCOPE_ADMISSION_PIPELINES",
