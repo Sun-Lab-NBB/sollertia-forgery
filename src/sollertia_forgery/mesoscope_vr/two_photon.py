@@ -242,6 +242,7 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
             spatial_smoothing_sigma=1.15,
             temporal_smoothing_sigma=0.0,
             two_step_registration=False,
+            gpu_batch_size=0,
             bad_frame_threshold=1.0,
             normalize_frames=True,
             registration_metric_principal_components=10,
