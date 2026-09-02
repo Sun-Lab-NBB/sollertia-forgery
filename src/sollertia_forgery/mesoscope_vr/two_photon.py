@@ -336,7 +336,7 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
             repeat_registration=False,
         ),
         roi_tracking=ROITracking(
-            threshold=0.5,
+            threshold=0.75,
             mask_prevalence=50,
             pixel_prevalence=50,
             step_sizes=(200, 200),
