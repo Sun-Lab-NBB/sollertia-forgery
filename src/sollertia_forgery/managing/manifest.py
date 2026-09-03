@@ -192,6 +192,7 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
         FileNotFoundError: If the project directory does not exist, contains no session data, or contains a session
             without its descriptor file.
         ValueError: If an unsupported session type is encountered.
+        OSError: If any directory under the project directory cannot be read while its sessions are discovered.
         Timeout: If the manifest .feather file lock cannot be acquired within 20 seconds.
     """
     if not project_directory.exists():

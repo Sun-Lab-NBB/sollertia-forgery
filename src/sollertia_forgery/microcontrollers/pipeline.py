@@ -85,6 +85,8 @@ def run_microcontroller_processing_pipeline(
             microcontroller manifest is missing, or if the registered eligibility accessor cannot load its own
             inputs, for example an absent hardware state file. In remote mode, also raised when a requested
             extraction job's log archive is not present.
+        OSError: If any directory beneath the session's raw behavior data directory cannot be read while the
+            microcontroller manifest and the log archives are located.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
         ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed,
             or if the raw behavior data tree holds more than one microcontroller manifest. Also raised when no
@@ -229,6 +231,8 @@ def discover_microcontroller_jobs(
         FileNotFoundError: If the session's raw behavior data directory does not exist, if the session's
             microcontroller manifest is not present, or if the registered eligibility accessor cannot load its own
             inputs, for example an absent hardware state file.
+        OSError: If any directory beneath the session's raw behavior data directory cannot be read while the
+            microcontroller manifest and the log archives are located.
         ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
             the raw behavior data tree holds more than one microcontroller manifest, or if no manifest controller
             declares a module the acquisition system extracts.

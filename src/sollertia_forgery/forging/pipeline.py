@@ -77,8 +77,8 @@ the tracker job name.
 
 Notes:
     Only assembly declares a ceiling. It holds one core per job, so the ceiling sets the width of the pool it opens. The
-    cross-recording jobs exist for two-photon sessions alone, and each of them takes a wide core allocation of its own,
-    so the core budget already bounds how many run at once and no separate ceiling applies.
+    cross-recording jobs exist for two-photon sessions alone, and cindra sizes each of them itself and declares no
+    ceiling for either of their resource classes, so the core budget alone bounds how many run at once.
 """
 
 _MULTIDAY_JOB_NAMES: dict[MultiRecordingJobNames, str] = {
@@ -90,8 +90,9 @@ name.
 
 Notes:
     cindra owns the cross-recording pipeline, while the forging tracker interleaves those stages with the per-session
-    assembly stage this library owns and records all of them under its own names. This table is the only place the two
-    vocabularies meet, so composing another cindra stage into the forging graph is a matter of naming it here.
+    assembly stage this library owns and records all of them under its own names. This table is where those tracker
+    names are minted, so composing another cindra stage into the forging graph also needs its core allocation in
+    ``orchestration/dispatch.py`` and its sizing branch in ``orchestration/footprints.py``.
 """
 
 

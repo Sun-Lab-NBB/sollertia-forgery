@@ -221,7 +221,8 @@ def prime_two_photon_recording(session_path: Path) -> None:
 
     Raises:
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
-            is not present.
+            is not present, or if the acquisition system's resolver reports missing inputs it needs to resolve the
+            configuration.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
             acquisition system's resolver cannot resolve a configuration for the session.
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
@@ -360,7 +361,8 @@ def _resolve_primed_plane_count(session: SessionData) -> int | None:
 
     Raises:
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
-            is not present.
+            is not present, or if the acquisition system's resolver reports missing inputs it needs to resolve the
+            configuration.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
             acquisition system's resolver cannot resolve a configuration for the session.
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
@@ -418,7 +420,8 @@ def _resolve_configuration(
 
     Raises:
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
-            is not present, or, in remote mode, if the session carries no materialized cindra configuration.
+            is not present, if the acquisition system's resolver reports missing inputs it needs to resolve the
+            configuration, or, in remote mode, if the session carries no materialized cindra configuration.
         ValueError: If the acquisition system's resolver cannot resolve a configuration for the session.
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
             for the acquisition parameters file.

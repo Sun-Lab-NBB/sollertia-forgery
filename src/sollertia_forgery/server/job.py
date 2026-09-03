@@ -32,10 +32,10 @@ class Job:
 
     Args:
         job_name: The descriptive name of the SLURM job to be created.
-        output_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
-            the job to the 'stdout' pipe.
-        error_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
-            the job to the 'stderr' pipe.
+        output_log: The absolute path to the file on the compute server to use for storing the messages sent by the
+            job to the 'stdout' pipe.
+        error_log: The absolute path to the file on the compute server to use for storing the messages sent by the job
+            to the 'stderr' pipe.
         working_directory: The absolute path to the compute server's directory in which the temporary job files are
             stored.
         conda_environment: The name of the mamba / conda environment to activate on the server before running the job.

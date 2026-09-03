@@ -280,8 +280,9 @@ _POSE_PREDICTION_REGISTRY: dict[AcquisitionSystems, _PosePredictionLocator] = {
 }
 """Maps each acquisition system to the module-level locator that resolves the externally-produced pose-prediction file
 its video-tracking stage reads. The naming of that file belongs to the system that produces it. Job discovery
-consults this locator to decide whether a session supports a tracking job, and the sizing pass consults it to charge
-the job the prediction file's byte count. A system that performs no video tracking donates a locator returning None.
+consults this locator to decide whether a session supports a tracking job, and the sizing pass consults it to read the
+prediction table's row and column counts, from which the job's working set is charged. A system that performs no video
+tracking donates a locator returning None.
 """
 
 _VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, _VideoTracker] = {

@@ -107,13 +107,14 @@ def run_video_processing_pipeline(
             motion-energy measurement.
 
     Raises:
-        ValueError: If the camera manifest registers no cameras, if the raw behavior data tree holds more than one
-            camera manifest, if no camera log archives are discovered for the timestamp stage, or if job_id does not
-            match an available job. Also raised when target_camera has no discovered log archive while the timestamp
-            stage runs, or is not registered in the camera manifest while the motion-energy stage runs, when a
-            camera's recording cannot be opened, reports no frames, cannot decode the frame preceding a decode chunk,
-            or ends early at a chunk other than the last, and when two cameras resolve the same canonical timestamp
-            filename.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the camera
+            manifest registers no cameras, if the raw behavior data tree holds more than one camera manifest, if no
+            camera log archives are discovered for the timestamp stage, or if job_id does not match an available job.
+            Also raised when target_camera has no discovered log archive while the timestamp stage runs, or is not
+            registered in the camera manifest while the motion-energy stage runs, when a camera's recording cannot be
+            opened, reports no frames, cannot decode the frame preceding a decode chunk, or ends early at a chunk
+            other than the last, and when two cameras resolve the same canonical timestamp filename or one camera's
+            canonical filename is another camera's parsed feather.
         OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and the
             log archives are located.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
@@ -306,8 +307,10 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
 
     Raises:
         FileNotFoundError: If the session's camera manifest is not present.
-        ValueError: If the camera manifest registers no cameras, or the raw behavior data tree holds more than one
-            camera manifest.
+        OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and
+            the log archives are located.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the camera
+            manifest registers no cameras, or the raw behavior data tree holds more than one camera manifest.
     """
     session = SessionData.load(session_path=session_path)
     camera_jobs = _resolve_camera_jobs(data_directory=session.raw_data.behavior_data_path)

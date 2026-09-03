@@ -239,7 +239,7 @@ def _decode_batches(
     payload_chunks: list[list[bytes]] = [[] for _ in batches]
 
     # Each decode child re-imports and sizes its library thread pools before any of this code runs inside it, so the
-    # caps are placed around the pool's construction rather than inside its workers. numba latches its own ceiling
+    # caps cover the pool's whole life rather than sitting inside its workers. numba latches its own ceiling
     # while it is imported and rejects an environment variable that disagrees afterwards, so each child pins it
     # through its own runtime setter in the pool initializer instead.
     with (

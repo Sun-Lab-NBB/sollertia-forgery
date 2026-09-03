@@ -101,8 +101,9 @@ def unreachable_transport(
         instant_retry_timer: The stubbed timer that removes the delay between retries.
 
     Returns:
-        A recorder carrying the reassignable ``error`` raised by every handshake, the ``attempts`` counter, and the
-        ``authentication_exception`` class the server module recognizes.
+        A recorder carrying the reassignable ``error`` raised by every handshake, the ``attempts`` counter, the
+        ``closes`` counter recording every client the loop released, and the ``authentication_exception`` class the
+        server module recognizes.
     """
 
     class _AuthenticationError(Exception):
