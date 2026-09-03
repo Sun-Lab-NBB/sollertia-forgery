@@ -82,7 +82,7 @@ from the repository root.
 ## MCP server
 
 The library exposes an MCP server through the `slf mcp` command. `interfaces/entry_points.py` selects the transport with
-`-t/--transport`, defaulting to `stdio` and also accepting `sse` and `streamable-http` for a network client, and
+`-t/--transport`, defaulting to `stdio` and also accepting `sse` and `streamable-http` for a network client. It
 disables the console on the `stdio` path, because the pipelines echo progress to the same stream that carries the
 JSON-RPC messages. `interfaces/mcp_server.py` runs the server, and its import discovers every `*_tools.py` module under
 `src/sollertia_forgery/interfaces/`, each of which registers the tools it declares purely as an import side effect.
@@ -92,9 +92,9 @@ from `.mcp_instance`. Return through the `ok_response` and `error_response` help
 `Returns` section that names the response keys in prose. Add a new tool module to the `[tool.coverage.run] omit` list in
 `pyproject.toml`, because tool modules reach infrastructure that only a live MCP session supplies. The batch tools that
 read, cancel, and remediate what the scheduler ran keep their implementations in `interfaces/remote_tools.py`, which
-registers no tool of its own, so an `slf server` command and the tool beside it answer a caller from one function, and
-`get_processing_status_tool` and `retire_remote_batches_tool` resolve every allocation through the one state table in
-`orchestration/remote.py` rather than each deciding for itself.
+registers no tool of its own. An `slf server` command and the tool beside it therefore answer a caller from one
+function. `get_processing_status_tool` and `retire_remote_batches_tool` resolve every allocation through the one state
+table in `orchestration/remote.py` rather than each deciding for itself.
 
 ## Downstream library integration
 
@@ -147,7 +147,7 @@ processed sessions into the multi-session datasets consumed by a downstream anal
 | `src/sollertia_forgery/managing/`      | The checksum pipeline, the project manifest, and the job artifact        |
 | `src/sollertia_forgery/server/`        | SLURM jobs, remote discovery, the SSH and SFTP transport, and its config |
 | `src/sollertia_forgery/interfaces/`    | The `slf` Click CLI and the MCP tool modules                             |
-| `src/sollertia_forgery/shared_assets/` | The agnostic substrate every category package draws on                   |
+| `src/sollertia_forgery/shared_assets/` | The agnostic substrate on which every category package draws             |
 
 The `video/`, `microcontrollers/`, `runtime/`, `two_photon/`, and `forging/` category packages sit beside them, one
 per pipeline.
@@ -174,10 +174,10 @@ one SLURM allocation per job. Each job holds a `ProcessingStatus` on the tracker
 rather than dispatched when it can neither queue that job's upstream stage nor confirm that the stage already succeeded.
 
 A remote allocation outlives this process, so `orchestration/remote.py` resolves each recorded one against scheduler
-accounting, the scheduler queue, and the job's own tracker into a `scheduler_state`, a `verdict`, and the `remediation`
-that verdict prescribes, with `_VERDICT_REMEDIATIONS` as the single state table both the status read and the
-remediation apply. Only the `stranded` verdict writes a tracker, because a tracker still claiming a purged allocation
-is the one record no rerun can clear.
+accounting, the scheduler queue, and the job's own tracker. That resolution yields a `scheduler_state`, a `verdict`,
+and the `remediation` that verdict prescribes, with `_VERDICT_REMEDIATIONS` as the single state table both the status
+read and the remediation apply. Only the `stranded` verdict writes a tracker, because a tracker still claiming a purged
+allocation is the one record no rerun can clear.
 
 The public surface of the distribution is the `slf` CLI and the MCP server that CLI starts, so the top-level
 `__init__.py` re-exports no library symbol and its `__all__` is empty. Adding a name to a public listing is a deliberate

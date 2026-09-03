@@ -66,6 +66,7 @@ ___
 - [AI-Assisted Development](#ai-assisted-development)
   - [MCP Server](#mcp-server)
   - [Skills](#skills)
+  - [Client Registration](#client-registration)
 - [Developers](#developers)
   - [Installing the Project](#installing-the-project)
   - [Additional Dependencies](#additional-dependencies)
@@ -143,9 +144,9 @@ donated by that member:
 | Forging admission policy       | The pipelines a session of each type completes before it joins a dataset                   |
 | Multi-recording session types  | The session types the system tracks across recordings                                      |
 
-A coverage check runs when `registries.py` is imported and raises a `RuntimeError` naming the registry it stopped on and
-the systems missing from it, so a partially wired system fails at import time rather than midway through a batch. The
-dependency runs one way, because a per-system package never imports an agnostic category package.
+A coverage check runs when `registries.py` is imported and raises a `RuntimeError` naming the registry where it stopped
+and the systems missing from it, so a partially wired system fails at import time rather than midway through a batch.
+The dependency runs one way, because a per-system package never imports an agnostic category package.
 
 ***Note,*** adding a system to the platform spans three repositories. The enumeration member and the session records
 belong to sollertia-shared-assets, the acquisition runtime belongs to sollertia-experiment, and the donations belong
@@ -282,8 +283,8 @@ Project/
 The forging pipeline runs the cross-recording stages first, one discovery job per animal whose system resolves a
 multi-recording configuration and one extraction job per that animal's session, then assembles one `data.feather` per
 session. Extending an existing dataset materializes the animals introduced by the call, the animals it names for
-recreation, and any animal the dataset already holds whose configuration is missing from disk, so an identical call
-heals a definition that failed partway. A large project therefore forges in passes, while part of its source data lives
+recreation, and any animal the dataset already holds whose configuration is missing from disk. An identical call
+therefore heals a definition that failed partway. A large project forges in passes, while part of its source data lives
 elsewhere.
 
 ### CLI Commands
@@ -293,8 +294,8 @@ takes a system selector:
 
 | Command                   | Description                                                                                 |
 |---------------------------|---------------------------------------------------------------------------------------------|
-| `plan session`            | Records what every processing job of each named session will cost                           |
-| `plan dataset`            | Records what every forging job of each named dataset will cost                              |
+| `plan session`            | Records what every processing job of each named session costs                               |
+| `plan dataset`            | Records what every forging job of each named dataset costs                                  |
 | `plan project`            | Projects every plan cache under the project into one table at the project root              |
 | `process video`           | Extracts camera frame timestamps, processes pose predictions, and measures motion energy    |
 | `process microcontroller` | Extracts the microcontroller log archives and parses them into behavior feathers            |
@@ -369,29 +370,29 @@ ledger at `<working directory>/remote_state/submission_ledger.yaml`, guarded by 
 artifact this library keeps. The ledger keeps concurrent batches queryable, keeps a batch findable after this process
 exits, and preserves the record of the accepted allocations when the scheduler rejects a later job of the same batch. A
 batch leaves the ledger once every one of its allocations resolves to the plain `drop` remediation and its closure has
-snapshotted what its jobs recorded. That rule is derived from the same resolution the read publishes, so nothing closes
-that the read reports as still held. A batch holding an allocation the resolution answers for any other way stays
-outstanding for an explicit remediation, and so does a batch whose closure failed.
+snapshotted what its jobs recorded. That rule is derived from the same resolution the read publishes, so a batch that
+the read reports as still held never closes. A batch holding an allocation for which the resolution answers any other
+way stays outstanding for an explicit remediation, and so does a batch whose closure failed.
 
 Every status read also resolves each outstanding allocation against three records, which are the scheduler's accounting,
 the scheduler's queue, and the processing tracker of the job the allocation carries. The allocation is `held` when the
-queue carries it or accounting reports a state it has yet to leave, `settled` when accounting reports a state it never
-leaves and the queue does not carry it, and `gone` only when accounting returns no row for it and the queue does not
-carry it either. A missing row is not evidence of a purge, because accounting answers the same way for a submission it
-has not registered yet, and nothing observable separates the two. So `gone` licenses no claim that the allocation ever
-ran or that a later query answers alike. What it does license is narrower: this reading did not observe the allocation
-settle, so the batch holding it never settles on its own, and only an explicit remediation releases it.
+queue carries it or accounting reports a state it has yet to leave, and `settled` when accounting reports a state it
+never leaves and the queue does not carry it. It is `gone` only when accounting returns no row for it and the queue does
+not carry it either. A missing row is not evidence of a purge, because accounting answers the same way for a submission
+it has not registered yet, and nothing observable separates the two. So `gone` licenses no claim that the allocation
+ever ran or that a later query answers alike. What it does license is narrower. This reading did not observe the
+allocation settle, so the batch holding it never settles on its own, and only an explicit remediation releases it.
 
 That state and the job's own tracker together carry the allocation's verdict. `running` means the scheduler still holds
-the allocation or the one the job's tracker claims, or that tracker names an executor outside the scheduler, which
-neither record can answer for. Nothing is done to a `running` allocation. `finished` and `failed` mean the job recorded
-an outcome, which its tracker keeps. `abandoned` means nothing claims the job, so it is already runnable. `stranded`
-means the job's tracker still claims to be running while no allocation is, whether it names a scheduler allocation the
-records no longer hold or names no executor at all, which is the one case whose remediation writes to a tracker: that
-job is returned to `SCHEDULED`, because the claim is what no rerun can otherwise clear. Each batch carries a verdict of
-its own beside them, `progressing` while any of its allocations resolves `running`, `stalled` when none does and at
-least one is `gone`, and `awaiting_closure` otherwise, which is the state of a batch holding an entry the automatic
-closure may not drop or one whose closure failed.
+the allocation or the one the job's tracker claims, or that tracker names an executor outside the scheduler, for which
+neither record can answer. Nothing is done to a `running` allocation. `finished` and `failed` mean the job recorded an
+outcome, which its tracker keeps. `abandoned` means nothing claims the job, so it is already runnable. `stranded` means
+the job's tracker still claims to be running while no allocation is, whether it names a scheduler allocation the records
+no longer hold or names no executor at all. That is the one case whose remediation writes to a tracker, returning the
+job to `SCHEDULED`, because the claim is what no rerun can otherwise clear. Each batch carries a verdict of its own
+beside them, `progressing` while any of its allocations resolves `running`, `stalled` when none does and at least one is
+`gone`, and `awaiting_closure` otherwise. That last verdict is the state of a batch holding an entry the automatic
+closure may not drop, and of a batch whose closure failed.
 
 `slf server batches` and `get_processing_status_tool` with `host='remote'` report every one of those values and name
 the remedy, and `slf server retire-batch` and `retire_remote_batches_tool` carry it out, resetting each stranded job
@@ -450,16 +451,15 @@ ataraxis-video-system, ataraxis-communication-interface, and cindra libraries ea
 own MCP server, so this server leaves those tools to them. `assets:working-directory` sets the data root, and the
 `assets:project-hierarchy`, `assets:session-discovery`, and `assets:datasets` skills produce the paths named below.
 
-Every tool names a filesystem path by what that path holds. On the batch tools, `session_paths` names a processing
-unit root, which is a session root for every session pipeline and a dataset root for `forging`. A `dataset_path` on the
+Every tool names a filesystem path by what that path holds. On the batch tools, `session_paths` names a processing unit
+root, which is a session root for every session pipeline and a dataset root for `forging`. A `dataset_path` on the
 forging and planning tools names one forged dataset's root, and a `project_path` names a project root under the data
-root. Most tools take a `host`, which is `local` for the data on this
-machine and `remote` for the data on the compute server. Eight tools take none. `execute_jobs_tool` takes none because a
-batch runs where it was prepared, `forget_prepared_batches_tool` and `read_resource_model_tool` answer for this machine
-alone, the two server-configuration tools are always local, and `discover_remote_project_tool`,
-`read_scheduler_jobs_tool`, and `retire_remote_batches_tool` always address the compute server. On
-`list_prepared_batches_tool` the `host` is a filter rather than a target, and omitting it lists the batches prepared
-against either host.
+root. Most tools take a `host`, which is `local` for the data on this machine and `remote` for the data on the compute
+server. Eight tools take none. `execute_jobs_tool` takes none because a batch runs where it was prepared,
+`forget_prepared_batches_tool` and `read_resource_model_tool` answer for this machine alone, the two
+server-configuration tools are always local, and `discover_remote_project_tool`, `read_scheduler_jobs_tool`, and
+`retire_remote_batches_tool` always address the compute server. On `list_prepared_batches_tool` the `host` is a filter
+rather than a target, and omitting it lists the batches prepared against either host.
 
 #### Starting the Server
 
@@ -498,8 +498,8 @@ The planning tools record the cost of every job and collect those records into o
 
 | Tool                         | Description                                                                                                  |
 |------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `plan_session_jobs_tool`     | Records what every processing job of one or more sessions will cost, caching the figures beside each session |
-| `plan_dataset_jobs_tool`     | Records what every forging job of one or more datasets will cost, caching the figures at each dataset root   |
+| `plan_session_jobs_tool`     | Records what every processing job of one or more sessions costs, caching the figures beside each session     |
+| `plan_dataset_jobs_tool`     | Records what every forging job of one or more datasets costs, caching the figures at each dataset root       |
 | `generate_project_plan_tool` | Projects every plan cache under a project into one table at the project root                                 |
 | `read_project_plan_tool`     | Reads the planned cores and memory of a project's jobs out of that stored projection                         |
 
@@ -508,7 +508,7 @@ The processing tools resolve, dispatch, and recover a batch:
 | Tool                           | Description                                                                                             |
 |--------------------------------|---------------------------------------------------------------------------------------------------------|
 | `prepare_batch_tool`           | Resolves a pipeline's dispatchable jobs for one or more units, on this machine or on the compute server |
-| `inspect_job_resources_tool`   | Reports the cores and memory a pipeline's outstanding jobs will need, running none of them              |
+| `inspect_job_resources_tool`   | Reports the cores and memory a pipeline's outstanding jobs need, running none of them                   |
 | `execute_jobs_tool`            | Dispatches prepared batches onto this machine's process pool or onto the server's scheduler             |
 | `get_processing_status_tool`   | Reports the live status of the active batch, resolving each remote allocation to one verdict            |
 | `cancel_processing_tool`       | Cancels the active local batch, or the outstanding allocations of the remote batches                    |
@@ -554,15 +554,15 @@ The **forging** plugin ships the skills that orchestrate the tools above:
 | `cli-reference`                 | Documents every `slf` command and option and the MCP tool each one maps to           |
 | `forging-mcp-environment-setup` | Diagnoses MCP connectivity and owns the response envelope every forging tool returns |
 
-Projects recorded on a specific acquisition system additionally install that system's plugin, which ships the skills for
-the processing donations it makes to this library. The **mesoscope** plugin covers the Mesoscope-VR system, whose
-`mesoscope:mesoscope-vr-module-parsing`, `mesoscope:mesoscope-vr-trial-decomposition`,
+Operators working on a specific acquisition system additionally install that system's plugin, which ships the skills for
+the processing donations that system makes to this library. The **mesoscope** plugin covers the Mesoscope-VR system,
+whose `mesoscope:mesoscope-vr-module-parsing`, `mesoscope:mesoscope-vr-trial-decomposition`,
 `mesoscope:mesoscope-vr-fluorescence-alignment`, `mesoscope:mesoscope-vr-video-tracking`,
 `mesoscope:mesoscope-vr-imaging-configuration`, `mesoscope:mesoscope-vr-processing-schema`, and
-`mesoscope:mesoscope-vr-dataset-assembly` skills document what the agnostic pipelines above dispatch through for that
-system.
+`mesoscope:mesoscope-vr-dataset-assembly` skills document the donations through which the agnostic pipelines above
+dispatch for that system.
 
-#### Client Registration
+### Client Registration
 
 The **forging** plugin of the [sollertia](https://github.com/Sun-Lab-NBB/sollertia) marketplace distributes this
 library's Claude Code skills and the registration for its MCP server. Installing that plugin registers the MCP server
@@ -659,13 +659,14 @@ package supplies:
 5. The per-session forging assembler, the mapping from each emitted column to that column's meaning, the admission
    policy that names the pipelines required for each session type, and the session types the system tracks across
    recordings.
-6. The two resolvers that report the shape of the system's own assembly, one giving the heights at which the assembler
-   holds a session's frame and its sources, and one giving the height at which it holds each source it reads. The
+6. The two resolvers that report the shape of the system's own assembly. One gives the heights at which the assembler
+   holds a session's frame and its sources, and the other gives the height at which it holds each source it reads. The
    sizing pass charges its per-sample terms against those heights.
 
 A system that produces none of a given data class still donates an entry for that class. A no-op tracking function, a
 pose-prediction locator that returns `None`, and a multi-recording resolver that returns `None` are the donations a
-system makes for a class it never produces, so the coverage check stays a check on wiring rather than on capability.
+system makes for a class it never produces. The coverage check therefore stays a check on wiring rather than on
+capability.
 
 ***Critical!*** A system package must never import an agnostic category package. The category pipelines import
 `registries.py` and `registries.py` imports every system package, so the reverse import is a circular import rather
@@ -674,10 +675,10 @@ than a style preference.
 **Step 3: Register the donations**
 
 In `registries.py`, import the new symbols and add the system's entry to every registry. Then import the library. The
-coverage check raises a `RuntimeError` on the first gap it reaches, whether that is a registry still missing the system,
-a parseable module without event codes, a declared multi-recording session type absent from the upstream pairing, or an
-admission entry naming a session type the system does not record. One import surfaces one gap, so run the import again
-after every fix.
+coverage check raises a `RuntimeError` on the first gap it reaches, whether that gap is a registry still missing the
+system or a parseable module without event codes. The same check fires on a declared multi-recording session type absent
+from the upstream pairing, and on an admission entry naming a session type the system does not record. One import
+surfaces one gap, so run the import again after every fix.
 
 Nothing under `orchestration/` or `interfaces/` changes. The CLI and the MCP tools resolve the system from the session
 or dataset they open, so a fully wired system reaches every command already exposed.
@@ -753,8 +754,8 @@ donation.
    a column the schema no longer declares.
 4. Create the category package. Its `__init__.py` exports the pipeline entry point, every stage job name, and the job
    discovery and prerequisite callables the orchestration layer binds.
-5. Add the pipeline to the batch pipeline set and give it a dispatch entry that supplies its unit kind, unit loader,
-   job discovery, batch worker, prerequisites, tracker path, output path, unit name, sizing pass, remote command
+5. Add the pipeline to the batch pipeline set, then give it a dispatch entry. That entry supplies its unit kind, unit
+   loader, job discovery, batch worker, prerequisites, tracker path, output path, unit name, sizing pass, remote command
    renderer, any priming hook, and any external output paths. An import-time check fails on either half alone, and it
    also refuses an entry declaring an unknown unit kind.
 6. Declare the core allocation and the sizing model of every job type the pipeline resolves, following [Adding a New
