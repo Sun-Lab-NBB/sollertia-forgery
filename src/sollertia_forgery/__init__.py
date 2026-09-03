@@ -12,9 +12,9 @@ import multiprocessing
 
 from numba import config
 
-# numexpr, required by PyTables and imported by pandas whenever it is installed, logs three INFO lines reporting its
-# thread count the first time it is imported. Raising its logger above INFO here, before any import triggers it, keeps
-# that report out of the pipeline's progress output.
+# numexpr, required by PyTables and imported by pandas whenever it is installed, logs up to three INFO lines about
+# its core detection and thread count the first time it is imported. Raising its logger above INFO here, before any
+# import triggers it, keeps that report out of the pipeline's progress output.
 logging.getLogger("numexpr").setLevel(logging.WARNING)
 
 # Python 3.14 defaults the multiprocessing start method to 'forkserver' on Linux, whose server process creates each

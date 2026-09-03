@@ -205,11 +205,7 @@ def test_the_default_link_lands_where_the_loader_searches(
 
 
 def test_naming_the_link_path_as_the_runtime_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that a runtime already sitting at the link path is left alone rather than replaced by a self-link.
-
-    Unlinking the destination before writing the link would remove the only copy of the runtime and leave a link
-    resolving to nothing, which reports as a successful link while the host loses the runtime entirely.
-    """
+    """Verifies that a runtime already sitting at the link path is left alone rather than replaced by a self-link."""
     runtime = tmp_path.joinpath("libomp.dylib")
     runtime.write_bytes(b"the runtime")
     monkeypatch.setattr(openmp_module.sys, "platform", "darwin")
@@ -218,6 +214,8 @@ def test_naming_the_link_path_as_the_runtime_is_refused(tmp_path: Path, monkeypa
     with pytest.raises(RuntimeError, match="already sits where the link would be written"):
         resolve_openmp_runtime(runtime_path=runtime, link_path=runtime, execute=True)
 
+    # Unlinking the destination before writing the link would remove the only copy of the runtime and leave a link
+    # resolving to nothing, which reports as a successful link while the host loses the runtime entirely.
     assert runtime.read_bytes() == b"the runtime"
     assert not runtime.is_symlink()
 
@@ -225,12 +223,7 @@ def test_naming_the_link_path_as_the_runtime_is_refused(tmp_path: Path, monkeypa
 def test_naming_the_runtime_by_a_second_route_to_the_same_file_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a runtime reached by another spelling of its path is still recognized as sitting at the link.
-
-    Neither the command's arguments nor the discovery resolve the paths they are given, so an operator naming the
-    runtime relative to the link's own directory spells one file two ways. Comparing the spellings rather than the
-    files they name would miss that and replace the host's only runtime with a link pointing at itself.
-    """
+    """Verifies that a runtime reached by another spelling of its path is still recognized as sitting at the link."""
     runtime = tmp_path.joinpath("lib", "libomp.dylib")
     runtime.parent.mkdir()
     runtime.write_bytes(b"the runtime")
@@ -238,6 +231,9 @@ def test_naming_the_runtime_by_a_second_route_to_the_same_file_is_refused(
     monkeypatch.setattr(openmp_module.sys, "platform", "darwin")
     monkeypatch.setattr(openmp_module, "_openmp_runtime_loadable", lambda: False)
 
+    # Neither the command's arguments nor the discovery resolve the paths they are given, so an operator naming the
+    # runtime relative to the link's own directory spells one file two ways. Comparing the spellings rather than the
+    # files they name would replace the host's only runtime with a link pointing at itself.
     with pytest.raises(RuntimeError, match="already sits where the link would be written"):
         resolve_openmp_runtime(runtime_path=second_route, link_path=runtime, execute=True)
 
@@ -246,11 +242,7 @@ def test_naming_the_runtime_by_a_second_route_to_the_same_file_is_refused(
 
 
 def test_a_failed_link_leaves_the_previous_one_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that a link this call cannot write leaves whatever the destination already held.
-
-    The link is published by renaming a temporary onto the destination, so the destination is never empty between the
-    removal of the old link and the arrival of the new one.
-    """
+    """Verifies that a link this call cannot write leaves whatever the destination already held."""
     runtime = tmp_path.joinpath("libomp.dylib")
     runtime.write_bytes(b"the runtime")
     previous_target = tmp_path.joinpath("previous.dylib")
@@ -270,6 +262,8 @@ def test_a_failed_link_leaves_the_previous_one_in_place(tmp_path: Path, monkeypa
     with pytest.raises(RuntimeError, match="Unable to link the OpenMP runtime into"):
         resolve_openmp_runtime(runtime_path=runtime, link_path=link, execute=True)
 
+    # The link is published by renaming a temporary onto the destination, so the destination is never empty between
+    # the removal of the old link and the arrival of the new one.
     assert link.is_symlink()
     assert link.resolve() == previous_target
     # The temporary that the publication would have renamed is cleaned up rather than left beside the destination.
@@ -315,6 +309,19 @@ def test_the_post_link_verification_runs_a_fresh_interpreter() -> None:
     took.
     """
     assert openmp_module._verify_runtime_loadable()
+
+
+def test_a_verification_that_never_answers_reports_the_runtime_as_unloadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that an expired verification resolves the same way a failed load does, so a stalled loader reports an
+    unloadable runtime rather than aborting the request that linked it.
+    """
+
+    def expire(*_args: object, **_kwargs: object) -> None:
+        raise openmp_module.subprocess.TimeoutExpired(cmd="python", timeout=openmp_module._VERIFICATION_TIMEOUT)
+
+    monkeypatch.setattr(openmp_module.subprocess, "run", expire)
+
+    assert not openmp_module._verify_runtime_loadable()
 
 
 # Reporting

@@ -35,7 +35,14 @@ class _SharedManifestParameters:
     """The path to the project root data directory on which both subcommands operate."""
 
     def require_project_path(self) -> Path:
-        """Returns the project root path, raising a Click usage error when ``--project-path`` was not supplied."""
+        """Resolves the project root data directory both subcommands operate on.
+
+        Returns:
+            The path to the project root data directory.
+
+        Raises:
+            UsageError: If the ``--project-path`` option was not supplied ahead of the subcommand name.
+        """
         if self.project_path is None:
             message = (
                 "Unable to resolve the project root directory for the 'manifest' command. The '-pp' / "
@@ -83,7 +90,8 @@ def manifest_cli(context: click.Context, project_path: Path | None) -> None:
 def create_manifest(shared: _SharedManifestParameters, *, no_progress: bool) -> None:
     """Creates the manifest .feather file that captures the snapshot of the target project's state.
 
-    An existing manifest for the project is recreated (overwritten) with a fresh snapshot.
+    An existing manifest for the project is recreated (overwritten) with a fresh snapshot. The project job artifact,
+    '<project>_jobs.feather', is published into the same root ahead of the manifest itself.
     """
     generate_project_manifest(project_directory=shared.require_project_path(), display_progress=not no_progress)
 

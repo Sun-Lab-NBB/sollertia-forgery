@@ -127,12 +127,7 @@ def test_get_server_configuration_raises_error_if_missing(
 def test_get_server_configuration_rejects_a_configuration_missing_one_field(
     isolated_working_directory: Path, blank_field: str
 ) -> None:
-    """Verifies that a configuration filling in every field but one is refused rather than partially used.
-
-    A blank root builds every server-side path relative to the login account's home directory, and a blank
-    environment runs every allocation under the login shell's own default, so a configuration missing one
-    field is as unusable as one missing all of them.
-    """
+    """Verifies that a configuration filling in every field but one is refused rather than partially used."""
     fields = {
         "username": "test_user",
         "password": "test_pass",
@@ -143,6 +138,8 @@ def test_get_server_configuration_rejects_a_configuration_missing_one_field(
     fields[blank_field] = ""
     ServerConfiguration(**fields).to_yaml(file_path=isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH))
 
+    # A blank root builds every server-side path relative to the login account's home directory, and a blank
+    # environment runs every allocation under the login shell's own default.
     with pytest.raises(ValueError, match=r"(?i)unconfigured"):
         get_server_configuration()
 

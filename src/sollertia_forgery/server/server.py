@@ -56,7 +56,7 @@ class _CommandResult:
 class JobStatus(StrEnum):
     """Defines the set of status codes this library resolves for managed jobs.
 
-    These are the states SLURM reports, plus the ``BLOCKED`` and ``UNKNOWN`` states resolved locally.
+    These are the states SLURM reports, plus the ``BLOCKED``, ``UNKNOWN``, and ``UNRESOLVED`` states resolved locally.
     """
 
     PENDING = "PENDING"
@@ -87,7 +87,14 @@ class JobStatus(StrEnum):
     """The job is queued behind a dependency that can no longer be satisfied, so it will never run. Resolved from the
     queue's reason field rather than from accounting, which still reports such a job as pending."""
     UNKNOWN = "UNKNOWN"
-    """The job status could not be determined."""
+    """Accounting returned a row for the allocation whose state string this enumeration does not model, which covers
+    every live state beyond PENDING and RUNNING, such as SUSPENDED, CONFIGURING, or COMPLETING. A row exists, so the
+    scheduler still holds the allocation and this state is never terminal."""
+    UNRESOLVED = "UNRESOLVED"
+    """Accounting was queried successfully and returned no row for the allocation, which covers a submission it has not
+    registered yet as well as one it has purged. Nothing observable separates those two, so this state is never
+    terminal, and the batch on which an allocation holds this state is retired by an explicit caller rather than on a
+    timer."""
 
 
 TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
@@ -108,8 +115,11 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
 """The statuses a job never leaves. Reaching one tells a caller that a polled submission has settled.
 
 Notes:
-    ``UNKNOWN`` is absent, since accounting reports it for a submission it has not yet registered as well as for one
-    it can no longer resolve.
+    ``UNKNOWN`` and ``UNRESOLVED`` are both absent. A row this enumeration cannot parse still proves that the
+    scheduler holds the allocation, and a successful query that returned no row for it covers a submission accounting
+    has yet to register as well as one it has purged. Nothing observable separates those two, so an allocation that
+    stays unresolvable never settles its batch on its own. The remote status read classifies such a batch as stalled
+    and names the allocations, and the caller retires it explicitly.
 """
 
 
@@ -128,13 +138,13 @@ class Server:
 
     Attributes:
         _open: Tracks whether the connection to the server is open.
-        _client: Stores the SSHClient instance used to interface with the server.
-        _sftp: Stores the SFTPClient instance used for file transfer operations.
-        _configuration: Stores the ServerConfiguration instance used to configure the server connection.
+        _client: The authenticated SSH session over which the remote commands run.
+        _sftp: The file-transfer channel opened over that session.
+        _configuration: The hostname, access credentials, data root, and environment name of the server.
     """
 
     def __init__(self, configuration: ServerConfiguration) -> None:
-        # Tracker used to prevent __del__ from calling close() for a partially initialized class.
+        # Prevents __del__ from calling close() for a partially initialized class.
         self._open: bool = False
 
         self._configuration: ServerConfiguration = configuration
@@ -149,9 +159,9 @@ class Server:
                 ),
                 level=LogLevel.INFO,
             )
-            # Built into a local until both handles are open, because an attempt that authenticates and then fails
-            # leaves a live transport thread behind. Binding it to the instance first would hide that transport from
-            # close(), whose guard only clears once this loop has succeeded.
+            # Holds the client in a local until both handles are open, because an attempt that authenticates and then
+            # fails leaves a live transport thread behind. Binding it to the instance first would hide that transport
+            # from close(), whose guard only clears once this loop has succeeded.
             client = paramiko.SSHClient()
             try:
                 # The compute server is named by the operator's own configuration file, and prompting for an unknown
@@ -169,16 +179,18 @@ class Server:
             except paramiko.AuthenticationException:
                 client.close()
                 message = (
-                    f"Authentication failed when connecting to {self._configuration.host} using "
-                    f"{self._configuration.username} user."
+                    f"Unable to connect to the remote compute server {self._configuration.host} using the "
+                    f"{self._configuration.username} account. The server accepts only credentials it recognizes, and "
+                    f"it rejected the configured ones."
                 )
                 console.error(message=message, error=PermissionError)
             except Exception:
                 client.close()
                 if attempt == _MAXIMUM_CONNECTION_RETRIES:
                     message = (
-                        f"Could not connect to {self._configuration.host} after {_MAXIMUM_CONNECTION_RETRIES} "
-                        f"retries. Aborting runtime."
+                        f"Unable to connect to the remote compute server {self._configuration.host} over SSH. The "
+                        f"handshake is retried at most {_MAXIMUM_CONNECTION_RETRIES} times after the first attempt, "
+                        f"and every attempt failed."
                     )
                     console.error(message=message, error=ConnectionError)
 
@@ -224,7 +236,7 @@ class Server:
                 job that was already submitted is emitted regardless.
 
         Returns:
-            The job object whose 'job_id' attribute had been replaced with the SLURM-assigned job ID.
+            The submitted job, carrying the identifier the scheduler assigned to its allocation.
 
         Raises:
             RuntimeError: If the job cannot be submitted to the server for any reason.
@@ -239,8 +251,7 @@ class Server:
             )
             return job
 
-        # Generates a temporary shell script on the local machine. Uses tempfile to automatically remove the
-        # local script as soon as it is uploaded to the server.
+        # Writes the script into a temporary directory, so the local copy is removed as soon as it is uploaded.
         with tempfile.TemporaryDirectory() as temporary_directory:
             local_script_path = Path(temporary_directory).joinpath(f"{job.job_name}.sh")
             script_content = job.command_script
@@ -250,14 +261,14 @@ class Server:
 
             self._sftp.put(localpath=str(local_script_path), remotepath=job.remote_script_path)
 
-        # Makes the server-side script executable. The exit status is awaited, because a submission issued on a second
-        # channel would otherwise race the permission change on the first.
+        # The exit status is awaited, because a submission issued on a second channel would otherwise race the
+        # permission change on the first.
         script_path = shlex.quote(job.remote_script_path)
         chmod_result = self.execute_command(command=f"chmod +x {script_path}")
         if chmod_result.return_code != 0:
             message = (
-                f"Failed to make the '{job.job_name}' job script executable on the remote compute server. "
-                f"{chmod_result.stderr.strip()}"
+                f"Unable to make the '{job.job_name}' job script executable on the remote compute server. The "
+                f"scheduler runs only a script the account may execute. {chmod_result.stderr.strip()}"
             )
             console.error(message=message, error=RuntimeError)
 
@@ -266,7 +277,8 @@ class Server:
 
         if "Submitted batch job" not in job_output:
             message = (
-                f"Failed to submit the '{job.job_name}' job to the remote compute server. "
+                f"Unable to submit the '{job.job_name}' job to the remote compute server. The scheduler acknowledges "
+                f"an accepted submission with a 'Submitted batch job' line, which its answer does not carry. "
                 f"{submission.stderr.strip() or job_output}"
             )
             console.error(message=message, error=RuntimeError)
@@ -285,6 +297,9 @@ class Server:
 
         Args:
             slurm_job_id: The SLURM-assigned job ID to abort.
+
+        Raises:
+            RuntimeError: If the accounting query that reads the allocation's state fails.
         """
         if self.get_job_status(slurm_job_id=slurm_job_id) in (JobStatus.PENDING, JobStatus.RUNNING):
             self.execute_command(command=f"scancel {slurm_job_id}")
@@ -292,12 +307,29 @@ class Server:
     def abort_jobs(self, slurm_job_ids: Sequence[str]) -> None:
         """Aborts every named allocation that is still queued or running on the server.
 
+        Notes:
+            The scheduler answers a cancellation naming an allocation with which it has already finished as a success,
+            so naming a settled allocation is not a failure here. A non-zero exit therefore reports that the
+            cancellation did not reach the scheduler at all. That failure is raised the way every other command in
+            this class raises, because a caller that resets a job's tracker behind this call depends on the
+            cancellation having been issued.
+
         Args:
             slurm_job_ids: The SLURM-assigned job IDs to abort.
+
+        Raises:
+            RuntimeError: If the cancellation fails.
         """
         if not slurm_job_ids:
             return
-        self.execute_command(command=f"scancel {' '.join(shlex.quote(str(job)) for job in slurm_job_ids)}")
+        command = f"scancel {' '.join(shlex.quote(str(job)) for job in slurm_job_ids)}"
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to cancel the named allocations on the remote compute server with '{command}'. "
+                f"{result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
 
     def get_job_status(self, slurm_job_id: str) -> JobStatus:
         """Queries the managed server's SLURM manager for the runtime status of the job with the specified
@@ -313,7 +345,10 @@ class Server:
             slurm_job_id: The SLURM-assigned job ID for which to query the runtime status.
 
         Returns:
-            The current status of the job as a JobStatus enumeration value.
+            The allocation's current status, reported as blocked when its dependency can no longer be satisfied.
+
+        Raises:
+            RuntimeError: If the accounting query fails.
         """
         return self.get_job_statuses(slurm_job_ids=(slurm_job_id,))[slurm_job_id]
 
@@ -326,21 +361,36 @@ class Server:
             A pending allocation whose dependency can no longer be satisfied is reported as blocked. Accounting still
             calls that job pending, so the queue's reason field is the only source of that distinction.
 
+            A query that fails reports no state at all rather than a state per identifier. Accounting that cannot
+            answer writes nothing to standard output, which is indistinguishable from an answer that holds no row for
+            any of the requested allocations, so reporting that answer would write off every live allocation at once.
+
         Args:
             slurm_job_ids: The SLURM-assigned job IDs to query.
 
         Returns:
-            A dictionary mapping every requested job ID to its status. An allocation unknown to accounting reports
-            as ``UNKNOWN``.
+            A dictionary mapping every requested job ID to its status. An allocation for which the successful query
+            returned no row reports as ``UNRESOLVED``.
+
+        Raises:
+            RuntimeError: If the accounting query fails.
         """
         requested = [str(job_id) for job_id in slurm_job_ids]
         if not requested:
             return {}
 
-        statuses: dict[str, JobStatus] = dict.fromkeys(requested, JobStatus.UNKNOWN)
-        result = self.execute_command(
-            command=f"sacct -j {','.join(requested)} --format=JobID,State --noheader --parsable2"
-        )
+        # An identifier the answer holds no row for keeps this seed, so 'no row' stays distinguishable from a row
+        # whose state this stack does not model.
+        statuses: dict[str, JobStatus] = dict.fromkeys(requested, JobStatus.UNRESOLVED)
+        command = f"sacct -j {','.join(requested)} --format=JobID,State --noheader --parsable2"
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to read the state of the requested allocations from the remote compute server with "
+                f"'{command}'. {result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
+
         for line in result.stdout.splitlines():
             fields = line.split("|")
             if len(fields) < _EXPECTED_FIELD_COUNT:
@@ -377,11 +427,43 @@ class Server:
             if len(fields) >= _EXPECTED_FIELD_COUNT and fields[1].strip() == _BLOCKED_QUEUE_REASON
         }
 
+    def get_queued_job_ids(self) -> set[str]:
+        """Returns the identifiers of every allocation of this user that the scheduler's queue currently holds.
+
+        Notes:
+            The queue records what the scheduler holds right now, while accounting records what it has committed. The
+            controller queues an allocation before slurmdbd commits a row for it, so accounting alone cannot tell a
+            freshly queued allocation from a purged one. Reading the queue is what separates those two.
+
+            Queries the user's whole queue, since naming an allocation that the queue no longer holds makes the
+            command report an error for it.
+
+            A user holding nothing answers with an empty set, which is the truthful reading of an empty queue. A
+            command that fails raises instead, because a failure writes nothing to standard output and answering that
+            as an empty queue would report every outstanding allocation as one the scheduler no longer holds.
+
+        Returns:
+            The SLURM-assigned job IDs the queue holds.
+
+        Raises:
+            RuntimeError: If the queue query fails.
+        """
+        command = f'squeue -h -u {shlex.quote(self.user)} -o "%i"'
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to read the allocations the remote compute server's queue holds with '{command}'. "
+                f"{result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
+
+        return {identifier for line in result.stdout.splitlines() if (identifier := line.strip())}
+
     def pull(self, local_path: Path, remote_path: Path) -> None:
         """Downloads a file or directory from the remote server to the local machine.
 
-        Detects whether the remote path points to a file or directory and handles the transfer
-        accordingly. For directories, all contents are recursively downloaded.
+        Detects whether the remote path points to a file or directory and handles the transfer accordingly. For
+        directories, all contents are recursively downloaded.
 
         Args:
             local_path: The path on the local machine where the file or directory will be saved.
@@ -393,7 +475,10 @@ class Server:
         try:
             remote_stat = self._sftp.stat(path=str(remote_path))
         except FileNotFoundError:
-            message = f"The remote path {remote_path} does not exist on the server."
+            message = (
+                f"Unable to download {remote_path} from the remote compute server. The server holds no file or "
+                f"directory at that path."
+            )
             console.error(message=message, error=FileNotFoundError)
 
         if stat.S_ISDIR(remote_stat.st_mode):
@@ -405,8 +490,8 @@ class Server:
     def push(self, local_path: Path, remote_path: Path) -> None:
         """Uploads a file or directory from the local machine to the remote server.
 
-        Detects whether the local path points to a file or directory and handles the transfer
-        accordingly. For directories, all contents are recursively uploaded.
+        Detects whether the local path points to a file or directory and handles the transfer accordingly. For
+        directories, all contents are recursively uploaded.
 
         Args:
             local_path: The path to the file or directory on the local machine to upload.
@@ -416,7 +501,10 @@ class Server:
             FileNotFoundError: If the local path does not exist.
         """
         if not local_path.exists():
-            message = f"The local path {local_path} does not exist."
+            message = (
+                f"Unable to upload {local_path} to the remote compute server. The local machine holds no file or "
+                f"directory at that path."
+            )
             console.error(message=message, error=FileNotFoundError)
 
         if local_path.is_dir():
@@ -615,7 +703,7 @@ class Server:
             command: The shell command to execute on the remote server.
 
         Returns:
-            A _CommandResult instance containing stdout, stderr, and the return code of the executed command.
+            The command's standard output, its standard error output, and the exit code it reported.
         """
         _, stdout, stderr = self._client.exec_command(command=command)
         with ThreadPoolExecutor(max_workers=1) as reader:
@@ -659,16 +747,6 @@ class Server:
         before invoking the ``slf`` CLI.
         """
         return self._configuration.environment
-
-    @property
-    def cindra_configurations_directory(self) -> Path:
-        """Returns the absolute path to the cindra configuration directory under the server's data root."""
-        return self.root.joinpath("cindra_configurations")
-
-    @property
-    def dlc_projects_directory(self) -> Path:
-        """Returns the absolute path to the DeepLabCut project directory under the server's data root."""
-        return self.root.joinpath("deeplabcut_projects")
 
     def _pull_directory(self, local_path: Path, remote_path: Path) -> None:
         """Recursively downloads a directory from the remote server.

@@ -23,8 +23,8 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
         rejects a request naming a job it does not hold and would then reset nothing at all.
 
         Every named identifier is applied to every named unit. A job identifier is derived from the job name and the
-        specifier alone, so two units of one project share the identifier of the same stage, and a caller holding
-        per-unit identifiers passes one unit at a time rather than a flat set.
+        specifier alone, so two units of one project share the identifier of the same stage. A caller holding per-unit
+        identifiers passes one unit at a time rather than a flat set.
 
         Naming no identifier resets every job the unit tracks, which is how a caller returns a unit to a clean slate.
 
@@ -71,6 +71,10 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
         job from the acquired data rather than resuming a partial run. A pipeline that writes into a directory it shares
         with the acquired data owns none, so cleaning it removes its tracker alone and leaves the inputs in place.
 
+        A pipeline whose stages also write outside the unit declares those directories separately, and a cleanup
+        removes them on the same terms. Each of them names the unit being cleaned, so a tree that holds the directories
+        of several units keeps the ones the other units own.
+
         The unit is loaded rather than discovered, since a cleanup needs the unit's own locations and a unit whose
         pipeline never ran still has output to remove. A unit that cannot be loaded is reported and skipped, leaving the
         others cleaned.
@@ -98,6 +102,10 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
             )
             continue
 
+        # The directories a pipeline owns outside its unit are resolved before anything is removed, so a resolver
+        # that fails leaves the unit untouched rather than partly cleaned.
+        external = () if dispatch.external_output_paths is None else dispatch.external_output_paths(unit)
+
         # The tracker is a file and the directory that a pipeline owns is a directory, so the two are removed on
         # their own terms rather than through one branch that would have to ask which it was handed.
         tracker_path = dispatch.tracker_path(unit)
@@ -112,6 +120,11 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
         if owned is not None and owned.exists():
             removed.append({"path": str(owned), "removed_bytes": _resolve_path_size(path=owned)})
             delete_directory(directory_path=owned)
+
+        for directory in external:
+            if directory.exists():
+                removed.append({"path": str(directory), "removed_bytes": _resolve_path_size(path=directory)})
+                delete_directory(directory_path=directory)
     return removed
 
 

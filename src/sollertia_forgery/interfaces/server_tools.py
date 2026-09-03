@@ -215,22 +215,21 @@ def write_server_configuration_tool(
             )
         )
 
-    # Writes the payload to a temporary sibling file and validates by round-tripping through ServerConfiguration.
-    # Keeps the temp file ending in .yaml because YamlConfig.from_yaml rejects non-.yaml paths. The scratch file
+    # Keeps the temporary file ending in .yaml because YamlConfig.from_yaml rejects non-.yaml paths. The scratch file
     # exists to give from_yaml a path to read rather than to publish anything, so it is written with direct_write,
-    # which also creates the configuration directory. atomic_write is wrong here: nothing ever reads this path, and
-    # its flush and rename would only pay to publish a file the next statement deletes. The durable half of the
-    # operation is instance.to_yaml() below, which writes through atomic_write itself.
-    temp_path = file_path.with_name(f".{file_path.stem}.{uuid.uuid4().hex[:8]}.tmp.yaml")
+    # which also creates the configuration directory. The atomic_write helper is wrong here, because nothing ever reads
+    # this path and its flush and rename would only pay to publish a file the next statement deletes. The durable half
+    # of the operation is instance.to_yaml() below, which writes through atomic_write itself.
+    temporary_path = file_path.with_name(f".{file_path.stem}.{uuid.uuid4().hex[:8]}.tmp.yaml")
 
     try:
-        with direct_write(file_path=temp_path) as temp_file:
-            yaml.safe_dump(data=configuration_payload, stream=temp_file, sort_keys=False)
-        instance = ServerConfiguration.from_yaml(file_path=temp_path)
+        with direct_write(file_path=temporary_path) as temporary_file:
+            yaml.safe_dump(data=configuration_payload, stream=temporary_file, sort_keys=False)
+        instance = ServerConfiguration.from_yaml(file_path=temporary_path)
     except Exception as exception:
         return error_response(message=f"Unable to validate the supplied server configuration payload. {exception}")
     finally:
-        temp_path.unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
 
     try:
         instance.to_yaml(file_path=file_path)
@@ -257,10 +256,10 @@ def discover_remote_project_tool(
 ) -> dict[str, Any]:
     """Enumerates the sessions and forged datasets a project holds on the compute server, in two widening stages.
 
-    Every tool that names ``remote`` takes paths as the server itself resolves them, and this is where those paths come
-    from. A bare call reports how much the project holds alongside a ``breakdown`` naming every animal and dataset. An
-    axis holding more distinct values than the shared cap reports how many it holds in place of its counts, and
-    filtering on that axis reaches the units themselves. Naming a filter adds a page of units, each carrying the
+    Every tool that names ``remote`` takes paths as the server itself resolves them, and this is where those paths
+    originate. A bare call reports how much the project holds alongside a ``breakdown`` naming every animal and
+    dataset. An axis holding more distinct values than the shared cap reports how many it holds in place of its counts,
+    and filtering on that axis reaches the units themselves. Naming a filter adds a page of units, each carrying the
     absolute server-side path a remote tool takes as its argument.
 
     The whole tree is read in one server-side search, so the cost is one round trip rather than one per directory.
@@ -281,7 +280,7 @@ def discover_remote_project_tool(
             therefore succeeds on a project whose session directories another account owns.
 
     Returns:
-        A response dict with ``project``, the ``project_path`` the server resolves it to, ``total_sessions``,
+        A response dict with ``project``, the ``project_path`` to which the server resolves it, ``total_sessions``,
         ``total_datasets``, and a ``breakdown`` per unit kind, animal, and dataset. Carries a ``units`` list with
         ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is
         requested, where each entry gives the unit's ``unit_kind``, ``unit_path``, and either its ``animal`` and
@@ -571,7 +570,7 @@ def _parse_accounting_rows(output: str) -> list[dict[str, str]]:
         return []
 
     # The response names its own columns in its first line, so the keys follow what the scheduler answered rather than
-    # what the query asked for.
+    # the columns for which the query asked.
     keys = [_ACCOUNTING_COLUMNS.get(column, column) for column in lines[0].split(_FIELD_SEPARATOR)]
     rows = [
         dict(zip(keys, values, strict=True))

@@ -79,6 +79,11 @@ _COORDINATES: tuple[str, str, str] = ("x", "y", "likelihood")
 """The three DLC per-bodypart coordinate channels, in the order each bodypart's columns are read into its per-frame
 ``(x, y, likelihood)`` array."""
 
+_MINIMUM_COLUMN_LEVELS: int = 2
+"""The number of column-index levels a prediction frame must carry to be read as DeepLabCut output. The reader keys
+each column by its trailing (bodypart, coordinate) pair, so a frame whose columns hold fewer levels than that pair is
+not a DeepLabCut prediction frame."""
+
 type _MetricArray = NDArray[np.float64] | NDArray[np.bool_]
 """The per-frame array types the output columns take: floating-point geometry and the boolean state flags."""
 
@@ -267,7 +272,7 @@ def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str,
         ValueError: If the file does not hold a DeepLabCut prediction frame, or a requested bodypart is missing.
     """
     predictions = pd.read_hdf(path_or_buf=h5_path)
-    if not isinstance(predictions, pd.DataFrame):
+    if not isinstance(predictions, pd.DataFrame) or predictions.columns.nlevels < _MINIMUM_COLUMN_LEVELS:
         message = (
             f"Unable to read pupil tracking from '{h5_path.name}'. The file does not contain a DeepLabCut prediction "
             f"frame."
@@ -337,8 +342,8 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     )
 
     # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline against which to
-    # compare. Resolves to NaN and the openness term drops out of the flag below, leaving the eye's visibility to carry
-    # it.
+    # compare. The baseline resolves to NaN and the openness term drops out of the flag below, leaving the eye's
+    # visibility to carry it.
     confident_openness = eye_openness[eye_fit.valid]
     baseline = float(np.nanmedian(confident_openness)) if np.isfinite(confident_openness).any() else np.nan
 
@@ -353,10 +358,10 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     eye_evidence_lost = ~(eye_fit.valid & reflection_valid) | ~np.isfinite(eye_openness)
 
     # A pupil that RESOLVES is the converse case, and it is positive evidence of an open eye: a covered eye presents no
-    # pupil ring to fit, so a confident fit cannot have come from behind a lid. It therefore overrides the terms above,
-    # which infer a blink from evidence that is merely absent, and which a lost eye ring alone would otherwise let a
-    # tracking failure impersonate. The measured-openness term below stands on its own, since a fitted eye observed to
-    # be closing is an observation rather than a gap, and no evidence can be absent from it.
+    # pupil ring to fit, so a confident fit cannot have come from behind a lid. It therefore overrides the terms above.
+    # Those terms infer a blink from evidence that is merely absent, and a lost eye ring alone would otherwise let a
+    # tracking failure impersonate a blink. The measured-openness term below stands on its own, since a fitted eye
+    # observed to be closing is an observation rather than a gap, and no evidence can be absent from it.
     is_blink = (eye_evidence_lost & ~pupil_fit.valid) | (eye_openness < _BLINK_FRACTION * baseline)
     not_blink = ~is_blink
 
@@ -494,6 +499,9 @@ def _norm(vectors: NDArray[np.float64]) -> NDArray[np.float64]:
 
     Args:
         vectors: The vectors to measure.
+
+    Returns:
+        The per-frame vector lengths.
     """
     return np.hypot(vectors[:, 0], vectors[:, 1])
 
@@ -504,5 +512,8 @@ def _mask_invalid(metrics: dict[str, NDArray[np.float64]], valid: NDArray[np.boo
     Args:
         metrics: A mapping from each metric column name to its per-frame array.
         valid: The mask marking the frames whose values survive.
+
+    Returns:
+        The same mapping, with every value at a False mask position replaced by NaN.
     """
     return {name: np.where(valid, values, np.nan) for name, values in metrics.items()}

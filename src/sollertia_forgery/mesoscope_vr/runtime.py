@@ -95,7 +95,7 @@ def _export_runtime_data(
     recorded.
 
     Args:
-        messages: An iterable of ``(timestamp, payload)`` records, where each payload is a uint8 byte array.
+        messages: The decoded runtime records, in archive order.
         output_directory: The path to the directory where the extracted data is written as uncompressed .feather files.
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
             required if the processed session is an experiment session.
@@ -211,10 +211,6 @@ def _resolve_experiment_configuration(session: SessionData) -> MesoscopeExperime
     Args:
         session: The loaded session whose runtime data is being parsed.
 
-    Returns:
-        The loaded MesoscopeExperimentConfiguration instance for experiment sessions, or None for non-experiment
-        sessions.
-
     Raises:
         FileNotFoundError: If the session is an experiment session but no experiment configuration YAML file is present
             at the session's canonical location.
@@ -248,9 +244,6 @@ def _resolve_task_template(
         session: The loaded session whose runtime data is being parsed.
         experiment_configuration: The resolved experiment configuration, or None for non-experiment sessions. The
             template is loaded only when this is present, since only experiment sessions decode trial geometry.
-
-    Returns:
-        The loaded TaskTemplate instance for experiment sessions, or None for non-experiment sessions.
 
     Raises:
         FileNotFoundError: If the session is an experiment session but no VR task template YAML file is present at the

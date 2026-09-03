@@ -9,9 +9,7 @@ from ataraxis_base_utilities import console
 
 from .graph import build_batch_document
 from .hosts import plan_artifact_path, state_artifact_paths
-from .dispatch import resolve_dispatch
-from .planning import DATASET_UNIT, SESSION_UNIT
-from ..shared_assets import ProcessingPipelines
+from .dispatch import DATASET_UNIT, SESSION_UNIT, resolve_dispatch
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -70,7 +68,7 @@ def prepare_batch(
         console.error(message=message, error=ValueError)
 
     units = [Path(unit_path) for unit_path in unit_paths]
-    unit_kind = DATASET_UNIT if dispatch.pipeline is ProcessingPipelines.FORGING else SESSION_UNIT
+    unit_kind = dispatch.unit_kind
     project_root = resolve_project_root(unit_paths=units, unit_kind=unit_kind)
 
     host.materialize(project_root=project_root, unit_paths=units, unit_kind=unit_kind, replan=replan)

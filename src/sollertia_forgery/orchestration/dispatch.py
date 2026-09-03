@@ -38,6 +38,7 @@ from ..forging import (
     run_forging_pipeline,
     discover_forging_jobs,
     forging_job_prerequisites,
+    forging_cross_recording_paths,
 )
 from ..runtime import (
     RUNTIME_JOB_NAME,
@@ -87,6 +88,16 @@ BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
 )
 """The pipelines the generic batch tools support. An import-time check holds this to the dispatch table."""
 
+SESSION_UNIT: str = "session"
+"""The unit label of a pipeline whose jobs process one acquisition session."""
+
+DATASET_UNIT: str = "dataset"
+"""The unit label of a pipeline whose jobs process one forged dataset."""
+
+_UNIT_KINDS: frozenset[str] = frozenset({SESSION_UNIT, DATASET_UNIT})
+"""The unit kinds a dispatch entry may declare. An entry naming anything else describes a scope that no preparation,
+closure, or plan resolves, so the import-time check refuses it."""
+
 _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # Hashes one file per worker, streaming each in fixed chunks, so the stage is bound by how fast the storage
     # delivers bytes rather than by how fast a core hashes them.
@@ -100,7 +111,8 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     CONTROLLER_EXTRACTION_JOB_NAME: CONTROLLER_EXTRACTION_JOB_CORES,
     # A single pass over one module's extracted table, short enough that pool dispatch dominates the work itself.
     PARSE_JOB_NAME: 1,
-    # The video library owns this stage and declares the width at which its own scaling curve turns over. It picks a
+    # The video library owns this stage and declares the width past which doubling the allocation returns a few
+    # percent of a job's runtime, and at which a batch of ten recordings still fits one admission wave. It picks a
     # width per job from the archive that job reads, and the sizing pass answers with the width it picked, so this
     # figure caps that width rather than fixing one width for every job of the stage.
     CAMERA_EXTRACTION_JOB_NAME: CAMERA_EXTRACTION_JOB_CORES,
@@ -115,21 +127,19 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
-    # cindra owns the four single-recording stages, and its own resolver answers each one with the measured knee of
-    # that stage's scaling curve.
+    # cindra owns the four single-recording stages, and its own resolver answers each one with the width that stage
+    # holds while a session dispatches at its full concurrency.
     str(SingleRecordingJobNames.BINARIZE): resolve_stage_workers(job_name=SingleRecordingJobNames.BINARIZE),
     str(SingleRecordingJobNames.REGISTER): resolve_stage_workers(job_name=SingleRecordingJobNames.REGISTER),
     str(SingleRecordingJobNames.PROCESS): resolve_stage_workers(job_name=SingleRecordingJobNames.PROCESS),
     str(SingleRecordingJobNames.COMBINE): resolve_stage_workers(job_name=SingleRecordingJobNames.COMBINE),
-    # cindra's resolver reports this stage as having no parallel critical path, where quadrupling the allocation
-    # shortens a twenty-recording dataset by two percent, so the width it reports covers the deformation pool
-    # alone. The forging pipeline dispatches the stage under a name of its own, so the entry is keyed by that name
-    # while its width is cindra's.
+    # cindra's resolver reports the width this stage holds at full session concurrency, which is wide enough to open
+    # its deformation pool. The forging pipeline dispatches the stage under a name of its own, so the entry is keyed
+    # by that name while its width is cindra's.
     MULTIDAY_DISCOVERY_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.DISCOVER),
-    # cindra's resolver sizes this stage for the concurrency a host sustains rather than for a plateau, since the
-    # stage keeps shortening well past this width. The width it reports leaves room for the datasets a compute node
-    # extracts at once while still reaching a sevenfold speedup on one job, and the entry is keyed by the name under
-    # which the forging pipeline dispatches it.
+    # cindra's resolver sizes this stage for the concurrency a host sustains, so the width it reports leaves room
+    # for the datasets a compute node extracts at once. The entry is keyed by the name under which the forging
+    # pipeline dispatches it.
     MULTIDAY_EXTRACTION_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.EXTRACT),
     # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
     # threads, so the stage gains nothing from a wider allocation.
@@ -150,8 +160,8 @@ Notes:
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     # Hashes its session across readers that each stream a file, so the stage's rate is the storage's rate. Past a
-    # few jobs the readers compete for the same device and the array delivers less in total than it does to fewer of
-    # them, so a wider batch finishes the same work more slowly while holding cores that other work could use.
+    # few jobs the readers compete for the same device, and the array delivers less in total than it does to fewer of
+    # them. A wider batch therefore finishes the same work more slowly while holding cores that other work could use.
     CHECKSUM_JOB_NAME: 3,
     # Decoder throughput across the host stops climbing once enough decoders are open, and this stage opens one
     # decoder per core it holds. Three jobs at its core allocation reach that ceiling, so this limit keeps the stage
@@ -186,10 +196,10 @@ Notes:
 """
 
 _JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
-    # The plane-registration stage gates the plane job that waits on it and the plane-processing stage holds the
-    # batch's scarcest cores once the two-photon chain opens, so both give a share back. cindra declares how large
-    # that share is, and both convert spare capacity into progress, so each hold is released whenever nothing else
-    # can use what it gives up.
+    # The plane-registration stage gates the plane job that waits on it, and the plane-processing stage holds the
+    # batch's scarcest cores once the two-photon chain opens. Both therefore give a share back, and cindra declares
+    # how large that share is. Both also convert spare capacity into progress, so each hold is released whenever
+    # nothing else can use what it gives up.
     str(job_name): reservation
     for job_name in SingleRecordingJobNames
     if (reservation := RESOURCE_CLASS_BY_JOB_NAME[job_name].concurrency_reservation) is not None
@@ -226,9 +236,12 @@ class PipelineDispatch[UnitT]:
 
     pipeline: ProcessingPipelines
     """The pipeline this entry dispatches."""
+    unit_kind: str
+    """The kind of processing unit on which this pipeline's jobs operate, which is one of ``SESSION_UNIT`` or
+    ``DATASET_UNIT``. Every caller that resolves a unit's project root, its artifacts, or its plan reads this rather
+    than the pipeline's own identity."""
     load: Callable[[Path], UnitT]
-    """Loads the processing unit from its root directory, reading its markers alone. A caller that needs only the
-    unit's own locations uses this, so locating a tracker or an output directory never runs job resolution."""
+    """Loads the processing unit from its root directory, reading its markers alone."""
     discover: Callable[[Path], tuple[UnitT, list[tuple[str, str]], list[tuple[str, str]]]]
     """The job resolver returning the loaded unit, the job universe, and the possible subset."""
     worker: Callable[..., None]
@@ -250,14 +263,14 @@ class PipelineDispatch[UnitT]:
     that a dependency owns answers with the width that dependency's own sizing pass picked. A job whose input cannot
     be read raises, since a job nothing can size is a job the unit cannot run."""
     command: Callable[[GenericPendingJob], tuple[str, ...]]
-    """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
-    backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
-    allocation."""
+    """Renders the command line that runs one job on a host holding the data, as an argument vector."""
     prime: Callable[[Path], None] | None = None
     """Materializes whatever a unit needs before its jobs can be resolved, or None for a pipeline that needs nothing.
-    A preparation pass calls this before ``discover``, keeping resolution read-only for a pipeline whose job model
-    lives in state a dependency writes. Priming is idempotent, so a unit that already carries what it needs is left
-    untouched."""
+    Priming is idempotent, so a unit that already carries what it needs is left untouched."""
+    external_output_paths: Callable[[UnitT], tuple[Path, ...]] | None = None
+    """Resolves the directories this pipeline owns outside the unit it processes, which a cleanup removes alongside
+    the unit's own output, or None for a pipeline that writes nothing outside its unit. Each resolved path names a
+    directory this pipeline alone writes, since a cleanup removes it whole."""
 
 
 def run_batch_job(job: GenericPendingJob) -> None:
@@ -300,9 +313,9 @@ def resolve_job_command(job: GenericPendingJob) -> tuple[str, ...]:
     """Renders the command line that runs one prepared job on a host holding the data it processes.
 
     Notes:
-        Rendered from the same dispatch table on which the in-process worker routes, so a job runs the same stage at
-        the same width whichever way it is executed. Progress reporting is suppressed, since a scheduled allocation
-        writes its output to a log file rather than to a terminal.
+        Rendered from the same dispatch table on which the in-process worker routes, so a job runs the same stage
+        whichever way it is executed. Progress reporting is suppressed, since a scheduled allocation writes its output
+        to a log file rather than to a terminal.
 
     Args:
         job: The pending job carrying its pipeline, its target job identifier, and its planned cores.
@@ -337,6 +350,35 @@ def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch[An
     except ValueError:
         return None
     return _pipeline_dispatch().get(member)
+
+
+def resolve_unit_kind(pipeline: str | ProcessingPipelines) -> str:
+    """Resolves the kind of processing unit on which one batch pipeline's jobs operate.
+
+    Notes:
+        An identifier the dispatch table does not carry answers with ``SESSION_UNIT``, since every artifact this
+        library lays out for a pipeline it cannot resolve is written per session.
+
+    Args:
+        pipeline: The pipeline whose unit kind is resolved.
+
+    Returns:
+        The unit kind the pipeline's dispatch entry declares.
+    """
+    dispatch = resolve_dispatch(pipeline=pipeline)
+    return SESSION_UNIT if dispatch is None else dispatch.unit_kind
+
+
+def resolve_unit_dispatches(unit_kind: str) -> tuple[PipelineDispatch[Any], ...]:
+    """Resolves the dispatch entry of every batch pipeline whose jobs operate on one kind of processing unit.
+
+    Args:
+        unit_kind: The unit kind whose pipelines are resolved.
+
+    Returns:
+        The dispatch entry of each pipeline declaring that unit kind, in the order the dispatch table holds them.
+    """
+    return tuple(dispatch for dispatch in _pipeline_dispatch().values() if dispatch.unit_kind == unit_kind)
 
 
 def resolve_job_cores(job_name: str) -> int:
@@ -660,6 +702,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
     return {
         ProcessingPipelines.CHECKSUM: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.CHECKSUM,
+            unit_kind=SESSION_UNIT,
             load=_load_session,
             discover=discover_checksum_jobs,
             worker=_run_checksum_job,
@@ -674,6 +717,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
         ),
         ProcessingPipelines.RUNTIME: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.RUNTIME,
+            unit_kind=SESSION_UNIT,
             load=_load_session,
             discover=discover_runtime_jobs,
             worker=_run_runtime_job,
@@ -686,6 +730,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
         ),
         ProcessingPipelines.MICROCONTROLLER: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.MICROCONTROLLER,
+            unit_kind=SESSION_UNIT,
             load=_load_session,
             discover=discover_microcontroller_jobs,
             worker=_run_microcontroller_job,
@@ -698,6 +743,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
         ),
         ProcessingPipelines.VIDEO: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.VIDEO,
+            unit_kind=SESSION_UNIT,
             load=_load_session,
             discover=discover_video_jobs,
             worker=_run_video_job,
@@ -710,6 +756,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
         ),
         ProcessingPipelines.TWO_PHOTON: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.TWO_PHOTON,
+            unit_kind=SESSION_UNIT,
             load=_load_session,
             discover=discover_two_photon_jobs,
             worker=_run_two_photon_job,
@@ -725,6 +772,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
         ),
         ProcessingPipelines.FORGING: PipelineDispatch[DatasetData](
             pipeline=ProcessingPipelines.FORGING,
+            unit_kind=DATASET_UNIT,
             load=_load_dataset,
             discover=discover_forging_jobs,
             worker=_run_forging_job,
@@ -735,15 +783,19 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             unit_name=lambda dataset: dataset.name,
             size_jobs=size_dataset_jobs,
             command=_forging_command,
+            # The cross-recording stages write each session's aligned fluorescence into that session's own cindra
+            # output, so the dataset owns a directory inside every source session it names.
+            external_output_paths=forging_cross_recording_paths,
         ),
     }
 
 
 def _assert_dispatch_coverage() -> None:
-    """Verifies that every pipeline that the batch tools advertise has a dispatch entry.
+    """Verifies that every pipeline the batch tools advertise has a dispatch entry declaring a known unit kind.
 
     Raises:
-        RuntimeError: If a supported pipeline has no dispatch entry, or an entry names an unsupported pipeline.
+        RuntimeError: If a supported pipeline has no dispatch entry, if an entry names an unsupported pipeline, or if
+            an entry declares a unit kind this library does not resolve.
     """
     entries = frozenset(_pipeline_dispatch())
     if entries != BATCH_PIPELINES:
@@ -751,6 +803,16 @@ def _assert_dispatch_coverage() -> None:
             f"Unable to validate the pipeline dispatch table. Every pipeline named in BATCH_PIPELINES must have a "
             f"dispatch entry and no entry may name a pipeline outside it, but the sets differ by "
             f"{sorted(member.value for member in entries ^ BATCH_PIPELINES)}."
+        )
+        console.error(message=message, error=RuntimeError)
+
+    mislabeled = sorted(
+        member.value for member, entry in _pipeline_dispatch().items() if entry.unit_kind not in _UNIT_KINDS
+    )
+    if mislabeled:
+        message = (
+            f"Unable to validate the pipeline dispatch table. Every entry must declare one of "
+            f"{sorted(_UNIT_KINDS)} as the unit its jobs operate on, but {mislabeled} declare another unit kind."
         )
         console.error(message=message, error=RuntimeError)
 

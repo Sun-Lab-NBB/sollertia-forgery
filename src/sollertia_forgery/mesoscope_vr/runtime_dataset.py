@@ -30,8 +30,8 @@ value of UInt16 so it sits outside the expected trial ID range for any realistic
 
 _SYSTEM_STATE_IDLE: int = 0
 """The system state code the acquisition system reports while it is not conducting a session. Every session type
-leaves this state once, at its canonical start, so the first entry carrying a different code marks the moment the
-session's data begins."""
+leaves this state first at its canonical start and returns to it on each pause, so the first entry carrying a different
+code marks the moment the session's data begins."""
 
 _RUNTIME_STATE_IDLE: int = 0
 """The runtime state code for the implicit idle state, which the experiment configuration never lists."""

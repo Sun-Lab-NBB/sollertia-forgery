@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from dataclasses import field, dataclass
+from dataclasses import field, replace, dataclass
 
 from filelock import FileLock
 from ataraxis_time import TimestampFormats, TimestampPrecisions, get_timestamp
 from ataraxis_data_structures import YamlConfig
 
-from ..server import TERMINAL_JOB_STATUSES, JobStatus, remote_state_path
+from ..server import remote_state_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,8 +66,8 @@ class SubmissionBatch:
     batch_id: str = ""
     """The identifier the preparation issued, which also names the batch's directory on the server."""
     batch_ids: list[str] = field(default_factory=list)
-    """Every prepared batch this submission dispatched, since one submission may span several. Empty for a record
-    written before the field existed, which covers the single batch that ``batch_id`` names."""
+    """Every prepared batch this submission dispatched, since one submission may span several. An empty list covers
+    the single batch that ``batch_id`` names."""
     batch_directory: str = ""
     """The path, on the server, to the directory holding this batch's scripts and logs."""
     submitted_at: int = 0
@@ -84,7 +84,7 @@ class SubmissionBatch:
 
     @property
     def covered_batch_ids(self) -> list[str]:
-        """Returns every prepared batch this submission dispatched. Closure snapshots an outcome for each."""
+        """Returns every prepared batch this submission dispatched."""
         return list(self.batch_ids) if self.batch_ids else [self.batch_id]
 
 
@@ -107,17 +107,6 @@ class SubmissionLedger(YamlConfig):
         return next((batch for batch in self.batches if batch.batch_id == batch_id), None)
 
 
-def _ledger_path() -> Path:
-    """Returns the path to the submission ledger.
-
-    This is the single source of the ledger's location, so every reader and writer derives the same path.
-
-    Returns:
-        The path to the ledger file under the Sollertia platform working directory.
-    """
-    return remote_state_path().joinpath(_LEDGER_FILENAME)
-
-
 def read_ledger() -> SubmissionLedger:
     """Reads the submission ledger, treating an absent ledger as holding no batches.
 
@@ -130,11 +119,20 @@ def read_ledger() -> SubmissionLedger:
     return SubmissionLedger.from_yaml(file_path=path)
 
 
-def record_batch(batch: SubmissionBatch) -> SubmissionLedger:
+def record_batch(batch: SubmissionBatch, resubmitted: Sequence[tuple[str, str]] | None = None) -> SubmissionLedger:
     """Records one submitted batch, replacing any earlier record of the same batch.
+
+    Notes:
+        Naming the jobs a submission re-submitted merges the record instead of replacing it outright. Every allocation
+        the earlier record held for a job this submission did not cover is carried ahead of the new ones. The merge
+        lives here rather than in the caller because the entries it carries forward are then read under the same lock
+        that writes them. An allocation a concurrent writer added to the same batch is therefore carried rather than
+        dropped by a list read before the lock was taken.
 
     Args:
         batch: The batch to record.
+        resubmitted: The unit path and job identifier of each job this submission re-submitted, which are the entries
+            the earlier record must not carry forward. Leave as None to replace the earlier record outright.
 
     Returns:
         The ledger as it now stands on disk.
@@ -144,63 +142,27 @@ def record_batch(batch: SubmissionBatch) -> SubmissionLedger:
     """
     with _ledger_lock():
         ledger = read_ledger()
+        merged = batch
+        already_recorded = ledger.resolve_batch(batch_id=batch.batch_id)
+        if resubmitted is not None and already_recorded is not None:
+            covered = set(resubmitted)
+            carried = [
+                entry for entry in already_recorded.submissions if (entry.unit_path, entry.job_id) not in covered
+            ]
+            merged = replace(batch, submissions=[*carried, *batch.submissions])
         ledger.batches = [recorded for recorded in ledger.batches if recorded.batch_id != batch.batch_id]
-        ledger.batches.append(batch)
+        ledger.batches.append(merged)
         _save_ledger(ledger=ledger)
         return ledger
 
 
-def batch_is_settled(batch: SubmissionBatch, statuses: dict[str, JobStatus]) -> bool:
-    """Returns True when every allocation the batch holds has reached a state it never leaves.
-
-    Notes:
-        An allocation that the status map does not cover counts as unfinished, so a partial query never reports as
-        settled a batch it did not fully observe.
-
-    Args:
-        batch: The batch to test.
-        statuses: The observed state of each allocation, keyed by its scheduler identifier.
-    """
-    return bool(batch.submissions) and all(
-        statuses.get(submission.slurm_job_id) in TERMINAL_JOB_STATUSES for submission in batch.submissions
-    )
-
-
-def _retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
-    """Drops every batch whose allocations have all reached a state they never leave.
-
-    Notes:
-        A finished batch is dropped because the ledger names outstanding allocations alone. What its jobs produced is
-        read from the project job artifact.
-
-        An allocation that the query did not cover counts as unfinished, so a partial query never retires a batch it
-        did not fully observe.
-
-    Args:
-        statuses: The observed state of each allocation, keyed by its scheduler identifier.
-
-    Returns:
-        The identifiers of the batches that were retired.
-
-    Raises:
-        Timeout: If the ledger's lock cannot be acquired within the timeout period.
-    """
-    if not statuses:
-        return []
-
-    with _ledger_lock():
-        ledger = read_ledger()
-        retired = [batch.batch_id for batch in ledger.batches if batch_is_settled(batch=batch, statuses=statuses)]
-        if not retired:
-            return []
-        settled_ids = set(retired)
-        ledger.batches = [batch for batch in ledger.batches if batch.batch_id not in settled_ids]
-        _save_ledger(ledger=ledger)
-        return retired
-
-
 def forget_batches(batch_ids: Sequence[str]) -> list[str]:
-    """Drops the named batches from the ledger, whatever state their allocations hold.
+    """Drops the named batches from the submission ledger, whatever state their allocations hold.
+
+    Notes:
+        This clears the ledger alone, which is the record of the allocations this host has outstanding on the
+        scheduler. The prepared documents and the recorded outcomes live in the separate batch registry that
+        ``forget_batch_records`` clears.
 
     Args:
         batch_ids: The identifiers of the batches to drop.
@@ -241,6 +203,15 @@ def current_timestamp() -> int:
     stack.
     """
     return int(get_timestamp(output_format=TimestampFormats.INTEGER, precision=TimestampPrecisions.MICROSECOND))
+
+
+def _ledger_path() -> Path:
+    """Returns the path to the submission ledger.
+
+    Returns:
+        The path to the ledger file under the Sollertia platform working directory.
+    """
+    return remote_state_path().joinpath(_LEDGER_FILENAME)
 
 
 def _save_ledger(ledger: SubmissionLedger) -> None:

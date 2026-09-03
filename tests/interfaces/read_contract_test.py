@@ -157,14 +157,12 @@ def test_the_default_page_shrinks_when_detail_is_requested() -> None:
 
 
 def test_counting_values_reports_absent_subjects_as_a_category() -> None:
-    """Verifies that a null is itself a value on which a caller filters, so it is counted rather than dropped.
-
-    A breakdown is read top to bottom as the list of values on which an axis can be filtered, so the counts are
-    reported in value order rather than in the order the column happens to hold them.
-    """
+    """Verifies that a null is itself a value on which a caller filters, so it is counted rather than dropped."""
     counts = count_values(values=["a", "a", None, "b"])
 
     assert counts == {"a": 2, "b": 1, "none": 1}
+    # A breakdown is read top to bottom as the list of values on which an axis can be filtered, so the counts are
+    # reported in value order rather than in the order the column happens to hold them.
     assert list(counts) == ["a", "b", "none"]
 
 

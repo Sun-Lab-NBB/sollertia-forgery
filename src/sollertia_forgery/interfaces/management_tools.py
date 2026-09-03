@@ -13,7 +13,9 @@ from sollertia_shared_assets import ProcessingTrackers
 from ataraxis_data_structures import TrackerStatus, ProcessingTracker
 
 from ..managing import (
+    MANIFEST_AXES,
     MANIFEST_JOB_NAME,
+    MANIFEST_SEMI_FIELDS,
     ProjectManifest,
     project_jobs_path,
     project_manifest_path,
@@ -43,37 +45,6 @@ from .host_resolution import (
     unsupported_host_message,
 )
 
-_MANIFEST_AXES: tuple[str, ...] = (
-    "animal",
-    "type",
-    "system",
-    "complete",
-    "integrity",
-    "runtime",
-    "microcontroller",
-    "video",
-    "two_photon",
-)
-"""The manifest columns by which a caller may filter sessions, and the axes its breakdown counts. The five pipeline
-columns each hold a 0 or a 1, so their breakdown reports how many sessions have finished that pipeline."""
-
-_MANIFEST_SEMI_FIELDS: tuple[str, ...] = (
-    "animal",
-    "session",
-    "session_path",
-    "date",
-    "type",
-    "system",
-    "complete",
-    "integrity",
-    "runtime",
-    "microcontroller",
-    "video",
-    "two_photon",
-)
-"""The session fields a semi-detail listing carries, which is the session's identity and whether each of its
-pipelines finished."""
-
 _MANIFEST_DETAIL_FIELDS: tuple[str, ...] = ("notes",)
 """The session field detail adds, which is the free-text experimenter notes."""
 
@@ -81,8 +52,8 @@ _JOB_AXES: tuple[str, ...] = ("animal", "pipeline", "job_name", "status")
 """The job columns by which a caller may filter, and the axes the job breakdown counts."""
 
 _JOB_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "pipeline", "job_name", "specifier", "status", "job_id")
-"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset targets,
-so a listing that omitted it could not be acted on."""
+"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset
+targets."""
 
 _JOB_DETAIL_FIELDS: tuple[str, ...] = ("executor_id", "error_message", "started_at", "completed_at")
 """The job fields detail adds, which are the provenance and timing a caller reads when examining one job closely."""
@@ -101,8 +72,8 @@ def generate_project_manifest_tool(project_path: str, host: str = "local") -> di
         project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
             ``remote``.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
-            A remote generation reports the row counts it produced, and the artifacts themselves are mirrored onto this
-            machine the first time a read tool is called with ``host='remote'``.
+            A remote generation reports the row counts it produced, and the artifacts themselves stay on the server
+            until a read tool is called with ``host='remote'``, which mirrors them onto this machine.
 
     Returns:
         A response dict with ``project_path``, ``host``, ``manifest_path``, ``jobs_path``, the ``total_jobs`` the job
@@ -209,7 +180,7 @@ def read_project_manifest_tool(
         project_path=str(directory),
         manifest_path=str(manifest_path),
         total_sessions=frame.height,
-        breakdown=frame_breakdown(frame=frame, axes=_MANIFEST_AXES),
+        breakdown=frame_breakdown(frame=frame, axes=MANIFEST_AXES),
     )
 
     selectors: dict[str, Any] = {"animal": animal, "type": session_type, "system": system}
@@ -226,7 +197,7 @@ def read_project_manifest_tool(
             return rejection
         matched = matched.filter(pl.col(column).cast(pl.String) == str(value))
 
-    fields = (*_MANIFEST_SEMI_FIELDS, *_MANIFEST_DETAIL_FIELDS) if detailed else _MANIFEST_SEMI_FIELDS
+    fields = (*MANIFEST_SEMI_FIELDS, *_MANIFEST_DETAIL_FIELDS) if detailed else MANIFEST_SEMI_FIELDS
     window = resolve_page(
         total=matched.height,
         limit=resolve_detail_limit(limit=limit, detailed=detailed),
@@ -406,7 +377,9 @@ def _generate_remote_manifest(project_root: Path, timer: PrecisionTimer) -> dict
         timer: The timer instantiated when generation began.
 
     Returns:
-        The response dict the calling tool returns.
+        A response dict with the ``project_path`` regenerated, the ``host`` it ran on, the ``manifest_path`` and
+        ``jobs_path`` the server now holds, the ``total_jobs`` the job artifact records, and the ``elapsed_seconds``
+        generation took. A failure instead carries the ``message`` describing it.
     """
     try:
         with connect_to_server() as server:

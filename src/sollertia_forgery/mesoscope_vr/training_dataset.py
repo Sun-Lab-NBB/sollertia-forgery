@@ -18,8 +18,8 @@ from .video_dataset import (
 )
 from ..shared_assets import AssemblyGeometry
 from .runtime_dataset import clip_to_session_bounds
-from .behavior_dataset import assemble_behavior_dataset
 from .assembly_sources import resolve_mesoscope_assembly_sources
+from .behavior_dataset import assemble_behavior_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -103,14 +103,15 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
 
 
 def resolve_mesoscope_assembly_geometry(session: SessionData) -> AssemblyGeometry:
-    """Reports the shape the assembly of a Mesoscope-VR session that records no imaging takes.
+    """Reports the shape taken by the assembly of a Mesoscope-VR session that records no imaging.
 
-    States the two heights ``assemble_training_dataset`` works at: the reference clock its columns are placed on, and
-    the clock each source it reads was sampled on. The two are different heights and neither bounds the other, since
-    the reference clock is the slowest camera's while the sources include every faster camera the session recorded.
+    States the two heights at which ``assemble_training_dataset`` works: the reference clock on which its columns are
+    placed, and the clock on which each source it reads was sampled. The two are different heights and neither bounds
+    the other, since the reference clock is the slowest camera's while the sources include every faster camera the
+    session recorded.
 
     Notes:
-        The reference clock is resolved through the same selection the assembler settles on, so the height reported
+        The reference clock is resolved through the same selection the assembler itself makes, so the height reported
         here is the height of the frame that assembler builds rather than that of any other clock the session holds.
 
         The sources are reported through the system's own source resolver rather than enumerated again here, so the
@@ -125,7 +126,7 @@ def resolve_mesoscope_assembly_geometry(session: SessionData) -> AssemblyGeometr
         session: The loaded session whose assembly geometry is measured.
 
     Returns:
-        The samples the reference clock holds and the samples each source the assembly reads holds.
+        The samples the reference clock holds, and the samples that each source read by the assembly holds.
 
     Raises:
         FileNotFoundError: If no camera timestamp feather with at least two frames spanning a positive duration is

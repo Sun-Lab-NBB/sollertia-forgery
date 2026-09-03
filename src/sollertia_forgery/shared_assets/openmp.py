@@ -30,7 +30,8 @@ _CONDA_PREFIX_VARIABLE: str = "CONDA_PREFIX"
 """The environment variable naming the active conda environment, whose lib directory holds an llvm-openmp runtime."""
 
 _VENDORED_RUNTIME_PATTERN: str = f"*/.dylibs/{_OPENMP_LIBRARY_NAME}"
-"""Matches the OpenMP runtimes that delocate vendors into the macOS wheels of scikit-learn, torch, and their peers.
+"""The glob pattern matching the OpenMP runtimes that delocate vendors into the macOS wheels of scikit-learn, torch,
+and their peers.
 
 A vendored runtime is examined last, because linking it ties the threading layer to the lifecycle of the distribution
 that carries it. Upgrading or removing that distribution leaves the link dangling.
@@ -45,7 +46,9 @@ while the Apple Silicon Homebrew prefix is not.
 """
 
 _VERIFICATION_SCRIPT: str = f"import ctypes; ctypes.CDLL({_OPENMP_LIBRARY_NAME!r})"
-"""Loads the OpenMP runtime from a fresh interpreter, which reads the loader search path as it stands after linking."""
+"""The script that loads the OpenMP runtime from a fresh interpreter, which reads the loader search path as it stands
+after linking.
+"""
 
 _VERIFICATION_TIMEOUT: float = 60.0
 """The seconds to wait for the post-link verification before treating the runtime as unloadable."""
@@ -342,10 +345,15 @@ def _verify_runtime_loadable() -> bool:
         True when the fresh interpreter loads the runtime, and False when it does not.
     """
     # The command is this interpreter running a module-level literal, so no part of it comes from a caller.
-    result = subprocess.run(  # noqa: S603 - the executable and the script are both fixed by this module.
-        args=[sys.executable, "-c", _VERIFICATION_SCRIPT],
-        capture_output=True,
-        check=False,
-        timeout=_VERIFICATION_TIMEOUT,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 - the executable and the script are both fixed by this module.
+            args=[sys.executable, "-c", _VERIFICATION_SCRIPT],
+            capture_output=True,
+            check=False,
+            timeout=_VERIFICATION_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        # A loader that has not answered within the timeout is one on which this host cannot rely, so the wait
+        # resolves the same way a failed load does rather than aborting the whole request.
+        return False
     return result.returncode == 0

@@ -15,6 +15,7 @@ from cindra import (
     MULTI_RECORDING_CONFIGURATION_FILENAME,
     MultiRecordingJobNames,
     prime_dataset,
+    resolve_dataset_path,
     execute_multi_recording_job,
     resolve_multi_recording_jobs,
     resolve_multi_recording_prerequisites,
@@ -76,8 +77,8 @@ the tracker job name.
 
 Notes:
     Only assembly declares a ceiling. It holds one core per job, so the ceiling sets the width of the pool it opens. The
-    cross-recording jobs exist for two-photon sessions alone, and each of them takes a wide core allocation of its own,
-    so the core budget already bounds how many run at once and no separate ceiling applies.
+    cross-recording jobs exist for two-photon sessions alone, and cindra sizes each of them itself and declares no
+    ceiling for either of their resource classes, so the core budget alone bounds how many run at once.
 """
 
 _MULTIDAY_JOB_NAMES: dict[MultiRecordingJobNames, str] = {
@@ -89,8 +90,9 @@ name.
 
 Notes:
     cindra owns the cross-recording pipeline, while the forging tracker interleaves those stages with the per-session
-    assembly stage this library owns and records all of them under its own names. This table is the only place the two
-    vocabularies meet, so composing another cindra stage into the forging graph is a matter of naming it here.
+    assembly stage this library owns and records all of them under its own names. This table is where those tracker
+    names are minted, so composing another cindra stage into the forging graph also needs its core allocation in
+    ``orchestration/dispatch.py`` and its sizing branch in ``orchestration/footprints.py``.
 """
 
 
@@ -248,9 +250,6 @@ def run_forging_pipeline(
         when the resolved worker count or the outstanding session count is one. In remote mode (``job_id`` is
         provided) only the single job matching the identifier runs, so an external scheduler drives cross-job
         ordering by dispatching each identifier in prerequisite order.
-
-        ``define_forging_dataset`` owns the hierarchy in both modes, so the session set, ``force_recreate``, and
-        ``recreate_animals`` take effect there alone.
 
     Args:
         name: The unique name of the dataset, which ``define_forging_dataset`` has already built.
@@ -426,6 +425,108 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     return dataset, universe, list(universe)
 
 
+def forging_cross_recording_paths(dataset: DatasetData) -> tuple[Path, ...]:
+    """Resolves the cross-recording output one dataset holds inside each of the source sessions it names.
+
+    Notes:
+        The cross-recording stages write each session's aligned fluorescence into that session's own cindra output
+        rather than into the dataset, so the dataset owns a directory inside every source session it names. That
+        output describes the registration this dataset performed and nothing else, so it goes wherever the dataset
+        goes.
+
+        The directory is named for this dataset alone, through the same qualified name the pipeline configures and
+        through cindra's own layout resolver. A session belonging to several datasets therefore keeps the sibling
+        directory each of the others owns, alongside its single-recording output.
+
+        A session whose marker cannot be read is passed over, since a source session that no longer resolves holds no
+        directory this dataset can name.
+
+    Args:
+        dataset: The loaded dataset whose cross-recording output to locate.
+
+    Returns:
+        The cross-recording output directory this dataset owns in each source session that resolves, in the order the
+        dataset holds its sessions.
+    """
+    project_root = dataset.dataset_data_path.parents[1]
+    paths: list[Path] = []
+    for entry in dataset.sessions:
+        try:
+            session = SessionData.load(session_path=project_root.joinpath(entry.animal, entry.session))
+        except Exception as exception:
+            console.echo(
+                message=f"Unable to locate the source session '{entry.session}' of dataset '{dataset.name}'. "
+                f"{exception}",
+                level=LogLevel.WARNING,
+            )
+            continue
+        paths.append(
+            resolve_dataset_path(
+                output_root=session.processed_data_path,
+                dataset_name=multi_recording_dataset_name(animal_id=entry.animal, dataset_name=dataset.name),
+            )
+        )
+    return tuple(paths)
+
+
+def forging_job_prerequisites(
+    dataset: DatasetData, universe: list[tuple[str, str]]
+) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Returns the intra-pipeline job ordering for the forging pipeline.
+
+    Notes:
+        cindra owns the ordering of the cross-recording stretch, so the prerequisites of every discovery and
+        extraction job come from its resolver rather than from a chain spelled out here. The resolver orders one
+        animal's recordings at a time, while the universe interleaves every animal. The cross-recording jobs are
+        therefore regrouped under the animal that owns them before the resolver runs over each group.
+
+        This library owns the assembly stage, which reads the aligned fluorescence its session's extraction wrote, so
+        that edge is added on top of the ordering cindra supplies. A dataset needing no multi-day processing carries
+        assembly jobs that depend on nothing.
+
+        The dataset supplies the animal to which each session belongs, which the universe pairs do not carry, since an
+        extraction is specified by its session while its discovery is specified by its animal. A job whose animal is no
+        longer in the dataset keeps an empty prerequisite tuple, so every job in the universe carries an entry.
+
+    Args:
+        dataset: The resolved dataset from which the universe was built.
+        universe: The job set over which to build ordering, as returned by ``_build_forging_universe``.
+
+    Returns:
+        A mapping of each job to its tuple of prerequisite jobs, following the discovery to extraction to assembly
+        chain.
+    """
+    animal_of_session = {entry.session: entry.animal for entry in dataset.sessions}
+    tracked = set(universe)
+
+    sessions_by_animal: dict[str, list[str]] = {}
+    for job_name, specifier in universe:
+        if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
+            sessions_by_animal.setdefault(specifier, [])
+        elif job_name == MULTIDAY_EXTRACTION_JOB_NAME and specifier in animal_of_session:
+            sessions_by_animal.setdefault(animal_of_session[specifier], []).append(specifier)
+
+    ordering: dict[tuple[str, str], tuple[tuple[str, str], ...]] = dict.fromkeys(universe, ())
+    for animal, sessions in sessions_by_animal.items():
+        # Narrowed to the stages the universe actually tracks, so a job the universe omits is not resolved into a
+        # prerequisite of the jobs that follow it.
+        jobs = [
+            job
+            for job in resolve_multi_recording_jobs(recording_ids=sessions)
+            if _forging_job(animal=animal, job=job) in tracked
+        ]
+        for job, prerequisites in resolve_multi_recording_prerequisites(jobs=jobs).items():
+            ordering[_forging_job(animal=animal, job=job)] = tuple(
+                _forging_job(animal=animal, job=prerequisite) for prerequisite in prerequisites
+            )
+
+    extractions = {specifier for job_name, specifier in universe if job_name == MULTIDAY_EXTRACTION_JOB_NAME}
+    for job_name, specifier in universe:
+        if job_name == FORGING_JOB_NAME and specifier in extractions:
+            ordering[job_name, specifier] = ((MULTIDAY_EXTRACTION_JOB_NAME, specifier),)
+    return ordering
+
+
 def _materialize_multiday_plan(
     dataset: DatasetData, project_root: Path, *, display_progress: bool, animals: Collection[str] | None = None
 ) -> dict[str, tuple[Path, list[str]]]:
@@ -436,8 +537,8 @@ def _materialize_multiday_plan(
         per animal. The acquisition system's resolver decides whether the stage applies, and an animal whose
         resolver returns None is omitted.
 
-        Writing a configuration replaces the file through a rename under no lock, so only ``define_forging_dataset``
-        calls this. Every other invocation reads the plan back through ``_load_multiday_plan``.
+        Writing a configuration replaces the file through a rename under no lock, so materializing the plan tolerates
+        no concurrent writer.
 
         Each materialized animal has every one of its sessions loaded from the project root, so restricting the call
         to the animals that need one keeps a dataset's growth independent of the source data of the animals it already
@@ -550,64 +651,6 @@ def _build_forging_universe(
     universe: list[tuple[str, str]] = list(_resolve_multiday_stages(multiday_plan=multiday_plan))
     universe.extend((FORGING_JOB_NAME, entry.session) for entry in dataset.sessions)
     return universe
-
-
-def forging_job_prerequisites(
-    dataset: DatasetData, universe: list[tuple[str, str]]
-) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
-    """Returns the intra-pipeline job ordering for the forging pipeline.
-
-    Notes:
-        cindra owns the ordering of the cross-recording stretch, so the prerequisites of every discovery and
-        extraction job come from its resolver rather than from a chain spelled out here. cindra orders one animal's
-        recordings at a time while the universe interleaves every animal, so the cross-recording jobs are regrouped
-        under the animal that owns them before the resolver runs over each group.
-
-        This library owns the assembly stage, which reads the aligned fluorescence its session's extraction wrote, so
-        that edge is added on top of the ordering cindra supplies. A dataset needing no multi-day processing carries
-        assembly jobs that depend on nothing.
-
-        The dataset supplies the animal to which each session belongs, which the universe pairs do not carry, since an
-        extraction is specified by its session while its discovery is specified by its animal. A job whose animal is no
-        longer in the dataset keeps an empty prerequisite tuple, so every job in the universe carries an entry.
-
-    Args:
-        dataset: The resolved dataset from which the universe was built.
-        universe: The job set over which to build ordering, as returned by ``_build_forging_universe``.
-
-    Returns:
-        A mapping of each job to its tuple of prerequisite jobs, following the discovery to extraction to assembly
-        chain.
-    """
-    animal_of_session = {entry.session: entry.animal for entry in dataset.sessions}
-    tracked = set(universe)
-
-    sessions_by_animal: dict[str, list[str]] = {}
-    for job_name, specifier in universe:
-        if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
-            sessions_by_animal.setdefault(specifier, [])
-        elif job_name == MULTIDAY_EXTRACTION_JOB_NAME and specifier in animal_of_session:
-            sessions_by_animal.setdefault(animal_of_session[specifier], []).append(specifier)
-
-    ordering: dict[tuple[str, str], tuple[tuple[str, str], ...]] = dict.fromkeys(universe, ())
-    for animal, sessions in sessions_by_animal.items():
-        # Narrowed to the stages the universe actually tracks, so a job the universe omits is not resolved into a
-        # prerequisite of the jobs that follow it.
-        jobs = [
-            job
-            for job in resolve_multi_recording_jobs(recording_ids=sessions)
-            if _forging_job(animal=animal, job=job) in tracked
-        ]
-        for job, prerequisites in resolve_multi_recording_prerequisites(jobs=jobs).items():
-            ordering[_forging_job(animal=animal, job=job)] = tuple(
-                _forging_job(animal=animal, job=prerequisite) for prerequisite in prerequisites
-            )
-
-    extractions = {specifier for job_name, specifier in universe if job_name == MULTIDAY_EXTRACTION_JOB_NAME}
-    for job_name, specifier in universe:
-        if job_name == FORGING_JOB_NAME and specifier in extractions:
-            ordering[job_name, specifier] = ((MULTIDAY_EXTRACTION_JOB_NAME, specifier),)
-    return ordering
 
 
 def _forging_job(animal: str, job: tuple[str, str]) -> tuple[str, str]:
@@ -783,7 +826,7 @@ def _execute_remote_forging_job(
 
     Notes:
         The resolved cross-recording stages carry everything cindra needs to run any one of them on its own, so a job
-        that they name is dispatched through them and every other job is an assembly job this library runs itself.
+        that they name is dispatched through them. Every other job is an assembly job this library runs itself.
 
     Args:
         job_id: The hexadecimal identifier of the job to execute.
@@ -918,9 +961,9 @@ def _execute_jobs_parallel(
     first_exception: Exception | None = None
 
     # Each assembly child re-imports and sizes its library thread pools before any of this code runs inside it, so the
-    # caps are placed around the pool's construction rather than inside its workers. numba is the exception: it
-    # latches its ceiling while it is imported and refuses a later disagreement, so the environment never reaches it
-    # and each child pins it through its own runtime setter in the pool initializer instead.
+    # caps are placed around the pool's construction rather than inside its workers. Numba is the exception, since it
+    # latches its ceiling while it is imported and refuses a later disagreement. The environment therefore never reaches
+    # numba, and each child pins it through its own runtime setter in the pool initializer instead.
     with (
         limit_worker_threads(),
         ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker_threads) as executor,
@@ -1024,11 +1067,10 @@ def _forge_session(
     columns, then re-exporting the shared assets.
 
     Notes:
-        This is the atomic unit the parallel path dispatches to worker processes, so it stays importable at module level
-        and accepts only picklable arguments. The session descriptor is written by every acquisition runtime, while the
-        VR and experiment configurations are present only for the session types that carry them. A session missing a
-        required asset fails before any expensive work, and every asset that the session holds is re-exported alongside
-        the assembled feather.
+        Accepts only picklable arguments and stays importable at module level, so it crosses a process boundary intact.
+        The session descriptor is written by every acquisition runtime, while the VR and experiment configurations are
+        present only for the session types that carry them. A session missing a required asset fails before any
+        expensive work, and every asset that the session holds is re-exported alongside the assembled feather.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.

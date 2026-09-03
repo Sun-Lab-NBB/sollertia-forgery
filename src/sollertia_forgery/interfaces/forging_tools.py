@@ -103,7 +103,10 @@ def define_forging_dataset_tool(
     Returns:
         A response dict with the ``dataset_name``, the ``dataset_path`` at which the hierarchy was built, the
         ``tracker_path`` recording its jobs, the ``session_count`` and ``animal_count`` the dataset now holds, and the
-        ``animals`` it covers. Returns an error when the resolution policy rejects the request.
+        ``animals`` it covers. A ``remote`` definition instead carries the ``dataset_name``, the ``host``, the
+        ``dataset_path``, and a ``message`` naming the tools that report what the hierarchy now holds, since the
+        server-side hierarchy cannot be loaded from this machine. Returns an error when the resolution policy rejects
+        the request.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -388,17 +391,33 @@ def list_project_datasets_tool(
     window = resolve_page(
         total=len(matched), limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
-    listed: list[dict[str, Any]] = []
-    for dataset, fields in matched[window.start : window.stop]:
-        rendered = project_item(item=fields, fields=_DATASET_SEMI_FIELDS)
-        if detailed:
-            rendered.update(_dataset_state_summary(dataset=dataset))
-            rendered["animals"] = sorted({entry.animal for entry in dataset.sessions})
-        listed.append(rendered)
+    listed = [
+        _render_dataset(dataset=dataset, fields=fields, detailed=detailed)
+        for dataset, fields in matched[window.start : window.stop]
+    ]
 
     response["datasets"] = listed
     response.update(page_fields(window=window, total=len(matched), listed=len(listed)))
     return response
+
+
+def _render_dataset(dataset: DatasetData, fields: dict[str, Any], *, detailed: bool) -> dict[str, Any]:
+    """Renders one dataset's listing entry from the fields discovery resolved for it.
+
+    Args:
+        dataset: The dataset whose entry to render.
+        fields: The identity and size fields resolved for the dataset.
+        detailed: Determines whether to add the dataset's forging job counts and the animals it holds.
+
+    Returns:
+        The rendered listing entry, which carries the semi-detail fields and, under detail, the job counts and the
+        ``animals`` the dataset holds.
+    """
+    rendered = project_item(item=fields, fields=_DATASET_SEMI_FIELDS)
+    if detailed:
+        rendered.update(_dataset_state_summary(dataset=dataset))
+        rendered["animals"] = sorted({entry.animal for entry in dataset.sessions})
+    return rendered
 
 
 def _dataset_state_summary(dataset: DatasetData) -> dict[str, Any]:
@@ -406,7 +425,7 @@ def _dataset_state_summary(dataset: DatasetData) -> dict[str, Any]:
 
     Notes:
         Reports the snapshot's absence rather than falling back to the dataset's tracker, because every job-level fact
-        is read from the artifact that owns it. A dataset whose snapshot was never generated is told to generate one.
+        is read from the artifact that owns it.
 
     Args:
         dataset: The dataset whose state snapshot to read.
@@ -444,7 +463,9 @@ def _generate_remote_dataset_state(dataset_paths: list[str]) -> dict[str, Any]:
         dataset_paths: The dataset root directories on the server.
 
     Returns:
-        The response dict the calling tool returns.
+        A response dict with the ``host`` it ran on, the ``total_units`` rewritten, the ``total_jobs`` those units now
+        record, and one ``units`` entry per dataset carrying its ``dataset_path``, ``dataset_name``, ``job_count``,
+        and the ``summary`` counting its jobs by status. A failure instead carries the ``message`` describing it.
     """
     units = [Path(path) for path in dataset_paths]
     try:

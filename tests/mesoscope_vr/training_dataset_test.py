@@ -1,5 +1,5 @@
 """Contains tests for the Mesoscope-VR training-session data assembler, and for the geometry resolver reporting the
-heights that assembler works at, against on-disk sessions built from real feathers.
+heights at which that assembler works, against on-disk sessions built from real feathers.
 """
 
 from __future__ import annotations
@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 import pytest
+from sollertia_shared_assets import SessionTypes
 
 from sollertia_forgery.mesoscope_vr.forging import assemble_mesoscope_session
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
+from sollertia_forgery.mesoscope_vr.assembly_sources import resolve_mesoscope_assembly_sources
 from sollertia_forgery.mesoscope_vr.training_dataset import (
     assemble_training_dataset,
     resolve_mesoscope_assembly_geometry,
@@ -19,6 +21,7 @@ from sollertia_forgery.mesoscope_vr.training_dataset import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Callable
 
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
@@ -304,19 +307,17 @@ def test_assemble_training_dataset_rejects_a_session_without_a_camera_clock(
 def test_resolve_mesoscope_assembly_geometry_reports_the_reference_clock_and_every_source(
     prepared_training_session: SessionData,
 ) -> None:
-    """Verifies the geometry reports both heights the assembly works at: the reference clock its columns are placed
-    on, and the height each source it reads stands at.
-
-    The face camera runs at twice the body camera's rate, so the assembly settles on the body camera's clock while
-    holding the face camera's feathers at twice that height. The two heights are reported separately because neither
-    states the other.
+    """Verifies the geometry reports both heights at which the assembly works: the reference clock on which its
+    columns are placed, and the height at which it holds each source it reads.
     """
     geometry = resolve_mesoscope_assembly_geometry(session=prepared_training_session)
 
+    # The face camera runs at twice the body camera's rate, so the assembly settles on the body camera's clock while
+    # holding the face camera's feathers at twice that height.
     assert geometry.reference_samples == _BODY_FRAME_COUNT
 
-    # One entry per clock the assembly reads, in the order it reads them: the face and body cameras, whose three
-    # feathers each share one clock, then the valve, lick and encoder feathers, then the two runtime state feathers.
+    # One entry per clock the assembly reads, in the order it reads them: the face and body cameras, whose per-camera
+    # feathers share one clock, then the valve, lick and encoder feathers, then the two runtime state feathers.
     # The optional screen, brake and torque feathers a run-training session never writes are absent from both.
     assert geometry.source_samples == (
         _FACE_FRAME_COUNT,
@@ -353,3 +354,28 @@ def test_resolve_mesoscope_assembly_geometry_refuses_a_session_without_a_referen
 
     with pytest.raises(FileNotFoundError, match="no camera clock"):
         resolve_mesoscope_assembly_geometry(session=training_session)
+
+
+def test_resolve_mesoscope_assembly_sources_refuses_an_uncovered_session_type(
+    session_factory: Callable[..., SessionData],
+) -> None:
+    """Verifies a session type no Mesoscope-VR assembler covers is refused, and that the refusal names the types that
+    are covered, since no assembly of an uncovered type exists whose sources could be reported.
+    """
+    window_checking_session = session_factory(session_type=SessionTypes.WINDOW_CHECKING)
+
+    with pytest.raises(ValueError, match="not a supported forging session type"):
+        resolve_mesoscope_assembly_sources(session=window_checking_session)
+
+
+def test_resolve_mesoscope_assembly_geometry_refuses_an_uncovered_session_type(
+    session_factory: Callable[..., SessionData],
+) -> None:
+    """Verifies the refusal reaches the geometry resolver, which reports it once the reference clock resolves, so a
+    job sizing an uncovered session fails rather than being charged a training session's sources.
+    """
+    window_checking_session = session_factory(session_type=SessionTypes.WINDOW_CHECKING)
+    _write_camera_clocks(session=window_checking_session)
+
+    with pytest.raises(ValueError, match="not a supported forging session type"):
+        resolve_mesoscope_assembly_geometry(session=window_checking_session)

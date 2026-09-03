@@ -67,7 +67,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "memory_mb": 6000,
     },
 ]
-"""A projection holding both unit kinds, two pipelines for one session, and one job waiting on another."""
+"""A projection holding both unit kinds, two jobs of one pipeline for one session, and one job waiting on another."""
 
 
 def _install_projection(project_root: Path) -> None:

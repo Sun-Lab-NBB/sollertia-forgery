@@ -50,7 +50,7 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "cores",
     "memory_mb",
 )
-"""The job fields a semi-detail listing carries, which is the job's subject, its identity, and its figures."""
+"""The job fields a semi-detail listing carries, which are the job's subject, its identity, and its figures."""
 
 _PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "memory_modeled", "prerequisite_ids")
 """The job fields detail adds, which are the tracked job's identifier, whether a model of the job's own input produced
@@ -81,8 +81,8 @@ def plan_session_jobs_tool(
     Returns:
         A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
         Carries a ``units`` list, whose entries hold each session's ``unit_path``, ``unit_name``, ``job_count``, and
-        ``summed_memory_mb``, or its ``unit_path`` and the ``error`` that stopped it. A ``local`` entry also holds the
-        ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
+        ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. A
+        ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -107,8 +107,8 @@ def plan_dataset_jobs_tool(
     Returns:
         A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
         Carries a ``units`` list, whose entries hold each dataset's ``unit_path``, ``unit_name``, ``job_count``, and
-        ``summed_memory_mb``, or its ``unit_path`` and the ``error`` that stopped it. A ``local`` entry also holds the
-        ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
+        ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. A
+        ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, host=host, regenerate_plan=regenerate_plan)
 

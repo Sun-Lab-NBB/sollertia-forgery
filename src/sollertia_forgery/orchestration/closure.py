@@ -11,16 +11,16 @@ from ataraxis_data_structures import ProcessingStatus
 
 from .graph import index_rows_by_unit
 from .hosts import state_artifact_paths
-from .ledger import forget_batches, batch_is_settled, current_timestamp
+from .ledger import forget_batches, current_timestamp
+from .remote import DROP_REMEDIATION
 from .batches import (
     batch_directory,
     read_prepared_batch,
     record_batch_outcome,
     retire_prepared_batch,
 )
-from .planning import DATASET_UNIT, SESSION_UNIT
+from .dispatch import resolve_unit_kind
 from .preparation import resolve_project_root
-from ..shared_assets import ProcessingPipelines
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .graph import BatchDocument
     from .hosts import ExecutionHost
     from .ledger import SubmissionBatch
-    from ..server import JobStatus
+    from .remote import AllocationResolution
 
 _OUTCOME_FIELD_LIMIT: int = 50
 """The failed and blocked jobs one outcome enumerates. The counts always cover the whole batch, so a larger batch
@@ -103,6 +103,95 @@ def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
     return outcome
 
 
+def close_covered_batches(host: ExecutionHost, batch: SubmissionBatch) -> list[_BatchOutcome]:
+    """Snapshots what every prepared batch of one submission recorded, then retires each prepared document.
+
+    Notes:
+        One submission may dispatch several prepared batches, and each carries its own document, so each is
+        snapshotted separately rather than folded into the identifier that keys the ledger.
+
+        The submission's own ledger entry is left alone. Retiring that entry is the caller's decision, whether the
+        caller is the closure of a settled batch or the explicit retirement of a stalled one.
+
+    Args:
+        host: The host that holds the data the batch's jobs read.
+        batch: The recorded submission whose prepared batches to snapshot.
+
+    Returns:
+        The recorded outcomes, holding one entry per prepared batch this host still held a document for.
+
+    Raises:
+        RuntimeError: If a step fails on the host.
+        Timeout: If an outcome file's lock cannot be acquired within the timeout period.
+    """
+    return [
+        outcome
+        for covered in batch.covered_batch_ids
+        if (outcome := close_batch(host=host, batch_id=covered)) is not None
+    ]
+
+
+def close_settled_batches(
+    host: ExecutionHost, batches: Sequence[SubmissionBatch], resolutions: Sequence[AllocationResolution]
+) -> list[_BatchOutcome]:
+    """Closes every batch whose resolved allocations all prescribe a plain drop, then retires the ones that closed.
+
+    Notes:
+        A batch closes here exactly when every entry the resolution holds for it prescribes ``drop``, which is the one
+        remediation that leaves every tracker as it stands and needs nothing cancelled. That is a derivation from the
+        caller's own resolution rather than a second reading of the scheduler. It keeps this closure from diverging from
+        the verdicts a caller is shown. The caller resolves once and hands the same entries to both, and nothing here
+        consults a record of its own. An entry prescribing ``none`` holds its batch open because the work may still be
+        live, and one prescribing a reset holds it open because a tracker still claims a run no allocation is carrying.
+        Each of those is released by the explicit remediation rather than automatically.
+
+        A batch holding no allocation carries no entry at all, so nothing it holds prescribes anything but a drop and
+        it closes. That is the exit such a record needs, since closure is what drops it.
+
+        Retirement is issued per batch identifier, and only for a batch whose own closure completed. A batch that
+        fails to close therefore stays in the submission ledger however its siblings fared. The entry keeps it
+        answerable and lets the next query try again.
+
+    Args:
+        host: The host that holds the data the batches' jobs read.
+        batches: The batches the resolution covered.
+        resolutions: The verdict and remediation resolved for every allocation those batches hold, as
+            ``resolve_allocations`` returned it for these same batches.
+
+    Returns:
+        The outcomes of the batches that were closed. A closed batch with no prepared record on this host is retired
+        without producing one.
+    """
+    prescribed: dict[str, list[str]] = {batch.batch_id: [] for batch in batches}
+    for resolution in resolutions:
+        prescribed.setdefault(resolution.batch_id, []).append(resolution.remediation)
+
+    settled = [
+        batch for batch in batches if all(remediation == DROP_REMEDIATION for remediation in prescribed[batch.batch_id])
+    ]
+
+    closed: list[_BatchOutcome] = []
+    retired: list[str] = []
+    for batch in settled:
+        try:
+            outcomes = close_covered_batches(host=host, batch=batch)
+        except Exception as exception:
+            console.echo(
+                message=(
+                    f"Unable to close the finished batch '{batch.batch_id}', which stays outstanding so the next "
+                    f"query can try again. {exception}"
+                ),
+                level=LogLevel.WARNING,
+            )
+            continue
+        closed.extend(outcomes)
+        retired.append(batch.batch_id)
+
+    if retired:
+        forget_batches(batch_ids=retired)
+    return closed
+
+
 def _verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -> _BatchOutcome:
     """Reads what a batch's jobs recorded out of freshly regenerated project artifacts.
 
@@ -129,7 +218,7 @@ def _verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -
     Returns:
         The batch's outcome.
     """
-    unit_kind = DATASET_UNIT if document.pipeline == ProcessingPipelines.FORGING.value else SESSION_UNIT
+    unit_kind = resolve_unit_kind(pipeline=document.pipeline)
     unit_paths = [Path(entry["unit_path"]) for entry in document.units]
     project_root = resolve_project_root(unit_paths=unit_paths, unit_kind=unit_kind)
 
@@ -152,55 +241,6 @@ def _verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -
     ]
 
     return _resolve_outcome(document=document, batch_id=batch_id, recorded=recorded, snapshots=snapshots)
-
-
-def close_settled_batches(
-    host: ExecutionHost, batches: Sequence[SubmissionBatch], statuses: dict[str, JobStatus]
-) -> list[_BatchOutcome]:
-    """Closes every batch whose allocations have all reached a state they never leave, then retires the ones that
-    closed.
-
-    Notes:
-        Retirement is issued per batch identifier, and only for a batch whose own closure completed. A batch that
-        fails to close therefore stays in the submission ledger however its siblings fared. The entry keeps it
-        answerable and lets the next query try again.
-
-        An allocation that the query did not cover counts as unfinished, so a partial query never closes a batch it
-        did not fully observe.
-
-    Args:
-        host: The host that holds the data the batches' jobs read.
-        batches: The batches the query covered.
-        statuses: The observed state of each allocation, keyed by its scheduler identifier.
-
-    Returns:
-        The outcomes of the batches that were closed. A settled batch with no prepared record on this host is retired
-        without producing one.
-    """
-    settled = [batch for batch in batches if batch_is_settled(batch=batch, statuses=statuses)]
-
-    closed: list[_BatchOutcome] = []
-    retired: list[str] = []
-    for batch in settled:
-        try:
-            # One submission may dispatch several prepared batches, and each carries its own document, so each is
-            # snapshotted separately rather than folded into the identifier that keys the ledger.
-            outcomes = [close_batch(host=host, batch_id=covered) for covered in batch.covered_batch_ids]
-        except Exception as exception:
-            console.echo(
-                message=(
-                    f"Unable to close the finished batch '{batch.batch_id}', which stays outstanding so the next "
-                    f"query can try again. {exception}"
-                ),
-                level=LogLevel.WARNING,
-            )
-            continue
-        closed.extend(outcome for outcome in outcomes if outcome is not None)
-        retired.append(batch.batch_id)
-
-    if retired:
-        forget_batches(batch_ids=retired)
-    return closed
 
 
 def _resolve_outcome(

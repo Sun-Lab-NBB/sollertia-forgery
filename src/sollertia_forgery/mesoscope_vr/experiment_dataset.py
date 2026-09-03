@@ -11,7 +11,6 @@ import polars as pl
 from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import (
     SessionData,
-    RawDataFiles,
     ProcessingTrackers,
     MesoscopeExperimentConfiguration,
 )
@@ -81,7 +80,7 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         console.error(message=message, error=FileNotFoundError)
 
     # The forging pipeline qualifies the dataset name with the animal identifier, so an animal's multi-recording output
-    # stays separate when a dataset spans several animals. cindra owns the directory to which that name resolves, so its
+    # stays separate when a dataset spans several animals. That name resolves to a directory cindra owns, so cindra's
     # own resolver locates it here rather than this module respelling the layout.
     multiday_data_path = resolve_dataset_path(
         output_root=session.processed_data_path,
@@ -93,11 +92,10 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
     # Loads the experiment configuration once so the runtime assembly resolves its state and trial mappings without
     # re-reading the same YAML.
     experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
-        file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
+        file_path=session.raw_data.experiment_configuration_path
     )
 
-    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock to which the other
-    # sub-datasets align.
+    # The fluorescence sub-dataset's ``time_us`` column is the reference clock to which the other sub-datasets align.
     fluorescence_data = assemble_cindra_dataset(
         cindra_data_path=cindra_data_path,
         microcontroller_data_path=microcontroller_data_path,
@@ -106,8 +104,8 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
     )
     reference_time = fluorescence_data["time_us"].to_numpy()
 
-    # Assembles the behavior, runtime, and video sub-datasets in parallel. All three align to the fluorescence
-    # reference clock. The video sub-dataset is empty when the session carries no processed camera feathers.
+    # These three sub-datasets align to the fluorescence reference clock. The video sub-dataset is empty when the
+    # session carries no processed camera feathers.
     tasks = {
         "behavior": partial(
             assemble_behavior_dataset,
@@ -136,10 +134,10 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
             future_to_name[future]: future.result() for future in as_completed(future_to_name)
         }
 
-    # Stacks the sub-datasets into the unified feather, masks non-run experiment columns, and writes it uncompressed so
-    # downstream consumers can memory-map it. Stacking requires every sub-dataset to carry the reference clock's
-    # height, so one that drifts off that clock raises rather than being padded. The video sub-dataset joins only when
-    # it produced columns, so a session processed without camera data still forges.
+    # The unified feather is written uncompressed so downstream consumers can memory-map it. Stacking requires every
+    # sub-dataset to carry the reference clock's height, so one that drifts off that clock raises rather than being
+    # padded. The video sub-dataset joins only when it produced columns, so a session processed without camera data
+    # still forges.
     sub_datasets = [fluorescence_data, results["behavior"], results["runtime"]]
     if results["video"].width > 0:
         sub_datasets.append(results["video"])

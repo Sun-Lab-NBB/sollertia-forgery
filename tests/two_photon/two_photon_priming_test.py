@@ -285,11 +285,7 @@ def test_discovering_jobs_reports_the_cindra_universe(primed_session: SessionDat
 def test_discovering_jobs_without_a_bootstrap_reads_the_raw_acquisition_parameters(
     imaging_session: SessionData,
 ) -> None:
-    """Verifies a session that has never been primed still resolves its universe, read from the raw parameters.
-
-    Resolution follows the recording's acquisition parameters rather than the bootstrap, so a session can be planned
-    before any preparation pass has primed it.
-    """
+    """Verifies a session that has never been primed still resolves its universe, read from the raw parameters."""
     _session, universe, possible = discover_two_photon_jobs(session_path=_session_path(imaging_session))
 
     assert universe == _expected_universe()
@@ -297,10 +293,7 @@ def test_discovering_jobs_without_a_bootstrap_reads_the_raw_acquisition_paramete
 
 
 def test_an_incomplete_bootstrap_still_resolves_the_universe(primed_session: SessionData) -> None:
-    """Verifies a missing per-plane runtime file leaves resolution intact, since it reads the parameters instead.
-
-    An interrupted preparation pass is repaired by priming again rather than by failing every later resolution.
-    """
+    """Verifies a missing per-plane runtime file leaves resolution intact, since it reads the parameters instead."""
     primed_session.processed_data.cindra_data_path.joinpath("plane_1", "runtime_data.yaml").unlink()
 
     _session, universe, possible = discover_two_photon_jobs(session_path=_session_path(primed_session))
@@ -484,13 +477,11 @@ def test_naming_any_one_stage_dispatches_that_stage_alone(
     stage_flags: dict[str, bool],
     expected: list[tuple[str, str]],
 ) -> None:
-    """Verifies naming any single stage runs that stage alone, rather than falling into the run-everything default.
-
-    An invocation naming no stage runs all four, so a stage that the request does not recognize would silently re-run
-    the whole recording and overwrite the outputs the operator asked to leave alone.
-    """
+    """Verifies naming any single stage runs that stage alone, rather than falling into the run-everything default."""
     run_two_photon_processing_pipeline(session_path=_session_path(primed_session), **stage_flags)
 
+    # An invocation naming no stage runs all four, so a stage that the request does not recognize would silently
+    # re-run the whole recording and overwrite the outputs the operator asked to leave alone.
     assert _dispatched_pairs(dispatched_jobs) == expected
 
 
@@ -514,10 +505,7 @@ def test_a_per_plane_stage_on_a_recording_holding_no_plane_dispatches_nothing(
     primed_session: SessionData,
     dispatched_jobs: list[dict[str, Any]],
 ) -> None:
-    """Verifies a per-plane stage resolves no job and aligns nothing when its recording holds no plane.
-
-    The tracker refuses an empty alignment request, so the run has to skip the alignment rather than offer it one.
-    """
+    """Verifies a per-plane stage resolves no job and aligns nothing when its recording holds no plane."""
     monkeypatch.setattr(
         two_photon_pipeline,
         "prime_recording",
@@ -527,6 +515,8 @@ def test_a_per_plane_stage_on_a_recording_holding_no_plane_dispatches_nothing(
     run_two_photon_processing_pipeline(session_path=_session_path(primed_session), register=True, process=True)
 
     assert dispatched_jobs == []
+
+    # The tracker refuses an empty alignment request, so the run has to skip the alignment rather than offer it one.
     # Nothing was registered, so the tracker keeps whatever the earlier priming left it holding.
     tracker = ProcessingTracker(file_path=primed_session.processed_data.two_photon_tracker_path)
     assert tracker.snapshot() == {}
@@ -574,11 +564,7 @@ def test_a_job_identifier_runs_that_job_alone(
 def test_a_remote_job_keeps_the_recorded_state_of_its_sibling_jobs(
     primed_session: SessionData, dispatched_jobs: list[dict[str, Any]]
 ) -> None:
-    """Verifies a scheduler-dispatched job preserves the state its sibling jobs recorded in the shared tracker.
-
-    The scheduler dispatches each job of the universe separately against one tracker, so a job that treated its
-    siblings as foreign entries would erase their completion and have every finished stage dispatched again.
-    """
+    """Verifies a scheduler-dispatched job preserves the state its sibling jobs recorded in the shared tracker."""
     run_two_photon_processing_pipeline(session_path=_session_path(primed_session))
     tracker = ProcessingTracker(file_path=primed_session.processed_data.two_photon_tracker_path)
     combine_id = ProcessingTracker.generate_job_id(job_name=str(SingleRecordingJobNames.COMBINE), specifier="")
@@ -592,6 +578,9 @@ def test_a_remote_job_keeps_the_recorded_state_of_its_sibling_jobs(
     )
 
     assert _dispatched_pairs(dispatched_jobs) == [(str(SingleRecordingJobNames.BINARIZE), "")]
+
+    # The scheduler dispatches each job of the universe separately against one tracker, so a job that treated its
+    # siblings as foreign entries would erase their completion and have every finished stage dispatched again.
     snapshot = tracker.snapshot()
     assert len(snapshot) == len(_expected_universe())
     assert snapshot[combine_id].status == ProcessingStatus.SUCCEEDED
@@ -645,15 +634,13 @@ def test_raw_imaging_data_without_acquisition_parameters_is_refused(experiment_s
 def test_a_directory_carrying_the_parameters_name_does_not_satisfy_the_screen(
     experiment_session: SessionData,
 ) -> None:
-    """Verifies the screen answers on files alone, so a directory carrying the parameters name refuses the session.
-
-    The screen exists to guarantee the recording's acquisition metadata can be read, which a directory sharing the
-    filename cannot supply.
-    """
+    """Verifies the screen answers on files alone, so a directory carrying the parameters name refuses the session."""
     _write_surgery_metadata(session=experiment_session)
     imaging_directory = experiment_session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
     imaging_directory.joinpath("cindra_parameters.json").mkdir(parents=True)
 
+    # The screen exists to guarantee the recording's acquisition metadata can be read, which a directory sharing the
+    # filename cannot supply.
     with pytest.raises(FileNotFoundError, match="No cindra acquisition"):
         run_two_photon_processing_pipeline(session_path=_session_path(experiment_session))
 

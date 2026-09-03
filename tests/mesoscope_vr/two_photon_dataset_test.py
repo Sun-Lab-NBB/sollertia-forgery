@@ -89,11 +89,14 @@ def _build_extraction(
     Every trace array counts up from a shared ramp, so a value pins the ROI row and the frame that produced it, and the
     per-array offset keeps the four distinguishable.
 
-    Args: roi_count: The number of ROI rows every array carries. frame_count: The number of frame columns every array
-    carries. offset: The constant added to the base ramp, so each directory carries distinguishable values. is_cell: The
-    per-ROI cell label, one entry per ROI row, or None for a record carrying no classification.
+    Args:
+        roi_count: The number of ROI rows every array carries.
+        frame_count: The number of frame columns every array carries.
+        offset: The constant added to the base ramp, so each directory carries distinguishable values.
+        is_cell: The per-ROI cell label, one entry per ROI row, or None for a record carrying no classification.
 
-    Returns: The populated extraction record, which cindra's own writer saves under its canonical array names.
+    Returns:
+        The populated extraction record, which cindra's own writer saves under its canonical array names.
     """
     base = np.arange(roi_count * frame_count, dtype=np.float32).reshape(roi_count, frame_count) + offset
     classification: NDArray[np.float32] | None = None
@@ -126,12 +129,15 @@ def _write_traces(directory: Path, *, roi_count: int, frame_count: int, offset: 
 def _write_cindra_outputs(directory: Path, *, is_cell: Sequence[int], frame_count: int, offset: float = 0.0) -> None:
     """Writes a complete single-recording cindra output directory through cindra's own writer.
 
-    Notes: The combined record is saved rather than assembled by hand, so the archive the assembler reads back is the
-    one cindra's combination stage publishes, including every metadata field its reader expects.
+    Notes:
+        The combined record is saved rather than assembled by hand, so the archive the assembler reads back is the
+        one cindra's combination stage publishes, including every metadata field its reader expects.
 
-    Args: directory: The directory that receives the single-recording outputs. is_cell: The per-ROI cell label, one
-    entry per ROI row. frame_count: The number of frames every trace array carries. offset: The constant added to the
-    base ramp of every trace array.
+    Args:
+        directory: The directory that receives the single-recording outputs.
+        is_cell: The per-ROI cell label, one entry per ROI row.
+        frame_count: The number of frames every trace array carries.
+        offset: The constant added to the base ramp of every trace array.
     """
     directory.mkdir(parents=True, exist_ok=True)
     CombinedData(
@@ -291,11 +297,7 @@ def test_assemble_cindra_dataset_matches_pulse_count_exactly(layout: _Layout) ->
 
 
 def test_assemble_cindra_dataset_publishes_every_trace_array_under_its_own_column(layout: _Layout) -> None:
-    """Verifies each of the eight fluorescence columns carries the cindra array whose name it advertises.
-
-    The four traces of a recording share their shape and their dtype, so a column fed from a sibling array ships the
-    wrong signal to every downstream reader without any schema difference to give it away.
-    """
+    """Verifies each of the eight fluorescence columns carries the cindra array whose name it advertises."""
     _prepare(layout, pulses=_pulse_train(1_000_000, 5), frame_count=5)
 
     dataset = layout.assemble()
@@ -313,6 +315,9 @@ def test_assemble_cindra_dataset_publishes_every_trace_array_under_its_own_colum
         DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE: (pl.Array(pl.Float32, 2), [1002.0, 1007.0]),
         DatasetColumn.MULTI_DAY_SPIKES: (pl.Array(pl.Float32, 2), [1003.0, 1008.0]),
     }
+
+    # The four traces of a recording share their shape and their dtype, so a column fed from a sibling array ships
+    # the wrong signal to every downstream reader, with no schema difference to reveal the swap.
     assert {column: (dataset.schema[column], dataset[column].to_numpy()[0].tolist()) for column in expected} == expected
 
 
@@ -362,11 +367,7 @@ def test_assemble_cindra_dataset_falls_back_to_scanimage(layout: _Layout) -> Non
 
 
 def test_scanimage_fallback_preserves_epoch_scale_pulse_timestamps(layout: _Layout) -> None:
-    """Verifies the fallback carries real, epoch-scale rising-edge timestamps through to the assembled table.
-
-    Logged TTL timestamps are microseconds since the UTC epoch, so a narrower intermediate width would wrap every
-    value while leaving the alignment itself internally consistent and its frame-count guard satisfied.
-    """
+    """Verifies the fallback carries real, epoch-scale rising-edge timestamps through to the assembled table."""
     base = 1_700_000_000_000_000
     pulses = [(base + index * 100_000, _OUT_OF_WINDOW_DURATION_US) for index in range(4)]
     _prepare(layout, pulses=pulses, frame_count=4)
@@ -377,15 +378,14 @@ def test_scanimage_fallback_preserves_epoch_scale_pulse_timestamps(layout: _Layo
     dataset = layout.assemble()
 
     assert dataset["frame"].to_list() == [1, 2, 3, 4]
+
+    # Logged TTL timestamps are microseconds since the UTC epoch, so a narrower intermediate width wraps every value
+    # while leaving the alignment itself internally consistent and its frame-count guard satisfied.
     assert dataset["time_us"].to_list() == [base, base + 100_000, base + 200_000, base + 300_000]
 
 
 def test_scanimage_fallback_orders_the_frames_of_each_acquisition_after_the_previous_one(layout: _Layout) -> None:
-    """Verifies a session recording two acquisitions matches each acquisition's frames to its own pulses.
-
-    The ScanImage frame counter restarts at one for every further acquisition, so ordering the archive by that counter
-    alone interleaves the acquisitions and hands the matcher timestamps that no longer ascend.
-    """
+    """Verifies a session recording two acquisitions matches each acquisition's frames to its own pulses."""
     pulses = [
         (5_000_000, _OUT_OF_WINDOW_DURATION_US),
         (5_100_000, _OUT_OF_WINDOW_DURATION_US),
@@ -402,6 +402,9 @@ def test_scanimage_fallback_orders_the_frames_of_each_acquisition_after_the_prev
 
     dataset = layout.assemble()
 
+    # An archive written by older preprocessing restarts the frame counter at one for every further acquisition, so
+    # ordering such an archive by that counter alone interleaves the acquisitions and hands the matcher timestamps
+    # that no longer ascend.
     assert dataset["frame"].to_list() == [1, 2, 3, 4]
     assert dataset["time_us"].to_list() == [5_000_000, 5_100_000, 10_000_000, 10_100_000]
 
@@ -497,11 +500,7 @@ def test_assemble_discards_unacquired_pulse_runs(layout: _Layout) -> None:
 
 
 def test_assemble_discards_a_stray_pulse_run_logged_after_the_acquisition(layout: _Layout) -> None:
-    """Verifies a stray run of hand-triggered pulses is dropped even when it trails the session's real acquisition.
-
-    The surplus handling clips the front of the log, so a stray run that sits behind the acquisition survives the clip
-    and costs the dataset that many real frames unless the run matching discards it first.
-    """
+    """Verifies a stray run of hand-triggered pulses is dropped even when it trails the session's real acquisition."""
     pulses = [
         *_pulse_train(10_000_000, 4, period_us=1_000_000),
         *_pulse_train(start_us=20_000_000, count=2, period_us=1_000_000),
@@ -511,6 +510,8 @@ def test_assemble_discards_a_stray_pulse_run_logged_after_the_acquisition(layout
 
     dataset = layout.assemble()
 
+    # The surplus handling clips the front of the log, so a stray run that sits behind the acquisition survives the
+    # clip and costs the dataset that many real frames unless the run matching discards it first.
     assert dataset["frame"].to_list() == [1, 2, 3, 4]
     assert dataset["time_us"].to_list() == [10_000_000, 11_000_000, 12_000_000, 13_000_000]
 
@@ -538,13 +539,11 @@ def test_resolve_acquisition_sizes_reads_the_acquisition_index(tmp_path: Path) -
 
 
 def test_resolve_acquisition_sizes_counts_the_frames_carrying_each_acquisition_index(tmp_path: Path) -> None:
-    """Verifies the sizes count the frames of each acquisition rather than reporting the acquisition indices.
-
-    ScanImage numbers acquisitions with a session-global counter, so the indices a session's archive carries are
-    unrelated to the number of frames each of those acquisitions holds.
-    """
+    """Verifies the sizes count the frames of each acquisition rather than reporting the acquisition indices."""
     _write_frame_metadata(raw_data_path=tmp_path, frame_numbers=[1, 2, 3, 1, 2], acquisition_numbers=[5, 5, 5, 7, 7])
 
+    # ScanImage numbers acquisitions with a session-global counter, so the indices a session's archive carries are
+    # unrelated to the number of frames each of those acquisitions holds.
     assert _resolve_acquisition_sizes(raw_data_path=tmp_path) == [3, 2]
 
 
@@ -566,11 +565,9 @@ def test_match_runs_to_acquisitions_spans_consecutive_runs() -> None:
 
 
 def test_match_runs_to_acquisitions_pairs_acquisitions_recorded_out_of_size_order() -> None:
-    """Verifies each acquisition claims the run span matching its own frame count, in any arrival order.
-
-    The acquisition sizes are reported largest first while the runs stay chronological, so a session whose smaller
-    acquisition ran first is only accounted for by pairing the two lists across that mismatch.
-    """
+    """Verifies each acquisition claims the run span matching its own frame count, in any arrival order."""
+    # The acquisition sizes are reported largest first while the runs stay chronological, so a session whose smaller
+    # acquisition ran first resolves only when the pairing crosses that mismatch.
     assert _match_runs_to_acquisitions(run_lengths=[2, 4, 3], acquisition_sizes=[4, 2]) == [(0, 0), (1, 1)]
 
 

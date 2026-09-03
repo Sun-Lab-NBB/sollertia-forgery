@@ -273,10 +273,9 @@ def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path,
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
-        ValueError: If the hardware state carries no lick detection threshold, or if the lick event code carries
-            no data payload or stores a null payload inside an otherwise decodable stream. Also raised when the
-            code spreads its payloads across more than one dtype, or decodes into a value count that is not a
-            whole multiple of its message count.
+        ValueError: If the lick event code carries no data payload or stores a null payload inside an otherwise
+            decodable stream. Also raised when the code spreads its payloads across more than one dtype, or decodes
+            into a value count that is not a whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_LICK_MODULE, hardware_state=hardware_state):

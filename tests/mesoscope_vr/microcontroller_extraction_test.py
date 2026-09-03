@@ -207,8 +207,8 @@ def test_merge_event_streams_keeps_first_stream_ahead_on_ties() -> None:
 
 
 def test_merge_event_streams_preserves_the_full_microsecond_key_width() -> None:
-    # The merged keys are microseconds since runtime onset, so narrowing them to 32 bits wraps every event past
-    # roughly the seventy-second minute of a session and sorts it ahead of the events that truly preceded it.
+    # The merged keys are microseconds since the UTC epoch, and 32 bits span only about seventy-one minutes, so
+    # narrowing them wraps every event of every session and sorts it ahead of the events that truly preceded it.
     timestamps, values = merge_event_streams(
         timestamps_a=np.array([100, 4_294_967_396], dtype=np.uint64),
         values_a=np.array([1.0, 3.0], dtype=np.float64),

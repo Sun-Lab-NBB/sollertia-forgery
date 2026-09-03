@@ -28,7 +28,7 @@ from cindra import (
     SingleRecordingConfiguration,
 )
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SurgeryData, SessionTypes, MesoscopeDirectories
+from sollertia_shared_assets import SurgeryData, SessionTypes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,7 +96,7 @@ def locate_two_photon_data(session: SessionData) -> Path:
     Returns:
         The path to the session's ``mesoscope_data`` directory under its raw-data root.
     """
-    return session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
+    return session.system_raw_data.mesoscope_data_path
 
 
 def resolve_single_recording_configuration(session: SessionData) -> SingleRecordingConfiguration:
@@ -207,8 +207,8 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
         Every parameter is written out explicitly, so the configuration is decoupled from cindra's evolving defaults.
         Only ``main.tau`` and ``spike_deconvolution.neuropil_coefficient`` depend on the indicator. The deploy-time
         fields (``file_io.data_path``, ``file_io.output_path``, and the ``runtime`` settings) are left at their cindra
-        defaults, because the two-photon pipeline overrides them with the session-resolved locations and its
-        progress-bar preference. cindra takes the worker count as a call argument, so no configuration field carries it.
+        defaults. They are overridden with the session-resolved locations and the progress-bar preference at dispatch.
+        cindra takes the worker count as a call argument, so no configuration field carries it.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -242,6 +242,7 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
             spatial_smoothing_sigma=1.15,
             temporal_smoothing_sigma=0.0,
             two_step_registration=False,
+            gpu_batch_size=0,
             bad_frame_threshold=1.0,
             normalize_frames=True,
             registration_metric_principal_components=10,
@@ -300,9 +301,9 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
         Every parameter is written out explicitly, so the configuration is decoupled from cindra's evolving defaults.
         Only ``roi_selection.probability_threshold`` and ``spike_deconvolution.neuropil_coefficient`` depend on the
         indicator. The deploy-time fields (``recording_io.recording_directories``, ``recording_io.dataset_name``, and
-        the ``runtime`` settings) are left at their cindra defaults, because the forging pipeline overrides them with
-        the animal's recording directories, the per-animal dataset name, and its progress-bar preference. cindra takes
-        the worker count as a call argument, so no configuration field carries it.
+        the ``runtime`` settings) are left at their cindra defaults. They are overridden at dispatch with the animal's
+        recording directories, the per-animal dataset name, and the progress-bar preference. cindra takes the worker
+        count as a call argument, so no configuration field carries it.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -335,7 +336,7 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
             repeat_registration=False,
         ),
         roi_tracking=ROITracking(
-            threshold=0.5,
+            threshold=0.75,
             mask_prevalence=50,
             pixel_prevalence=50,
             step_sizes=(200, 200),

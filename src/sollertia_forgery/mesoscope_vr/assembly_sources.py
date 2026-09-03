@@ -10,8 +10,8 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import SessionTypes
 
 from .metadata import BehaviorDataFiles
-from ..shared_assets import count_feather_rows
 from .video_dataset import count_camera_source_samples
+from ..shared_assets import count_feather_rows
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,9 +44,9 @@ _EXPERIMENT_MICROCONTROLLER_SOURCES: tuple[BehaviorDataFiles, ...] = (
 )
 """The module-parsed feathers an experiment assembly reads out of the same directory. It reads every feather the
 training assembly reads, because it builds the same behavior sub-dataset, and the mesoscope-frame feather besides.
-That feather carries one row per logged TTL edge on the microcontroller's own clock, and the fluorescence assembly
-sorts it, derives two transition columns beside it, and splits it into a rising-edge and a falling-edge table that
-are then joined, so it stands at its own height several times over."""
+That feather carries one row per logged TTL edge on the microcontroller's own clock. The fluorescence assembly sorts it,
+derives two transition columns beside it, and splits it into a rising-edge and a falling-edge table that are then
+joined, so it stands at its own height several times over."""
 
 _EXPERIMENT_RUNTIME_SOURCES: tuple[BehaviorDataFiles, ...] = (
     *_TRAINING_RUNTIME_SOURCES,
@@ -68,25 +68,19 @@ _SOURCE_FILES: dict[SessionTypes, tuple[tuple[BehaviorDataFiles, ...], tuple[Beh
     SessionTypes.LICK_TRAINING: (_TRAINING_MICROCONTROLLER_SOURCES, _TRAINING_RUNTIME_SOURCES),
 }
 """Maps each session type the Mesoscope-VR assemblers cover to the microcontroller-parsed and runtime-parsed feathers
-the assembler routed that type reads. A type this mapping omits is one ``assemble_mesoscope_session`` refuses, so no
-assembly of it exists to report the sources of."""
+read by the assembler routed to that type. A type this mapping omits is one ``assemble_mesoscope_session`` refuses, so
+no assembly of it exists whose sources could be reported."""
 
 
 def resolve_mesoscope_assembly_sources(session: SessionData) -> tuple[int, ...]:
-    """Reports the samples each source the assembly of one Mesoscope-VR session reads holds on that source's own clock.
+    """Reports the samples that each source read by one Mesoscope-VR session's assembly holds on that source's clock.
 
     Notes:
-        A source arrives at the clock it was sampled on rather than at the clock the assembled frame is placed on. A
-        camera's timestamp, motion-energy and pupil feathers are read at that camera's frame count, and a behavior
-        feather is read at the count of samples its own parser logged, both before anything is interpolated onto the
-        reference clock. A camera faster than the reference one therefore contributes arrays taller than the frame the
-        job builds, and neither family bounds the other.
-
-        The source set is routed by session type, because the two assemblers read different sets. An experiment
-        assembly builds a runtime sub-dataset and a fluorescence sub-dataset that a training assembly does not, and
-        those read the VR trigger-zone, wall-cue, trial and guidance feathers and the mesoscope-frame feather on top
-        of everything the training assembly reads. Reporting one set for both types would leave an experiment
-        assembly charged for a fraction of the arrays it holds, which is an under-estimate rather than a coarse one.
+        A source arrives at the clock on which it was sampled rather than at the clock on which the assembled frame is
+        placed. A camera's timestamp, motion-energy and pupil feathers are read at that camera's frame count, and a
+        behavior feather is read at the count of samples its own parser logged, both before anything is interpolated
+        onto the reference clock. A camera faster than the reference one therefore contributes arrays taller than the
+        frame the job builds, and neither family bounds the other.
 
         A source is reported once per clock rather than once per file. The three feathers of one camera carry one row
         per acquired frame, so that camera's frame count describes every array it contributes, while each behavior
@@ -100,8 +94,8 @@ def resolve_mesoscope_assembly_sources(session: SessionData) -> tuple[int, ...]:
         session: The loaded session whose assembly sources are measured.
 
     Returns:
-        The samples each source the assembly reads holds, one entry per source, cameras first. Empty when the session
-        carries none of the sources its assembler reads.
+        The samples that each source read by the assembly holds, one entry per source, cameras first. Empty when the
+        session carries none of the sources its assembler reads.
 
     Raises:
         ValueError: If the session's type is not one the Mesoscope-VR assemblers cover, in which case no assembly of
@@ -109,8 +103,8 @@ def resolve_mesoscope_assembly_sources(session: SessionData) -> tuple[int, ...]:
     """
     session_type = SessionTypes(session.session_type)
 
-    # Routed on the same mapping the dispatcher routes the assembler itself on, so a type the dispatcher refuses is
-    # refused here rather than answered from whichever set happens to be the default.
+    # Routed on the same mapping on which the dispatcher routes the assembler itself, so a type the dispatcher refuses
+    # is refused here rather than answered from whichever set happens to be the default.
     source_files = _SOURCE_FILES.get(session_type)
     if source_files is None:
         supported = ", ".join(sorted(str(covered) for covered in _SOURCE_FILES))

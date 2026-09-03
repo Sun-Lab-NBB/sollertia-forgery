@@ -78,8 +78,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     show_default=True,
     default=False,
     help=(
-        "Determines whether to suppress the progress bars during the multi-day and assembly stages. These are "
-        "displayed by default."
+        "Determines whether to suppress the progress bar during the assembly stage. It also sets the flag "
+        "recorded in each animal's multi-recording configuration when this call defines or rebuilds the dataset. "
+        "These are displayed by default."
     ),
 )
 def forge_command(

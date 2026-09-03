@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+from natsort import natsorted
 import platformdirs
 from sollertia_shared_assets import (
     DESCRIPTOR_REGISTRY,
@@ -87,6 +88,10 @@ MOTION_ENERGY_FRAME_HEIGHT: int = 100
 
 MOTION_ENERGY_FRAME_WIDTH: int = 64
 """The width of a synthetic recording frame, chosen so it is not a multiple of the analysis bin size."""
+
+_BLOCKED_QUEUE_REASON: str = "DependencyNeverSatisfied"
+"""The reason the stubbed queue reports for an allocation whose dependency can no longer be satisfied, which is the
+text on which the server matches."""
 
 _SLURM_FIRST_JOB_ID: int = 1000
 """The allocation identifier the stub scheduler assigns to the first submission it accepts."""
@@ -252,14 +257,17 @@ def session_factory(
     creates the session, writes the descriptor that its type registers alongside the hardware state snapshot, and
     returns the session reloaded from disk so both its raw and processed paths resolve absolutely.
 
-    Args: project: The created project under which the session is placed. isolated_working_directory: The isolated
-    platform state, requested so the task templates directory that the builder registers is written under this test's
-    own temporary directory rather than onto the host. hardware_state: The hardware state snapshot written into the
-    session's raw data. experiment_configuration: The experiment configuration staged for the creator to copy into the
-    session. task_template: The VR task template staged for the creator to copy into the session.
+    Args:
+        project: The created project under which the session is placed.
+        isolated_working_directory: The isolated platform state, requested so the task templates directory that the
+            builder registers is written under this test's own temporary directory rather than onto the host.
+        hardware_state: The hardware state snapshot written into the session's raw data.
+        experiment_configuration: The experiment configuration staged for the creator to copy into the session.
+        task_template: The VR task template staged for the creator to copy into the session.
 
-    Returns: A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and
-    an optional experiment name, and returning the loaded session.
+    Returns:
+        A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and an
+        optional experiment name, and returning the loaded session.
     """
 
     def _create(
@@ -576,8 +584,8 @@ def write_dlc_predictions() -> Callable[..., Path]:
     prediction file reads this file back.
 
     The writer optionally compresses the table, which is a setting a DeepLabCut deployment can carry and which shrinks
-    the file without narrowing the table it holds. It is what separates a model charged the table from one charged the
-    file the table was written into.
+    the file without narrowing the table it holds. Naming a non-zero level therefore lets a test check that the reader
+    recovers the same table out of either on-disk layout.
 
     Returns:
         A callable taking the output path, the mapping of bodypart to its per-frame array of horizontal position,
@@ -650,6 +658,7 @@ class StubSSHTransport:
         submitted_scripts: The server path of every script the scheduler accepted.
         job_statuses: The accounting state reported for each allocation identifier.
         blocked_job_ids: The allocation identifiers the queue reports as permanently blocked.
+        queued_job_ids: The allocation identifiers the queue currently holds.
         connections: The host and user pairs the transport was asked to authenticate.
         closed: Determines whether the connection was closed.
     """
@@ -662,6 +671,7 @@ class StubSSHTransport:
         self.submitted_scripts: list[str] = []
         self.job_statuses: dict[str, str] = {}
         self.blocked_job_ids: set[str] = set()
+        self.queued_job_ids: set[str] = set()
         self.connections: list[tuple[str, str]] = []
         self.closed: bool = False
         self._responses: dict[str, tuple[str, str, int]] = {}
@@ -674,8 +684,9 @@ class StubSSHTransport:
         Lets a test tell the order of two operations apart, since a command that rewrites what a later step reads is
         indistinguishable from one that does not when the stub only records the invocation.
 
-        Args: prefix: The leading text of the invocations this effect answers. effect: The callable standing in for what
-        the real command changes on the server.
+        Args:
+            prefix: The leading text of the invocations this effect answers.
+            effect: The callable standing in for what the real command changes on the server.
         """
         self._side_effects[prefix] = effect
 
@@ -744,10 +755,28 @@ class StubSSHTransport:
             return "\n".join(rows) + ("\n" if rows else ""), "", 0
 
         if command.startswith("squeue "):
-            rows = [f"{job_id}|DependencyNeverSatisfied" for job_id in sorted(self.blocked_job_ids)]
-            return "\n".join(rows) + ("\n" if rows else ""), "", 0
+            return self._queue(command=command)
 
         return "", "", 0
+
+    def _queue(self, command: str) -> tuple[str, str, int]:
+        """Answers one queue listing out of the identifiers this transport holds.
+
+        The server reads the queue two ways. It asks for the reason field to find the allocations whose dependencies
+        can no longer be satisfied, and asks for the identifiers alone to find every allocation the queue holds. The
+        requested output format is what tells the two reads apart.
+
+        Args:
+            command: The queue invocation the server issued.
+
+        Returns:
+            A tuple of the standard output, the standard error, and the exit code.
+        """
+        if "%r" in command:
+            rows = [f"{job_id}|{_BLOCKED_QUEUE_REASON}" for job_id in natsorted(self.blocked_job_ids)]
+        else:
+            rows = list(natsorted(self.queued_job_ids))
+        return "\n".join(rows) + ("\n" if rows else ""), "", 0
 
     def _find(self, command: str) -> tuple[str, str, int]:
         """Answers one depth-bounded marker search out of the temporary server-side filesystem.
@@ -757,9 +786,11 @@ class StubSSHTransport:
         name order, because the real command emits directory order and a stub that sorted would let a never-sorting
         implementation pass.
 
-        Args: command: The search invocation the server issued.
+        Args:
+            command: The search invocation the server issued.
 
-        Returns: A tuple of the NUL-separated records, the standard error, and the exit code.
+        Returns:
+            A tuple of the NUL-separated records, the standard error, and the exit code.
         """
         tokens = shlex.split(command)
         start = Path(tokens[2])
@@ -897,7 +928,7 @@ class _StubSSHClient:
     def set_missing_host_key_policy(self, policy: object) -> None:
         """Accepts the host key policy the server applies before it connects."""
 
-    def connect(self, hostname: str, username: str, password: str) -> None:  # noqa: ARG002
+    def connect(self, hostname: str, username: str, password: str) -> None:  # noqa: ARG002 - the password goes unused.
         """Records one authentication attempt against the stubbed host."""
         self._transport.connections.append((hostname, username))
 

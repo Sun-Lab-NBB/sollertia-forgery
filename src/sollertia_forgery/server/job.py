@@ -32,10 +32,10 @@ class Job:
 
     Args:
         job_name: The descriptive name of the SLURM job to be created.
-        output_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
-            the job to the 'stdout' pipe.
-        error_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
-            the job to the 'stderr' pipe.
+        output_log: The absolute path to the file on the compute server to use for storing the messages sent by the
+            job to the 'stdout' pipe.
+        error_log: The absolute path to the file on the compute server to use for storing the messages sent by the job
+            to the 'stderr' pipe.
         working_directory: The absolute path to the compute server's directory in which the temporary job files are
             stored.
         conda_environment: The name of the mamba / conda environment to activate on the server before running the job.
@@ -49,7 +49,7 @@ class Job:
         remote_script_path: The path to the job's script file on the remote compute server.
         job_id: The unique job identifier assigned by the SLURM manager to this job when it is accepted for execution.
         job_name: The descriptive name of the SLURM job.
-        _command: The _SlurmScript instance used to assemble the job before it is translated into a shell script.
+        _command: The job's batch script under assembly, rendered into shell text on demand.
     """
 
     def __init__(
@@ -137,9 +137,9 @@ class _SlurmScript:
         cleanup_path: The absolute path to the script file itself, removed when the job exits.
 
     Attributes:
-        _directives: The list of ``#SBATCH`` directive lines for the script header.
-        _preamble: The list of environment setup lines that run before error checking is enabled.
-        _commands: The list of shell command lines appended to the script body.
+        _directives: The ``#SBATCH`` directive lines forming the script header.
+        _preamble: The environment setup lines that run before error checking is enabled.
+        _commands: The shell command lines forming the script body.
         _cleanup_path: The path removed by the script's exit trap.
     """
 
@@ -207,8 +207,8 @@ class _SlurmScript:
             lines.append(f"trap 'rm -f {shlex.quote(self._cleanup_path)}' EXIT")
         lines.extend(self._preamble)
         lines.append("")
-        # Enabled after the environment is activated, so the job's exit status is the status of its first failing
-        # command rather than the status of whatever ran last.
+        # Enables error checking once the environment is activated, so the job's exit status is the status of its
+        # first failing command rather than the status of whatever ran last.
         lines.append("set -eo pipefail")
         lines.extend(self._commands)
         return "\n".join(lines) + "\n"

@@ -8,8 +8,15 @@ from typing import TYPE_CHECKING
 from pathlib import Path
 
 import pytest
+from sollertia_shared_assets import (
+    DatasetData,
+    SessionTypes,
+    DatasetSession,
+    AcquisitionSystems,
+)
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
+from sollertia_forgery.forging import forging_tracker_path
 from sollertia_forgery.shared_assets import ProcessingPipelines, resolve_session_tracker_path
 from sollertia_forgery.orchestration.maintenance import (
     _resolve_path_size,
@@ -20,10 +27,25 @@ from sollertia_forgery.orchestration.maintenance import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sollertia_shared_assets import SessionData
+    from sollertia_shared_assets import ProjectData, SessionData
 
 _VIDEO_JOBS: list[tuple[str, str]] = [("motion_energy", "face_camera"), ("camera_timestamps", "face_camera")]
 """The video jobs against which every video tracker written by these tests is aligned."""
+
+_FORGING_JOBS: list[tuple[str, str]] = [("multiday_discovery", "305"), ("session_data_assembly", "a_session")]
+"""The forging jobs against which every forging tracker written by these tests is aligned."""
+
+_DATASET_NAME: str = "TestDataset"
+"""The name of the dataset these tests forge, carrying uppercase so the lowercasing of the cindra output directory
+stays observable."""
+
+_SIBLING_DATASET_DIRECTORY: str = "305_otherdataset"
+"""The cross-recording directory of a second dataset the same session belongs to, which the cleanup of this dataset
+has to leave standing."""
+
+_MULTI_RECORDING_DIRECTORY: str = "multi_recording"
+"""The directory under a session's cindra output holding one subdirectory per dataset that tracks the session across
+recordings."""
 
 
 def job_identifier(job: tuple[str, str]) -> str:
@@ -82,11 +104,48 @@ def video_tracker(
     )
 
 
+@pytest.fixture
+def forged_dataset(project: ProjectData, experiment_session: SessionData) -> DatasetData:
+    """Creates a dataset naming the session, which gives the forging cleanup a hierarchy and a source session to reach.
+
+    Args:
+        project: The project under which the dataset hierarchy is created.
+        experiment_session: The session the dataset names as its only source.
+
+    Returns:
+        The created dataset.
+    """
+    return DatasetData.create(
+        name=_DATASET_NAME,
+        project=project.project_name,
+        session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+        acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+        sessions=(DatasetSession(session=experiment_session.session_name, animal=str(experiment_session.animal_id)),),
+        datasets_root=project.path,
+        column_descriptions={},
+    )
+
+
+def cross_recording_root(session: SessionData) -> Path:
+    """Resolves the directory holding one subdirectory per dataset that tracks the session across recordings.
+
+    Args:
+        session: The session whose cross-recording root to resolve.
+
+    Returns:
+        The path to the session's multi-recording root inside its cindra output.
+    """
+    return session.processed_data.cindra_data_path.joinpath(_MULTI_RECORDING_DIRECTORY)
+
+
 def test_a_pipeline_outside_the_dispatch_table_resets_nothing(experiment_session: SessionData) -> None:
     """Verifies that a caller naming an unsupported pipeline gets an empty result rather than a partial reset of
     something else.
     """
-    assert reset_tracked_jobs(pipeline="analysis", unit_paths=[session_root(experiment_session)]) == []
+    assert (
+        reset_tracked_jobs(pipeline="unregistered_pipeline", unit_paths=[session_root(session=experiment_session)])
+        == []
+    )
 
 
 def test_naming_no_identifier_returns_the_whole_unit_to_a_clean_slate(
@@ -97,10 +156,10 @@ def test_naming_no_identifier_returns_the_whole_unit_to_a_clean_slate(
     """
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
 
-    reset = reset_tracked_jobs(pipeline="video", unit_paths=[session_root(experiment_session)])
+    reset = reset_tracked_jobs(pipeline="video", unit_paths=[session_root(session=experiment_session)])
 
-    assert sorted(reset) == sorted(job_identifier(job) for job in _VIDEO_JOBS)
-    assert set(tracker_statuses(tracker_path).values()) == {ProcessingStatus.SCHEDULED}
+    assert sorted(reset) == sorted(job_identifier(job=job) for job in _VIDEO_JOBS)
+    assert set(tracker_statuses(path=tracker_path).values()) == {ProcessingStatus.SCHEDULED}
     assert video_tracker.file_path == tracker_path
 
 
@@ -112,10 +171,12 @@ def test_only_the_named_identifiers_are_reset(
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
     target = job_identifier(job=_VIDEO_JOBS[0])
 
-    reset = reset_tracked_jobs(pipeline="video", unit_paths=[session_root(experiment_session)], job_ids=[target])
+    reset = reset_tracked_jobs(
+        pipeline="video", unit_paths=[session_root(session=experiment_session)], job_ids=[target]
+    )
 
     assert reset == [target]
-    statuses = tracker_statuses(tracker_path)
+    statuses = tracker_statuses(path=tracker_path)
     assert statuses[target] is ProcessingStatus.SCHEDULED
     assert statuses[job_identifier(job=_VIDEO_JOBS[1])] is ProcessingStatus.SUCCEEDED
 
@@ -128,16 +189,16 @@ def test_an_identifier_the_unit_does_not_track_is_dropped(
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
 
     reset = reset_tracked_jobs(
-        pipeline="video", unit_paths=[session_root(experiment_session)], job_ids=["0123456789abcdef"]
+        pipeline="video", unit_paths=[session_root(session=experiment_session)], job_ids=["0123456789abcdef"]
     )
 
     assert reset == []
-    assert set(tracker_statuses(tracker_path).values()) == {ProcessingStatus.SUCCEEDED}
+    assert set(tracker_statuses(path=tracker_path).values()) == {ProcessingStatus.SUCCEEDED}
 
 
 def test_a_unit_holding_no_tracker_is_skipped(experiment_session: SessionData) -> None:
     """Verifies a pipeline that never ran for the unit has no record to clear, so the call reports nothing for it."""
-    assert reset_tracked_jobs(pipeline="video", unit_paths=[session_root(experiment_session)]) == []
+    assert reset_tracked_jobs(pipeline="video", unit_paths=[session_root(session=experiment_session)]) == []
 
 
 def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_reset(
@@ -149,14 +210,17 @@ def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_reset(
     unresolvable = tmp_path.joinpath("not_a_session")
     unresolvable.mkdir()
 
-    reset = reset_tracked_jobs(pipeline="video", unit_paths=[unresolvable, session_root(experiment_session)])
+    reset = reset_tracked_jobs(pipeline="video", unit_paths=[unresolvable, session_root(session=experiment_session)])
 
-    assert sorted(reset) == sorted(job_identifier(job) for job in _VIDEO_JOBS)
+    assert sorted(reset) == sorted(job_identifier(job=job) for job in _VIDEO_JOBS)
 
 
 def test_a_pipeline_outside_the_dispatch_table_removes_nothing(experiment_session: SessionData) -> None:
     """Verifies that an unsupported pipeline identifier never reaches a unit's files at all."""
-    assert clean_pipeline_output(pipeline="analysis", unit_paths=[session_root(experiment_session)]) == []
+    assert (
+        clean_pipeline_output(pipeline="unregistered_pipeline", unit_paths=[session_root(session=experiment_session)])
+        == []
+    )
 
 
 def test_a_pipeline_that_owns_a_directory_removes_it_alongside_its_tracker(
@@ -168,7 +232,7 @@ def test_a_pipeline_that_owns_a_directory_removes_it_alongside_its_tracker(
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
     output_directory.joinpath("motion_energy.feather").write_bytes(b"0123456789")
 
-    removed = clean_pipeline_output(pipeline="video", unit_paths=[session_root(experiment_session)])
+    removed = clean_pipeline_output(pipeline="video", unit_paths=[session_root(session=experiment_session)])
 
     assert [entry["path"] for entry in removed] == [str(tracker_path), str(output_directory)]
     assert removed[1]["removed_bytes"] == 10
@@ -195,7 +259,7 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
 
     assert lock_path.is_file(), "the tracker did not leave the lock file the cleanup is expected to remove"
 
-    removed = clean_pipeline_output(pipeline="checksum", unit_paths=[session_root(experiment_session)])
+    removed = clean_pipeline_output(pipeline="checksum", unit_paths=[session_root(session=experiment_session)])
 
     assert [entry["path"] for entry in removed] == [str(tracker_path)]
     assert not tracker_path.exists()
@@ -207,7 +271,7 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
 
 def test_a_unit_with_nothing_recorded_removes_nothing(experiment_session: SessionData) -> None:
     """Verifies that a pipeline that never ran leaves neither a tracker nor an output directory behind to remove."""
-    assert clean_pipeline_output(pipeline="video", unit_paths=[session_root(experiment_session)]) == []
+    assert clean_pipeline_output(pipeline="video", unit_paths=[session_root(session=experiment_session)]) == []
 
 
 def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_cleaned(
@@ -220,12 +284,60 @@ def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_cleaned(
     unresolvable.mkdir()
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
 
-    removed = clean_pipeline_output(pipeline="video", unit_paths=[unresolvable, session_root(experiment_session)])
+    removed = clean_pipeline_output(
+        pipeline="video", unit_paths=[unresolvable, session_root(session=experiment_session)]
+    )
 
     assert [entry["path"] for entry in removed] == [
         str(tracker_path),
         str(experiment_session.processed_data.video_data_path),
     ]
+
+
+def test_cleaning_a_dataset_removes_the_cross_recording_output_it_owns_in_each_source_session(
+    forged_dataset: DatasetData,
+    experiment_session: SessionData,
+    write_tracker: Callable[..., ProcessingTracker],
+) -> None:
+    """Verifies that the output the cross-recording stages left in a source session goes with the dataset that
+    registered it, while everything that session holds for another dataset stays.
+    """
+    dataset_root = forged_dataset.dataset_data_path.parent
+    tracker_path = forging_tracker_path(dataset=forged_dataset)
+    write_tracker(tracker_path, _FORGING_JOBS, succeeded=_FORGING_JOBS)
+    owned = cross_recording_root(session=experiment_session).joinpath(
+        f"{experiment_session.animal_id}_{_DATASET_NAME}".lower()
+    )
+    owned.mkdir(parents=True)
+    owned.joinpath("cell_registration.npz").write_bytes(b"0123456789")
+    sibling = cross_recording_root(session=experiment_session).joinpath(_SIBLING_DATASET_DIRECTORY)
+    sibling.mkdir(parents=True)
+    single_recording = experiment_session.processed_data.cindra_data_path.joinpath("plane_0")
+    single_recording.mkdir(parents=True)
+
+    removed = clean_pipeline_output(pipeline="forging", unit_paths=[dataset_root])
+
+    assert [entry["path"] for entry in removed] == [str(tracker_path), str(dataset_root), str(owned)]
+    assert removed[2]["removed_bytes"] == 10
+    assert not owned.exists()
+    assert sibling.is_dir(), "cleaning the dataset removed the cross-recording output of another dataset"
+    assert single_recording.is_dir(), "cleaning the dataset removed the session's single-recording output"
+
+
+def test_a_source_session_holding_no_cross_recording_output_reports_nothing_for_it(
+    forged_dataset: DatasetData, experiment_session: SessionData
+) -> None:
+    """Verifies that a dataset whose cross-recording stages never ran reports the dataset tree alone, leaving the
+    source session's own output untouched.
+    """
+    dataset_root = forged_dataset.dataset_data_path.parent
+    single_recording = experiment_session.processed_data.cindra_data_path
+    single_recording.mkdir(parents=True, exist_ok=True)
+
+    removed = clean_pipeline_output(pipeline="forging", unit_paths=[dataset_root])
+
+    assert [entry["path"] for entry in removed] == [str(dataset_root)]
+    assert single_recording.is_dir()
 
 
 def test_a_directory_is_measured_across_its_whole_tree(tmp_path: Path) -> None:

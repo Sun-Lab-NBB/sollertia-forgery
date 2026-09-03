@@ -240,6 +240,14 @@ def test_read_points_from_h5_rejects_a_file_holding_no_prediction_frame(tmp_path
         _read_points_from_h5(h5_path=h5_path, bodyparts=_CANONICAL_POINTS)
 
 
+def test_read_points_from_h5_rejects_a_file_holding_a_flat_column_frame(tmp_path: Path) -> None:
+    h5_path = tmp_path.joinpath("face_eye_tracking.h5")
+    pd.DataFrame({"a": [1.0], "b": [2.0]}).to_hdf(path_or_buf=h5_path, key="df", format="table")
+
+    with pytest.raises(ValueError, match=re.escape("does not contain a DeepLabCut prediction")):
+        _read_points_from_h5(h5_path=h5_path, bodyparts=_CANONICAL_POINTS)
+
+
 def test_read_points_from_h5_rejects_a_file_missing_a_canonical_bodypart(
     tmp_path: Path, write_dlc_predictions: Callable[..., Path]
 ) -> None:
@@ -270,8 +278,8 @@ def test_read_points_from_h5_returns_rows_in_ascending_frame_order(
 
 def test_compute_pupil_metrics_measures_a_tilted_pupil_by_its_semi_diameter_cross_product() -> None:
     # The two semi-diameters are perpendicular, eight and twelve pixels long, and tilted off both image axes, so the
-    # ellipse area is pi times the magnitude of their cross product, pi * 96, and no sum of products can stand in
-    # for it the way it can for the axis-aligned circle every other synthetic frame carries.
+    # ellipse area is pi times the magnitude of their cross product, pi * 96. No sum of products can stand in for that
+    # area the way it can for the axis-aligned circle every other synthetic frame carries.
     tilted = _frame_specification(pupil_semi_a=(-4.8, 6.4), pupil_semi_b=(9.6, 7.2))
 
     metrics = _compute_pupil_metrics(points=_build_points(specifications=[tilted]))
@@ -329,7 +337,7 @@ def test_compute_pupil_metrics_flags_a_blink_when_the_eye_closes_below_half_its_
     metrics = _compute_pupil_metrics(points=_build_points(specifications=[*open_frames, closed]))
 
     # The closed frame keeps a fully confident pupil ring, so this also pins the openness term as the one term a
-    # resolving pupil does not override: a fitted eye measured to be closing is an observation rather than a gap.
+    # resolving pupil does not override. A fitted eye measured to be closing is an observation rather than a gap.
     assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, False, False, False, True]
     assert metrics[PupilColumn.EYE_OPENNESS][4] == pytest.approx(0.025)
     assert np.isnan(metrics[PupilColumn.PUPIL_CENTER_X_PX][4])

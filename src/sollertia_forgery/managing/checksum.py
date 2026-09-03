@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import CHECKSUM_EXCLUDED_FILES, SessionData
@@ -10,9 +10,13 @@ from ataraxis_data_structures import ProcessingTracker, calculate_directory_chec
 
 from ..shared_assets import verify_openmp_runtime
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name identifying the checksum resolution job in the checksum processing tracker
 (``ProcessingTrackers.CHECKSUM``), where this pipeline records the job's state."""
+
 
 def run_checksum_processing_pipeline(
     session_path: Path,
@@ -96,9 +100,8 @@ def run_checksum_processing_pipeline(
                 level=LogLevel.INFO,
             )
 
-        # If the 'regenerate_checksum' flag is True (forwarded as save_checksum), this guarantees that the check
-        # below succeeds as the function replaces the checksum in the ax_checksum.txt file with the newly calculated
-        # value.
+        # Forwards the regeneration request as save_checksum, so a regenerating run rewrites the ax_checksum.txt
+        # value with the freshly computed one and the comparison below matches by construction.
         resolved_workers = resolve_worker_count(requested_workers=workers)
         calculated_checksum = calculate_directory_checksum(
             directory=session.raw_data_path,
@@ -172,8 +175,7 @@ def checksum_job_prerequisites(
 
     Notes:
         The checksum pipeline produces a single job with no upstream dependency, so every job maps to an empty
-        prerequisite tuple. This mirrors the prerequisite contract the other worker packages publish, so a batch
-        layer can validate ordering uniformly across pipelines.
+        prerequisite tuple.
 
     Args:
         session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.

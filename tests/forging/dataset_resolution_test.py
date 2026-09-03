@@ -159,7 +159,7 @@ def _install_project(
     monkeypatch.setattr(
         target=dataset_module,
         name="resolve_forging_column_descriptions",
-        value=lambda system: _COLUMN_DESCRIPTIONS,  # noqa: ARG005
+        value=lambda system: _COLUMN_DESCRIPTIONS,  # noqa: ARG005 - one roster stands in for every system.
     )
     return project_root
 
@@ -210,17 +210,15 @@ def test_resolve_dataset_forges_without_optional_surgery_metadata(
 def test_resolve_dataset_copies_the_surgery_snapshot_of_every_covered_animal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a dataset created over several animals receives each animal's own surgery metadata snapshot.
-
-    The snapshot is per-animal provenance, and an animal whose source file is missing is only reported as a warning,
-    so an animal never visited at all would leave the dataset silently.
-    """
+    """Verifies that a dataset created over several animals receives each animal's own surgery metadata snapshot."""
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]}
     )
 
     resolve_dataset(name=_DATASET_NAME, session_names=("session_1", "session_2"), project_root=project_root)
 
+    # A missing source snapshot is only reported as a warning, so an animal never visited at all would leave the
+    # dataset silently.
     assert project_root.joinpath(_DATASET_NAME, "animal_a", _SURGERY_FILENAME).read_text() == "animal: animal_a"
     assert project_root.joinpath(_DATASET_NAME, "animal_b", _SURGERY_FILENAME).read_text() == "animal: animal_b"
 
@@ -228,11 +226,7 @@ def test_resolve_dataset_copies_the_surgery_snapshot_of_every_covered_animal(
 def test_resolve_dataset_copies_the_surgery_snapshot_of_an_animals_latest_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that an animal's snapshot is taken from its most recent source session rather than its earliest.
-
-    Session names are timestamped, so the last of an animal's sessions in natural order is the most recent one and
-    carries the surgery record closest to the sessions over which the dataset is forged.
-    """
+    """Verifies that an animal's snapshot is taken from its most recent source session rather than its earliest."""
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1", "session_2"]}
     )
@@ -241,6 +235,8 @@ def test_resolve_dataset_copies_the_surgery_snapshot_of_an_animals_latest_sessio
 
     resolve_dataset(name=_DATASET_NAME, session_names=("session_1", "session_2"), project_root=project_root)
 
+    # Session names are timestamped, so the last of an animal's sessions in natural order is the most recent one and
+    # carries the surgery record closest to the sessions over which the dataset is forged.
     assert project_root.joinpath(_DATASET_NAME, "animal_a", _SURGERY_FILENAME).read_text() == "session: session_2"
 
 
@@ -311,11 +307,7 @@ def test_resolve_dataset_rejects_an_unprocessed_session(tmp_path: Path, monkeypa
 def test_resolve_dataset_rejects_an_unprocessed_session_the_list_does_not_begin_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that every session of a dataset's creation list is screened, not only the source of its metadata.
-
-    The admission gate is the only thing standing between an unfinished pipeline and a forged dataset, so a session
-    named after the first has to hold the whole definition out just as the first one does.
-    """
+    """Verifies that every session of a dataset's creation list is screened, not only the source of its metadata."""
     project_root = _install_project(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -389,11 +381,7 @@ def test_resolve_dataset_rejects_a_session_of_a_differing_type(tmp_path: Path, m
 def test_resolve_dataset_screens_every_added_session_rather_than_the_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installation: dict[str, Any], message: str
 ) -> None:
-    """Verifies that an extension naming several sessions screens each of them against the dataset it joins.
-
-    The dataset marker keeps claiming one session type and one acquisition system, so a second added session that
-    the check never reaches leaves the membership mixed while the marker still reads as uniform.
-    """
+    """Verifies that an extension naming several sessions screens each of them against the dataset it joins."""
     project_root = _install_project(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -405,6 +393,8 @@ def test_resolve_dataset_screens_every_added_session_rather_than_the_first(
     with pytest.raises(ValueError, match=message):
         resolve_dataset(name=_DATASET_NAME, session_names=("session_2", "session_3"), project_root=project_root)
 
+    # The dataset marker keeps claiming one session type and one acquisition system, so a second added session that
+    # the check never reaches leaves the membership mixed while the marker still reads as uniform.
     reloaded = DatasetData.load(dataset_path=project_root.joinpath(_DATASET_NAME))
     assert _group_sessions_by_animal(reloaded) == {"animal_a": {"session_1"}}
 
@@ -529,22 +519,20 @@ def test_resolve_dataset_reports_a_session_name_matching_two_directories(
 def test_create_dataset_rejects_a_session_of_a_differing_acquisition_system(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that creating a dataset from sessions of two acquisition systems is rejected.
-
-    Only one acquisition system is registered, so admission rejects a divergent value before the creator compares
-    it. The creator is therefore driven directly with admission held open. A second registered system would reach
-    that state through the public policy.
-    """
+    """Verifies that creating a dataset from sessions of two acquisition systems is rejected."""
     project_root = _install_project(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]},
         acquisition_systems={"session_2": "other_system"},
     )
+    # Only one acquisition system is registered, so admission rejects a divergent value before the creator compares
+    # it. Holding admission open therefore drives the creator directly. A second registered system would reach that
+    # state through the public policy.
     monkeypatch.setattr(
         target=dataset_module,
         name="verify_session_admissibility",
-        value=lambda session: None,  # noqa: ARG005
+        value=lambda session: None,  # noqa: ARG005 - the stand-in admits every session.
     )
 
     with pytest.raises(ValueError, match="session 'session_2' was acquired by 'other_system'"):
@@ -556,15 +544,13 @@ def test_create_dataset_rejects_a_session_of_a_differing_acquisition_system(
 def test_verify_session_compatibility_rejects_a_differing_acquisition_system(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a session acquired by another system never joins an existing dataset.
-
-    The dataset's own recorded system is moved off the session's, which is the state that a dataset forged under a
-    second acquisition system would present to the compatibility check.
-    """
+    """Verifies that a session acquired by another system never joins an existing dataset."""
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]}
     )
     dataset = resolve_dataset(name=_DATASET_NAME, session_names=("session_1",), project_root=project_root)
+    # Moving the dataset's own recorded system off the session's is the state that a dataset forged under a second
+    # acquisition system would present to the compatibility check.
     dataset.acquisition_system = "other_system"
 
     with pytest.raises(ValueError, match="the dataset was acquired by 'other_system'"):
@@ -695,11 +681,7 @@ def test_resolve_dataset_rejects_rebuilding_an_animal_absent_from_the_dataset(
 def test_resolve_dataset_rejects_naming_one_animal_for_rebuilding_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a repeated rebuild entry is refused before the hierarchy is touched.
-
-    A rebuild removes the animal before anything is added, so a second removal of the same animal would raise after
-    the first had already deleted its forged outputs and dropped it from the dataset.
-    """
+    """Verifies that a repeated rebuild entry is refused before the hierarchy is touched."""
     project_root = _install_project(
         tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1", "session_2"]}
     )
@@ -713,6 +695,8 @@ def test_resolve_dataset_rejects_naming_one_animal_for_rebuilding_twice(
             recreate_animals=("animal_a", "animal_a"),
         )
 
+    # A rebuild removes the animal before anything is added, so a second removal of the same animal would raise after
+    # the first had already deleted its forged outputs and dropped it from the dataset.
     # The refusal leaves the dataset exactly as it stood, holding both of the animal's forged sessions.
     dataset = DatasetData.load(dataset_path=project_root.joinpath(_DATASET_NAME))
     assert sorted(entry.session for entry in dataset.sessions) == ["session_1", "session_2"]
@@ -841,7 +825,7 @@ def test_reset_animal_jobs_leaves_an_untracked_animal_alone(tmp_path: Path) -> N
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
         tracker.start_job(job_id=job_id)
         tracker.complete_job(job_id=job_id)
-    dataset = SimpleNamespace(get_sessions_for_animal=lambda animal: ())  # noqa: ARG005
+    dataset = SimpleNamespace(get_sessions_for_animal=lambda animal: ())  # noqa: ARG005 - the stub holds none.
 
     _reset_animal_jobs(tracker=tracker, dataset=dataset, animals=("animal_a",))
 
@@ -852,7 +836,7 @@ def test_reset_animal_jobs_leaves_an_untracked_animal_alone(tmp_path: Path) -> N
 def test_reset_animal_jobs_leaves_an_unwritten_tracker_alone(tmp_path: Path) -> None:
     """Verifies that resetting against a tracker that has never been written creates no tracker file."""
     tracker = ProcessingTracker(file_path=tmp_path.joinpath(_FORGING_TRACKER_FILENAME))
-    dataset = SimpleNamespace(get_sessions_for_animal=lambda animal: ())  # noqa: ARG005
+    dataset = SimpleNamespace(get_sessions_for_animal=lambda animal: ())  # noqa: ARG005 - the stub holds none.
 
     _reset_animal_jobs(tracker=tracker, dataset=dataset, animals=("animal_a",))
 
@@ -901,16 +885,14 @@ def test_define_forging_dataset_applies_every_definition_argument(
 
 
 def test_run_forging_pipeline_never_redefines_the_hierarchy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that running the pipeline loads the dataset without changing its session set.
-
-    The hierarchy is built by the definition entry point before any job is prepared, so a run that could widen it
-    would let a dispatched job mutate the universe against which its siblings were planned.
-    """
+    """Verifies that running the pipeline loads the dataset without changing its session set."""
     recorded = _record_resolution(monkeypatch)
 
     with pytest.raises(RuntimeError, match="halted"):
         run_forging_pipeline(name=_DATASET_NAME, project_root=tmp_path)
 
+    # The hierarchy is built by the definition entry point before any job is prepared, so a run that could widen it
+    # would let a dispatched job mutate the universe against which its siblings were planned.
     assert recorded["session_names"] == ()
 
 

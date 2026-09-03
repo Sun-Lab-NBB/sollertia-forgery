@@ -9,10 +9,9 @@ from enum import StrEnum
 
 
 class BehaviorDataFiles(StrEnum):
-    """Enumerates the canonical filenames of the behavior feather files written by the donated Mesoscope-VR parsers,
-    most of which the donated assembly worker reads back. The microcontroller parsers write the module feathers into
-    the session's ``processed_data/microcontroller_data`` directory, while the runtime parser writes them into
-    ``processed_data/runtime_data``.
+    """Enumerates the canonical filenames of the behavior feather files written by the donated Mesoscope-VR parsers. The
+    microcontroller parsers write the module feathers into the session's ``processed_data/microcontroller_data``
+    directory, while the runtime parser writes them into ``processed_data/runtime_data``.
     """
 
     ENCODER = "encoder_data.feather"
@@ -53,9 +52,9 @@ class BehaviorDataFiles(StrEnum):
 
 
 class VideoDataFiles(StrEnum):
-    """Enumerates the canonical filenames of the per-camera video feathers written by the video-processing pipeline and
-    read back by the donated video-dataset assembler. The pipeline writes them into the session's
-    ``processed_data/video_data`` directory under the acquisition-time camera names.
+    """Enumerates the canonical filenames of the per-camera video feathers written by the video-processing pipeline. The
+    pipeline writes them into the session's ``processed_data/video_data`` directory under the acquisition-time camera
+    names.
     """
 
     FACE_CAMERA_TIMESTAMPS = "face_camera_timestamps.feather"
@@ -400,5 +399,5 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
 
 MESOSCOPE_COLUMN_DESCRIPTIONS: dict[str, str] = {column.value: _COLUMN_DESCRIPTIONS[column] for column in DatasetColumn}
 """The Mesoscope-VR column-description binding donated to the forging pipeline. Maps every column name that the
-Mesoscope-VR assembly worker can emit into ``data.feather`` to its human-readable description, baked into each forged
-dataset's ``data_descriptions.feather``. Derived from ``DatasetColumn`` and ``_COLUMN_DESCRIPTIONS``."""
+Mesoscope-VR assembly worker can emit into ``data.feather`` to its human-readable description. Derived from
+``DatasetColumn`` and ``_COLUMN_DESCRIPTIONS``."""

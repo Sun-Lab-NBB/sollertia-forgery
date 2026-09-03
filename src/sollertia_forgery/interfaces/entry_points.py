@@ -128,7 +128,7 @@ def omp_command(source: Path | None, target: Path | None, *, force: bool, yes: b
 
 
 def _register_subcommands() -> None:
-    """Registers every subcommand and subcommand group on the top-level ``slf`` Click group."""
+    """Registers the imported subcommands and subcommand groups on the ``slf`` group."""
     slf_cli.add_command(cmd=manifest_cli)
     slf_cli.add_command(cmd=checksum_command)
     slf_cli.add_command(cmd=dataset_state_command)

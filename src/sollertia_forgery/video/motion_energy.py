@@ -36,13 +36,8 @@ filter's anchor on the pixel at each block's center, so the strided sampling rea
 MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
 preceding keyframe, so each chunk discards up to one group of frames' worth of decoded frames. The floor sits high
-enough relative to the keyframe interval to keep those discarded frames a small fraction of the chunk.
-
-Notes:
-    Public because it is what decides how many decoders one motion-energy job opens, which the orchestration sizing
-    pass has to know to reserve the job the memory it holds rather than the memory the job's full core allocation
-    would hold. A recording shorter than this threshold decodes in the job's own process and opens no pool at all.
-"""
+enough relative to the keyframe interval to keep those discarded frames a small fraction of the chunk. A recording
+shorter than this threshold decodes in the job's own process and opens no pool at all."""
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
 """The dimension count that identifies a decoded frame as a single grayscale plane. A frame matching it is used as-is,
@@ -144,7 +139,7 @@ def compute_camera_motion_energy(
 
     # A pool is only worth its startup cost with more than one chunk to decode. A single chunk runs in-process.
     if len(chunks) == 1:
-        results = [_energy_chunk(video_path=str(video_path), start_frame=0, frame_count=frame_count)]
+        results = [_compute_chunk_energy(video_path=str(video_path), start_frame=0, frame_count=frame_count)]
     elif executor is not None:
         results = _submit_chunks(
             executor=executor, video_path=video_path, chunks=chunks, display_progress=display_progress
@@ -258,7 +253,9 @@ def _submit_chunks(
         The per-chunk ``(energy, luminance)`` arrays, ordered to match the input chunks.
     """
     futures = [
-        executor.submit(_energy_chunk, video_path=str(video_path), start_frame=start_frame, frame_count=frame_count)
+        executor.submit(
+            _compute_chunk_energy, video_path=str(video_path), start_frame=start_frame, frame_count=frame_count
+        )
         for start_frame, frame_count in chunks
     ]
 
@@ -325,7 +322,7 @@ def _join_chunks(
     return energy, luminance
 
 
-def _energy_chunk(
+def _compute_chunk_energy(
     video_path: str, start_frame: int, frame_count: int
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Computes the motion energy and luminance of one contiguous chunk of a recording.

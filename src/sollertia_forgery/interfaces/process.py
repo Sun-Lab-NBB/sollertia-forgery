@@ -21,10 +21,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 class _SharedProcessingParameters:
     """Bundles the options parsed on the ``process`` group and shared across its ``video``, ``microcontroller``,
     ``runtime``, and ``two-photon`` subcommands.
-
-    The group callback builds one of these from its options and stores it on the Click context, and each subcommand
-    reads it back through the ``_pass_shared_parameters`` decorator. The ``runtime`` subcommand uses only
-    ``session_path``, ``workers``, and ``display_progress``, since its single-job pipeline has no remote-dispatch job.
     """
 
     session_path: Path | None
@@ -72,7 +68,8 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
     default=None,
     help=(
         "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
-        "(remote mode). If not provided, discovers and runs every available job for the session (local mode)."
+        "(remote mode). If not provided, discovers and runs every available job for the session (local mode). The "
+        "'runtime' subcommand ignores it, since its single-job pipeline has no remote-dispatch job."
     ),
 )
 @click.option(
