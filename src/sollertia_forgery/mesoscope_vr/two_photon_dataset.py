@@ -42,8 +42,8 @@ raw mesoscope_data directory."""
 _SCANIMAGE_FRAME_NUMBER_KEY: str = "frameNumberAcquisition"
 """The key name of the per-frame ScanImage frame counter inside the frame_variant_metadata archive. Raw ScanImage
 increases the counter with acquisition time within one acquisition and restarts it at one for each further
-acquisition, but preprocessing renumbers it into a session-global one-based sequence before writing the archive, so
-only an archive written by older preprocessing still carries the restarts."""
+acquisition, but preprocessing renumbers it into a session-global one-based sequence before writing the archive. Only
+an archive written by older preprocessing still carries the restarts."""
 
 _SCANIMAGE_FRAME_TIMESTAMP_KEY: str = "frameTimestamps_sec"
 """The key name of the per-frame ScanImage clock timestamps (seconds) inside the frame_variant_metadata archive."""
@@ -184,8 +184,8 @@ def assemble_cindra_dataset(
     #
     # Clipping the front assumes the surplus sits before the acquisition, which holds while every plane contributes
     # the same sample count. The reference mesoscope-vr recording guarantees that by acquiring one physical plane on
-    # one channel. cindra's plane combination trims each plane to the shortest one it holds, so a recording that
-    # interleaves several planes or two channels would carry part of its surplus at the tail instead.
+    # one channel. cindra's plane combination trims each plane to the shortest one it holds. A recording that
+    # interleaves several planes or two channels would therefore carry part of its surplus at the tail instead.
     if len(frame_aligned_data) > frame_count:
         frame_aligned_data = frame_aligned_data.tail(frame_count)
     elif len(frame_aligned_data) < frame_count:
@@ -206,8 +206,8 @@ def assemble_cindra_dataset(
     )
 
     # Uses the single-recording cell classification data to create a filtering mask that excludes non-cell ROIs from
-    # the forged dataset. cindra stores classification results as a (num_rois, 2) float32 array where column 0 holds
-    # the is_cell label (1.0 or 0.0) and column 1 holds the classifier probability.
+    # the forged dataset. cindra stores classification results as a (num_rois, 2) float32 array. Column 0 holds the
+    # is_cell label (1.0 or 0.0) and column 1 holds the classifier probability.
     classification = np.load(
         file=resolve_array_path(root_path=cindra_data_path, array=RecordingArrays.CELL_CLASSIFICATION), mmap_mode="r"
     )
@@ -464,13 +464,13 @@ def _align_pulses_to_scanimage(
         )
         console.error(message=message, error=ValueError)
 
-    # Preprocessing natsorts the stacks and concatenates their per-frame metadata in ascending starting-frame order,
-    # so an archive it writes already carries the chronological order the match against TTL rising edges needs, and
-    # its renumbered frame counter already ascends across the whole session. Sorting stays because an archive written
-    # by older preprocessing keeps the raw ScanImage counter, which restarts at one for each further acquisition, so
-    # there the acquisition number orders the acquisitions against each other and the frame counter orders the frames
-    # within one. NPZ archives do not support memory mapping, so the context manager is used to keep the archive open
-    # only long enough to copy the arrays.
+    # Preprocessing natsorts the stacks and concatenates their per-frame metadata in ascending starting-frame order.
+    # An archive it writes therefore already carries the chronological order the match against TTL rising edges needs,
+    # and its renumbered frame counter already ascends across the whole session. Sorting stays because an archive
+    # written by older preprocessing keeps the raw ScanImage counter, which restarts at one for each further
+    # acquisition. There the acquisition number orders the acquisitions against each other, and the frame counter
+    # orders the frames within one. NPZ archives do not support memory mapping, so the context manager is used to keep
+    # the archive open only long enough to copy the arrays.
     with np.load(file=metadata_path) as metadata:
         frame_numbers = np.asarray(metadata[_SCANIMAGE_FRAME_NUMBER_KEY])
         frame_seconds = np.asarray(metadata[_SCANIMAGE_FRAME_TIMESTAMP_KEY])
@@ -487,8 +487,8 @@ def _align_pulses_to_scanimage(
     #
     # This one-to-one equality holds while the recording delivers one cindra sample per ScanImage frame, which the
     # reference mesoscope-vr configuration guarantees by acquiring one physical plane on one channel. cindra sizes
-    # each plane from its own interleave position, so a recording carrying several planes or two channels reports a
-    # per-position count that this comparison would read as an inconsistency.
+    # each plane from its own interleave position. A recording carrying several planes or two channels therefore
+    # reports a per-position count that this comparison would read as an inconsistency.
     if scanimage_microseconds.size != expected_frame_count:
         message = (
             f"Unable to apply the ScanImage-based fallback alignment for the cindra dataset assembly. The cindra "
@@ -586,6 +586,9 @@ def _nearest_target_index(values: NDArray[np.int64], sorted_targets: NDArray[np.
         values: The values whose nearest target is resolved.
         sorted_targets: The candidate targets, sorted in strictly ascending order. Must contain at least two
             elements.
+
+    Returns:
+        The index into ``sorted_targets`` of the nearest target for each query value, one entry per query value.
     """
     upper_index = np.clip(np.searchsorted(sorted_targets, values), 1, sorted_targets.size - 1)
     left_distance = np.abs(values - sorted_targets[upper_index - 1])

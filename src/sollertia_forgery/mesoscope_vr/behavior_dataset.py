@@ -60,9 +60,9 @@ def assemble_behavior_dataset(
             assembled dataset before returning it to the caller.
 
     Returns:
-        A DataFrame aligned to the reference time vector with the columns ``system_state``, ``lick``, ``water_uL``,
-        and ``reward``, plus the ``time_us`` and ``elapsed_minutes`` columns when ``drop_time_columns`` is False, and
-        the optional ``brake``, ``screens``, ``torque_N_cm``, ``distance_cm``, and ``speed_cm_s`` columns when their
+        A DataFrame aligned to the reference time vector with the columns ``system_state``, ``lick``, ``water_uL``, and
+        ``reward``, plus the ``time_us`` and ``elapsed_minutes`` columns when ``drop_time_columns`` is False. The
+        optional ``brake``, ``screens``, ``torque_N_cm``, ``distance_cm``, and ``speed_cm_s`` columns join it when their
         source feathers are present.
 
     Raises:
@@ -95,8 +95,6 @@ def assemble_behavior_dataset(
     lick_data_frame = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.LICK), memory_map=True)
     valve_time = valve_data_frame["time_us"].to_numpy()
 
-    # Creates the aligned data dictionary using the reference time vector and interpolating all other data sources to
-    # the reference time vector.
     aligned_data: dict[str, NDArray[np.number]] = {
         "time_us": reference_time,
         "system_state": interpolate_data(

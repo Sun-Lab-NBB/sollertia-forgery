@@ -63,6 +63,20 @@ class _CameraSource:
     """The camera's pupil-tracking feather filename, present only for the camera that carries the eye."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ClockSelection:
+    """Describes the camera clock on which the assembly of a session recording no imaging settles."""
+
+    camera: str
+    """The colloquial name of the camera that recorded the clock."""
+    timestamps_path: Path
+    """The path to that camera's timestamp feather, which holds the clock itself."""
+    samples: int
+    """The samples the clock holds, which is one per frame the camera acquired."""
+    mean_rate: float
+    """The camera's mean frame rate, in frames per second, on which the selection turned."""
+
+
 _CAMERA_SOURCES: tuple[_CameraSource, ...] = (
     _CameraSource(
         name=PUPIL_CAMERA_NAME,
@@ -79,20 +93,6 @@ _CAMERA_SOURCES: tuple[_CameraSource, ...] = (
 )
 """The fixed Mesoscope-VR camera set, each entry naming a camera and the feathers read for it. The face camera carries
 the eye, so only it contributes a pupil feather."""
-
-
-@dataclass(frozen=True, slots=True)
-class _ClockSelection:
-    """Describes the camera clock the assembly of a session recording no imaging settles on."""
-
-    camera: str
-    """The colloquial name of the camera that recorded the clock."""
-    timestamps_path: Path
-    """The path to that camera's timestamp feather, which holds the clock itself."""
-    samples: int
-    """The samples the clock holds, which is one per frame the camera acquired."""
-    mean_rate: float
-    """The camera's mean frame rate, in frames per second, on which the selection turned."""
 
 
 def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uint64]) -> pl.DataFrame:
@@ -205,13 +205,13 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
 
 
 def resolve_reference_clock_samples(video_data_path: Path) -> int | None:
-    """Reports the samples held by the clock ``resolve_slowest_camera_clock`` settles on for a session.
+    """Reports the samples held by the clock on which ``resolve_slowest_camera_clock`` settles for a session.
 
     Notes:
         Answers from the selection both functions share: the same fixed camera set, the same requirement of at least
         two frames spanning a positive duration, and the same lowest mean rate. A count taken from any other clock of
         the same session states the height of a frame the assembly never builds, so a sizing pass reading this reads
-        the clock the assembler itself settles on.
+        the clock on which the assembler itself settles.
 
         Reads each candidate feather's IPC metadata for its row count and exactly two of its timestamps, its first and
         its last. No timestamp column is materialized, so the read costs the same on a session of any length.
@@ -228,11 +228,11 @@ def resolve_reference_clock_samples(video_data_path: Path) -> int | None:
 
 
 def count_camera_source_samples(video_data_path: Path) -> tuple[int, ...]:
-    """Counts the frames each camera ``assemble_video_dataset`` reads acquired for a session.
+    """Counts the frames acquired by each camera that ``assemble_video_dataset`` reads for a session.
 
     Notes:
-        Counts every camera of the fixed set whose timestamp feather is present, which is exactly the set the
-        assembler loops over. The requirements the reference selection imposes are deliberately not imposed here: the
+        Counts every camera of the fixed set whose timestamp feather is present, which is exactly the set over which
+        the assembler loops. The requirements the reference selection imposes are deliberately not imposed here: the
         assembler reads a camera's feathers whatever its timestamps span, so a camera that cannot serve as the
         reference clock still contributes the arrays its frames fill. A camera's timestamp, motion-energy and pupil
         feathers all carry one row per acquired frame, so one count describes every array that camera contributes.
@@ -262,7 +262,7 @@ def _select_reference_camera(video_data_path: Path) -> _ClockSelection | None:
     Notes:
         A camera qualifies when its timestamp feather holds at least two frames spanning a positive duration, which is
         what a mean frame rate needs to be stated. The qualifying camera with the lowest mean rate is selected, and a
-        tie is settled in favour of the first camera the set names.
+        tie is settled in favor of the first camera the set names.
 
         Reads the row count from the feather's IPC footer and exactly two of its timestamps, its first and its last. No
         timestamp column is materialized here, so the selection costs the same on a session of any length and the

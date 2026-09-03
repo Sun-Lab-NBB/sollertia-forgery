@@ -84,7 +84,7 @@ def _write_reward_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
     The valve stream plays a tone at 2_000 that dispenses water at 3_000, a second tone at 8_000 that dispenses
     nothing, and a third tone at 14_000 that dispenses water at 15_000. The second tone therefore falls after the
-    session's first delivery, which is the case the cumulative-volume classifier could not reach.
+    session's first delivery, which is the case that pins the classifier to the water delivered inside the tone span.
 
     Args:
         tmp_path: The temporary directory that receives the three input directories.
@@ -240,11 +240,7 @@ def test_clip_to_session_bounds_drops_the_setup_and_teardown_spans(tmp_path: Pat
 
 
 def test_clip_to_session_bounds_anchors_the_head_on_the_first_non_idle_state(tmp_path: Path) -> None:
-    """Verifies that a mid-session return to idle does not move the head anchor.
-
-    The acquisition system re-enters idle whenever a running session pauses, so only the first departure from idle
-    marks the session start.
-    """
+    """Verifies that a mid-session return to idle does not move the head anchor."""
     _write_state_streams(
         directory=tmp_path,
         system_states={0: 0, 1_000: 3, 2_000: 0, 3_000: 3},
@@ -255,6 +251,8 @@ def test_clip_to_session_bounds_anchors_the_head_on_the_first_non_idle_state(tmp
         assembled_data=_build_assembled_dataset(timestamps=[0, 1_000, 2_000, 3_000]), runtime_data_path=tmp_path
     )
 
+    # The acquisition system re-enters idle whenever a running session pauses, so only the first departure from idle
+    # marks the session start.
     assert clipped["time_us"].to_list() == [1_000, 2_000, 3_000]
 
 
@@ -270,10 +268,7 @@ def test_clip_to_session_bounds_keeps_a_dataset_inside_both_bounds(tmp_path: Pat
 
 
 def test_clip_to_session_bounds_keeps_the_head_when_the_session_never_leaves_idle(tmp_path: Path) -> None:
-    """Verifies that a session with no non-idle state keeps its head.
-
-    A session terminated during setup never leaves idle, so no session start anchors the head.
-    """
+    """Verifies that a session with no non-idle state keeps its head."""
     _write_state_streams(
         directory=tmp_path, system_states={0: 0, 1_000: 0}, runtime_times=np.array([0, 3_000], dtype=np.uint64)
     )
@@ -282,6 +277,7 @@ def test_clip_to_session_bounds_keeps_the_head_when_the_session_never_leaves_idl
         assembled_data=_build_assembled_dataset([0, 1_000, 2_000]), runtime_data_path=tmp_path
     )
 
+    # A session terminated during setup never leaves idle, so no session start anchors the head.
     assert clipped["time_us"].to_list() == [0, 1_000, 2_000]
 
 
@@ -297,11 +293,7 @@ def test_clip_to_session_bounds_keeps_the_tail_without_a_runtime_state_entry(tmp
 
 
 def test_assemble_behavior_dataset_classifies_a_dry_mid_session_tone_as_tone(tmp_path: Path) -> None:
-    """Verifies that a tone event delivering no water classifies as 'tone' after an earlier delivery.
-
-    The classifier measures the water delivered inside each tone span, so a dry tone stays 'tone' no matter how much
-    water the session dispensed before it.
-    """
+    """Verifies that a tone event delivering no water classifies as 'tone' after an earlier delivery."""
     microcontroller_data_path, runtime_data_path, raw_data_path = _write_reward_inputs(tmp_path=tmp_path)
 
     behavior_data = assemble_behavior_dataset(
@@ -313,7 +305,9 @@ def test_assemble_behavior_dataset_classifies_a_dry_mid_session_tone_as_tone(tmp
 
     rewards = behavior_data["reward"].to_list()
 
-    # The 8_000 and 9_000 samples span the dry tone, which follows the delivery at 3_000.
+    # The 8_000 and 9_000 samples span the dry tone, which follows the delivery at 3_000. The classifier measures the
+    # water delivered inside each tone span, so a dry tone stays 'tone' no matter how much water the session dispensed
+    # before it.
     assert rewards[8:10] == ["tone", "tone"]
     assert rewards[2:4] == ["yes", "yes"]
     assert rewards[14:16] == ["yes", "yes"]

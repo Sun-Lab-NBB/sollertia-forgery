@@ -207,8 +207,8 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
         Every parameter is written out explicitly, so the configuration is decoupled from cindra's evolving defaults.
         Only ``main.tau`` and ``spike_deconvolution.neuropil_coefficient`` depend on the indicator. The deploy-time
         fields (``file_io.data_path``, ``file_io.output_path``, and the ``runtime`` settings) are left at their cindra
-        defaults, because the two-photon pipeline overrides them with the session-resolved locations and its
-        progress-bar preference. cindra takes the worker count as a call argument, so no configuration field carries it.
+        defaults. They are overridden with the session-resolved locations and the progress-bar preference at dispatch.
+        cindra takes the worker count as a call argument, so no configuration field carries it.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -301,9 +301,9 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
         Every parameter is written out explicitly, so the configuration is decoupled from cindra's evolving defaults.
         Only ``roi_selection.probability_threshold`` and ``spike_deconvolution.neuropil_coefficient`` depend on the
         indicator. The deploy-time fields (``recording_io.recording_directories``, ``recording_io.dataset_name``, and
-        the ``runtime`` settings) are left at their cindra defaults, because the forging pipeline overrides them with
-        the animal's recording directories, the per-animal dataset name, and its progress-bar preference. cindra takes
-        the worker count as a call argument, so no configuration field carries it.
+        the ``runtime`` settings) are left at their cindra defaults. They are overridden at dispatch with the animal's
+        recording directories, the per-animal dataset name, and the progress-bar preference. cindra takes the worker
+        count as a call argument, so no configuration field carries it.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.

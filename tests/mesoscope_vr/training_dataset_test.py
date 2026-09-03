@@ -1,5 +1,5 @@
 """Contains tests for the Mesoscope-VR training-session data assembler, and for the geometry resolver reporting the
-heights that assembler works at, against on-disk sessions built from real feathers.
+heights at which that assembler works, against on-disk sessions built from real feathers.
 """
 
 from __future__ import annotations
@@ -307,15 +307,13 @@ def test_assemble_training_dataset_rejects_a_session_without_a_camera_clock(
 def test_resolve_mesoscope_assembly_geometry_reports_the_reference_clock_and_every_source(
     prepared_training_session: SessionData,
 ) -> None:
-    """Verifies the geometry reports both heights the assembly works at: the reference clock its columns are placed
-    on, and the height each source it reads stands at.
-
-    The face camera runs at twice the body camera's rate, so the assembly settles on the body camera's clock while
-    holding the face camera's feathers at twice that height. The two heights are reported separately because neither
-    states the other.
+    """Verifies the geometry reports both heights at which the assembly works: the reference clock on which its
+    columns are placed, and the height at which it holds each source it reads.
     """
     geometry = resolve_mesoscope_assembly_geometry(session=prepared_training_session)
 
+    # The face camera runs at twice the body camera's rate, so the assembly settles on the body camera's clock while
+    # holding the face camera's feathers at twice that height.
     assert geometry.reference_samples == _BODY_FRAME_COUNT
 
     # One entry per clock the assembly reads, in the order it reads them: the face and body cameras, whose per-camera

@@ -158,7 +158,8 @@ def _write_microcontroller_sources(session: SessionData) -> None:
     The valve stream plays one reward tone that dispenses water, the encoder advances at a constant rate, the screens
     switch on during setup, the brake engages late in the session, and the torque sensor reads a constant value.
 
-    Args: session: The loaded experiment session whose processed microcontroller directory receives the feathers.
+    Args:
+        session: The loaded experiment session whose processed microcontroller directory receives the feathers.
     """
     directory = session.processed_data.microcontroller_data_path
 
@@ -281,10 +282,12 @@ def _build_extraction(roi_count: int, is_cell: Sequence[int] | None = None) -> E
     Every trace array counts up from zero in row-major order, so a value pins the region of interest and the frame that
     produced it, and the per-array offset keeps the four distinguishable.
 
-    Args: roi_count: The number of region rows every trace array carries. is_cell: The per-region cell label, one entry
-    per row, or None for a record carrying no classification.
+    Args:
+        roi_count: The number of region rows every trace array carries.
+        is_cell: The per-region cell label, one entry per row, or None for a record carrying no classification.
 
-    Returns: The populated extraction record, which cindra's own writer saves under its canonical array names.
+    Returns:
+        The populated extraction record, which cindra's own writer saves under its canonical array names.
     """
     base = np.arange(roi_count * _FRAME_COUNT, dtype=np.float32).reshape(roi_count, _FRAME_COUNT)
     classification: NDArray[np.float32] | None = None
@@ -303,10 +306,12 @@ def _build_extraction(roi_count: int, is_cell: Sequence[int] | None = None) -> E
 def _write_cindra_outputs(session: SessionData) -> None:
     """Writes the single-recording and multi-recording cindra arrays the fluorescence assembly reads.
 
-    Notes: Both directories are written through cindra's own writers, so the arrays and the combined metadata archive
-    that the assembler reads back are the ones cindra's stages publish.
+    Notes:
+        Both directories are written through cindra's own writers, so the arrays and the combined metadata archive
+        that the assembler reads back are the ones cindra's stages publish.
 
-    Args: session: The loaded experiment session whose cindra directories receive the arrays.
+    Args:
+        session: The loaded experiment session whose cindra directories receive the arrays.
     """
     single_path = session.processed_data.cindra_data_path
     multi_path = resolve_dataset_path(

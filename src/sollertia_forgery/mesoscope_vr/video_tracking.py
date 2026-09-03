@@ -342,8 +342,8 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     )
 
     # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline against which to
-    # compare. Resolves to NaN and the openness term drops out of the flag below, leaving the eye's visibility to carry
-    # it.
+    # compare. The baseline resolves to NaN and the openness term drops out of the flag below, leaving the eye's
+    # visibility to carry it.
     confident_openness = eye_openness[eye_fit.valid]
     baseline = float(np.nanmedian(confident_openness)) if np.isfinite(confident_openness).any() else np.nan
 
@@ -358,10 +358,10 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     eye_evidence_lost = ~(eye_fit.valid & reflection_valid) | ~np.isfinite(eye_openness)
 
     # A pupil that RESOLVES is the converse case, and it is positive evidence of an open eye: a covered eye presents no
-    # pupil ring to fit, so a confident fit cannot have come from behind a lid. It therefore overrides the terms above,
-    # which infer a blink from evidence that is merely absent, and which a lost eye ring alone would otherwise let a
-    # tracking failure impersonate. The measured-openness term below stands on its own, since a fitted eye observed to
-    # be closing is an observation rather than a gap, and no evidence can be absent from it.
+    # pupil ring to fit, so a confident fit cannot have come from behind a lid. It therefore overrides the terms above.
+    # Those terms infer a blink from evidence that is merely absent, and a lost eye ring alone would otherwise let a
+    # tracking failure impersonate a blink. The measured-openness term below stands on its own, since a fitted eye
+    # observed to be closing is an observation rather than a gap, and no evidence can be absent from it.
     is_blink = (eye_evidence_lost & ~pupil_fit.valid) | (eye_openness < _BLINK_FRACTION * baseline)
     not_blink = ~is_blink
 
@@ -499,6 +499,9 @@ def _norm(vectors: NDArray[np.float64]) -> NDArray[np.float64]:
 
     Args:
         vectors: The vectors to measure.
+
+    Returns:
+        The per-frame vector lengths.
     """
     return np.hypot(vectors[:, 0], vectors[:, 1])
 
@@ -509,5 +512,8 @@ def _mask_invalid(metrics: dict[str, NDArray[np.float64]], valid: NDArray[np.boo
     Args:
         metrics: A mapping from each metric column name to its per-frame array.
         valid: The mask marking the frames whose values survive.
+
+    Returns:
+        The same mapping, with every value at a False mask position replaced by NaN.
     """
     return {name: np.where(valid, values, np.nan) for name, values in metrics.items()}

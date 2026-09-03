@@ -217,11 +217,7 @@ def _write_torque_feather(microcontroller_data_path: Path) -> None:
 
 
 def test_assemble_behavior_dataset_emits_only_the_mandatory_columns(tmp_path: Path) -> None:
-    """Verifies that a session carrying just the valve, lick, and system-state feathers assembles the shared columns.
-
-    The optional encoder, screen, brake, and torque sources are absent, so the assembled dataset holds the clock, the
-    lick and water traces, the reward classification, and the system state alone.
-    """
+    """Verifies that a session carrying just the valve, lick, and system-state feathers assembles the shared columns."""
     microcontroller_data_path, runtime_data_path, raw_data_path = _make_input_directories(tmp_path=tmp_path)
     _write_hardware_state(raw_data_path=raw_data_path)
     _write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
@@ -273,11 +269,7 @@ def test_assemble_behavior_dataset_emits_only_the_mandatory_columns(tmp_path: Pa
 
 
 def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) -> None:
-    """Verifies that the encoder, screen, brake, and torque feathers add their columns with the documented gating.
-
-    The brake column thresholds the interpolated brake torque, the torque column is forced to zero across the run
-    samples, the encoder distance is held forward outside the run state, and the speed is zeroed outside it.
-    """
+    """Verifies that the encoder, screen, brake, and torque feathers add their columns with the documented gating."""
     microcontroller_data_path, runtime_data_path, raw_data_path = _make_input_directories(tmp_path=tmp_path)
     _write_hardware_state(raw_data_path=raw_data_path)
     _write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
@@ -306,6 +298,7 @@ def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) 
         "reward",
         "system_state",
     ]
+    # The brake column thresholds the interpolated brake torque.
     assert behavior_data["brake"].to_list() == [1, 1, 1, 0, 0, 0, 0, 1, 1, 1]
     assert behavior_data["screens"].to_list() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
     # The ramp reads one N·cm per sample, and the four run samples are overwritten with zero.
@@ -324,13 +317,7 @@ def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) 
 
 
 def test_assemble_behavior_dataset_steps_the_water_total_between_deliveries(tmp_path: Path) -> None:
-    """Verifies that the cumulative water total is held forward between valve events rather than ramped across them.
-
-    A real reference clock is the mesoscope frame clock and never lands on a valve event, so nearly every sample falls
-    between two deliveries. Blending them would report a fractional volume that was never dispensed, which the power-law
-    dispensing function makes wrong in any case. The encoder distance beside it does blend, so this pins the two sources
-    to their different interpolation modes rather than to a reference clock that hides the difference.
-    """
+    """Verifies that the cumulative water total is held forward between valve events rather than ramped across them."""
     microcontroller_data_path, runtime_data_path, raw_data_path = _make_input_directories(tmp_path=tmp_path)
     _write_hardware_state(raw_data_path=raw_data_path)
     _write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
@@ -346,6 +333,9 @@ def test_assemble_behavior_dataset_steps_the_water_total_between_deliveries(tmp_
         reference_time=off_grid_time,
     )
 
+    # A real reference clock is the mesoscope frame clock and never lands on a valve event, so nearly every sample
+    # falls between two deliveries. Blending them would report a fractional volume that was never dispensed, which
+    # the power-law dispensing function makes wrong in any case.
     assert behavior_data["water_uL"].to_list() == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 5.0])
     # The encoder is interpolated linearly, so its off-grid samples do blend their bracketing readings: the fifth
     # sample sits three seconds past the 6.5 cm reading and 2.95 seconds short of the following 12.0 cm one.
@@ -354,12 +344,7 @@ def test_assemble_behavior_dataset_steps_the_water_total_between_deliveries(tmp_
 
 
 def test_assemble_behavior_dataset_holds_the_traveled_distance_across_a_paused_run(tmp_path: Path) -> None:
-    """Verifies that the zero anchor applies to the leading idle span alone and never to a later one.
-
-    A paused session returns to idle mid-run, and the encoder is disabled outside the run state, so the samples of
-    that later idle span hold the last run readout forward. Anchoring them at zero instead would make the cumulative
-    traveled distance drop back to the session start and then jump forward again on the next run sample.
-    """
+    """Verifies that the zero anchor applies to the leading idle span alone and never to a later one."""
     microcontroller_data_path, runtime_data_path, raw_data_path = _make_input_directories(tmp_path=tmp_path)
     _write_hardware_state(raw_data_path=raw_data_path)
     _write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
@@ -392,7 +377,8 @@ def test_assemble_behavior_dataset_holds_the_traveled_distance_across_a_paused_r
         "run",
     ]
     # The leading idle span reads zero, the paused samples six and seven hold the 14 cm reached by sample five, and
-    # the cumulative trace never steps backwards.
+    # the cumulative trace never steps backwards. Anchoring the paused samples at zero instead would make the
+    # cumulative traveled distance drop back to the session start and then jump forward again on the next run sample.
     assert behavior_data["distance_cm"].to_list() == pytest.approx(
         [0.0, 0.0, 0.0, 1.0, 6.5, 14.0, 14.0, 14.0, 26.0, 26.0]
     )
@@ -479,11 +465,7 @@ def test_calculate_running_speed_returns_no_speed_for_an_empty_recording() -> No
 
 
 def test_calculate_running_speed_scans_the_sliding_window() -> None:
-    """Verifies the window scan across duplicate stamps, backward travel, and samples with no in-window predecessor.
-
-    The first sample has no predecessor at all, the second repeats its timestamp, the third and fourth sit inside the
-    window, the fifth travels backwards, and the sixth outruns the window entirely.
-    """
+    """Verifies the window scan across duplicate stamps, backward travel, and samples with no in-window predecessor."""
     stamps = np.array(
         [
             _BASE_TIME_US,
@@ -499,6 +481,8 @@ def test_calculate_running_speed_scans_the_sliding_window() -> None:
 
     speed = _calculate_running_speed.py_func(sample_time=stamps, distance=distance)
 
+    # The first sample has no predecessor at all, the second repeats its timestamp, the third and fourth sit inside
+    # the window, the fifth travels backwards, and the sixth outruns the window entirely.
     assert speed.tolist() == pytest.approx([0.0, 0.0, 100.0, 100.0, 0.0, 0.0])
     assert speed.dtype == np.float32
     # The compiled kernel the assembler calls agrees with the interpreted implementation.

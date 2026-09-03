@@ -278,9 +278,9 @@ def test_resolve_slowest_camera_clock_rejects_a_directory_holding_no_clock(video
 def test_resolve_slowest_camera_clock_rejects_a_clock_holding_no_frame(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
-    # A feather holding no row is the only input the frame-count condition is load-bearing for. A one-row feather it
-    # also refuses would fail the span condition anyway were the count check removed, while an empty feather has no
-    # endpoint to read at all, so this is the case that pins the count being weighed before the endpoints are read.
+    # A feather holding no row is the only input for which the frame-count condition is load-bearing. A one-row feather
+    # it also refuses would fail the span condition anyway were the count check removed, while an empty feather has no
+    # endpoint to read at all. This case therefore pins the count being weighed before the endpoints are read.
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock())
 
     with pytest.raises(FileNotFoundError, match=re.escape("at least two frames")):
@@ -349,8 +349,8 @@ def test_resolve_slowest_camera_clock_keeps_the_face_camera_when_the_body_camera
 def test_resolve_reference_clock_samples_reports_the_height_of_the_settled_clock(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
-    # The body camera runs at half the face camera's rate over the same span, so the assembly settles on its clock and
-    # the height reported here is the height of the frame that assembly builds rather than of the wider clock.
+    # The body camera runs at half the face camera's rate over the same span, so the assembly settles on its clock.
+    # The height reported here is therefore the height of the frame that assembly builds rather than of the wider clock.
     write_camera_timestamps(
         video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000, 3000, 4000)
     )
