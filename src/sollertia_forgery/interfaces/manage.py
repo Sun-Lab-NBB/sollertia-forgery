@@ -35,7 +35,14 @@ class _SharedManifestParameters:
     """The path to the project root data directory on which both subcommands operate."""
 
     def require_project_path(self) -> Path:
-        """Returns the project root path, raising a Click usage error when ``--project-path`` was not supplied."""
+        """Resolves the project root data directory both subcommands operate on.
+
+        Returns:
+            The path to the project root data directory.
+
+        Raises:
+            UsageError: If the ``--project-path`` option was not supplied ahead of the subcommand name.
+        """
         if self.project_path is None:
             message = (
                 "Unable to resolve the project root directory for the 'manifest' command. The '-pp' / "

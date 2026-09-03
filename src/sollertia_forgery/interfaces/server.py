@@ -39,10 +39,10 @@ _SQUEUE_FORMAT: str = "%.10i %.9P %.50j %.8u %.8T %.6D %.6C %.10m %.10M %.12l %.
 
 _SQUEUE_MISSING_JOB_ERROR: str = "Invalid job id specified"
 """The error text 'squeue' reports when it is asked for a job the SLURM controller no longer holds. The command exits
-with a nonzero status in that case, which is the normal outcome of looking up any job that has already finished, so the
-queue report treats this text as a successful command rather than as a failure. The report calls the queue empty only
-when the command also returned no rows, since a caller may name several jobs at once and a list mixing purged and live
-jobs still returns the rows of the live ones."""
+with a nonzero status in that case, which is the normal outcome of looking up any job that has already finished. The
+queue report therefore treats this text as a successful command rather than as a failure. The report calls the queue
+empty only when the command also returned no rows, since a caller may name several jobs at once and a list mixing
+purged and live jobs still returns the rows of the live ones."""
 
 _BATCH_HEADERS: list[str] = [
     "batch_id",
@@ -54,9 +54,9 @@ _BATCH_HEADERS: list[str] = [
     "gone",
     "pipelines",
 ]
-"""The headers of the outstanding-batch report, which pairs each batch's size with the verdict on whether the
-scheduler is still advancing it, with the counts of the two verdicts a caller acts on, and with the count of the
-allocations neither scheduler record answers for."""
+"""The headers of the outstanding-batch report. It pairs each batch's size with the verdict on whether the scheduler is
+still advancing it. It also carries the counts of the two verdicts on which a caller acts and the count of the
+allocations for which neither scheduler record answers."""
 
 _ALLOCATION_HEADERS: list[str] = [
     "batch_id",
@@ -68,7 +68,7 @@ _ALLOCATION_HEADERS: list[str] = [
     "verdict",
     "remediation",
 ]
-"""The headers of the per-allocation report, which pairs the state each record places an allocation in with the
+"""The headers of the per-allocation report, which pairs the state in which each record places an allocation with the
 verdict they carry together and the remediation that verdict prescribes."""
 
 _REMEDIATION_HEADERS: list[str] = [
@@ -166,7 +166,7 @@ def configure_server(
     show_default=True,
     default=False,
     help=(
-        "Determines whether to display the remote server's job accounting history (runtime statistics) using the "
+        "Determines whether to display the remote server's job accounting history (runtime statistics) using "
         "SLURM's 'sacct' command."
     ),
 )
@@ -176,7 +176,7 @@ def configure_server(
     is_flag=True,
     show_default=True,
     default=False,
-    help="Determines whether to display the remote server's job queue status using the SLURM's 'squeue' command.",
+    help="Determines whether to display the remote server's job queue status using SLURM's 'squeue' command.",
 )
 @click.option(
     "-u",
@@ -229,7 +229,7 @@ def print_slurm_info(
     start_time: str | None,
     end_time: str | None,
 ) -> None:
-    """Displays remote server's SLURM queue status or job data as a formatted table."""
+    """Displays the remote server's SLURM queue status or job data as a formatted table."""
     if not job_data and not queue:
         message = (
             "No data display options were selected when calling the command. Pass either the '--job-data' (-j), "
@@ -299,11 +299,11 @@ def report_remote_batches_command(batch_id: tuple[str, ...], *, allocations: boo
     """Reports the batches this machine still has outstanding on the remote compute server's scheduler.
 
     Resolves every allocation the submission ledger holds against three records, which are the scheduler's accounting,
-    the scheduler's queue, and the processing tracker of the job the allocation carries, and reports per batch how
-    long it has been outstanding and what those records resolve to. A batch is 'stalled' when none of its allocations
-    resolves as running and at least one is gone from both scheduler records, which no later query changes, and the
-    reported remedy names the command that remediates it. Closes and retires any batch whose allocations all resolve
-    to a plain drop, exactly as the agentic status read does.
+    the scheduler's queue, and the processing tracker of the job the allocation carries. Reports per batch how long it
+    has been outstanding and the state to which those records resolve. A batch is 'stalled' when none of its
+    allocations resolves as running and at least one is gone from both scheduler records, which no later query changes,
+    and the reported remedy names the command that remediates it. Closes and retires any batch whose allocations all
+    resolve to a plain drop, exactly as the agentic status read does.
     """
     response = remote_batch_status(batch_ids=list(batch_id) or None, limit=0, include_items=allocations)
     _reject_failed_response(response=response)
@@ -390,8 +390,8 @@ def retire_remote_batch_command(batch_id: tuple[str, ...], *, force: bool, drop_
     outstanding forever and keep its jobs claimed against a rerun. Every allocation is resolved exactly as that report
     resolves it, and a job its own tracker still claims to be running while no allocation is, which the report calls
     stranded, is returned to the scheduled state. A job that recorded success or failure keeps that record, so nothing
-    a run produced is discarded here. What the batch's jobs recorded is then snapshotted, through the same closure a
-    finished batch goes through, so the run stays answerable once the entry is gone. A batch holding an allocation
+    a run produced is discarded here. What the batch's jobs recorded is then snapshotted, through the same closure
+    applied to a finished batch, so the run stays answerable once the entry is gone. A batch holding an allocation
     that resolves as running is refused without '--force', and a snapshot that fails refuses the drop without
     '--drop-without-outcome'. This drops the ledger entries and replaces each covered batch's prepared document with
     its recorded outcome, leaving the outcomes themselves in the batch registry.
@@ -482,7 +482,8 @@ def _reject_failed_response(response: dict[str, Any]) -> None:
         RuntimeError: If the response reports a failure.
     """
     if not response["success"]:
-        console.error(message=response["error"], error=RuntimeError)
+        message: str = response["error"]
+        console.error(message=message, error=RuntimeError)
 
 
 def _format_outstanding(seconds: float | None) -> str:
@@ -573,8 +574,8 @@ def _report_queue_status(server: Server, user: str, job_id: str | None, *, all_u
         The 'squeue' command exits with an error when it is asked for a job the SLURM controller no longer holds,
         which is the normal state of every job that has already finished. That outcome is not treated as a command
         failure, so only a genuine failure is raised. It is reported as an empty queue result only when the command
-        resolved no job at all, since a caller may name several jobs at once and a list mixing purged and live jobs
-        still returns the rows of the live ones.
+        resolved no job at all. A caller may name several jobs at once, and a list mixing purged and live jobs still
+        returns the rows of the live ones.
 
     Args:
         server: The connected compute server to query.

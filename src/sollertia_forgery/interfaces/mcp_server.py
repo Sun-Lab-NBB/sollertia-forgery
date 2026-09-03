@@ -29,10 +29,7 @@ def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") 
 
 
 def _register_tool_modules() -> None:
-    """Imports every ``*_tools`` module in this package so its ``@mcp.tool()`` decorators register on import.
-
-    Tool modules register their MCP tools purely as an import side effect.
-    """
+    """Imports every ``*_tools`` module in this package so its ``@mcp.tool()`` decorators register on import."""
     package_name = __name__.rpartition(".")[0]
     for module_path in sorted(Path(__file__).parent.glob("*_tools.py")):
         importlib.import_module(f"{package_name}.{module_path.stem}")

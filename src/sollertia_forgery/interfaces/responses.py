@@ -33,8 +33,7 @@ class _PageWindow:
     length: int | None
     """The items the page carries, or None when the page runs to the end of the matches."""
     next_start_row: int | None
-    """The ``start_row`` that retrieves the following page, or None when this page ends the matches. A caller walks a
-    matched set by following this until it is None, which is a stronger signal than comparing counts."""
+    """The ``start_row`` that retrieves the following page, or None when this page ends the matches."""
 
     @property
     def stop(self) -> int | None:
@@ -46,9 +45,6 @@ def resolve_page(total: int, limit: int, start_row: int) -> _PageWindow:
     """Resolves which slice of a matched item set a response carries.
 
     Notes:
-        The caller slices its own frame or list from the returned window, so one paging rule serves the tools backed by
-        a stored table and the tools backed by an in-memory job set alike.
-
         A limit at or below zero lifts the cap and returns every match from the requested start. That escape exists so
         a caller reading under a tight filter can take the whole result in one response, and so the useful page size
         can grow as an agent's context does. It is never the default.
@@ -141,10 +137,6 @@ def bounded_counts(values: Iterable[Any]) -> dict[str, Any]:
 
 def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     """Counts how many rows of a stored table carry each value of every filterable axis.
-
-    Notes:
-        This is what a bare call reports in place of a listing. It names the values on which a caller can filter and how
-        much each would match, so an agent orients itself on one response rather than paging a whole artifact.
 
     Args:
         frame: The whole stored table.

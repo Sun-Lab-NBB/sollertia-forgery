@@ -87,7 +87,7 @@ _REMOTE_STATUS_SEMI_FIELDS: tuple[str, ...] = (
     "remediation",
     "unit_name",
 )
-"""The job fields a semi-detail listing carries, which is the job's identity, the allocation that runs it, and the
+"""The job fields a semi-detail listing carries, which are the job's identity, the allocation that runs it, and the
 resolved state of both records that decide what may be done about it."""
 
 _REMOTE_STATUS_DETAIL_FIELDS: tuple[str, ...] = (
@@ -239,31 +239,31 @@ def remote_batch_status(
     detail adds the evidence behind each verdict, the resources the allocation requested, and the log files it wrote.
 
     Every allocation resolves to one ``scheduler_state``. It is ``held`` when the queue carries it or accounting
-    reports a state it has yet to leave, ``settled`` when accounting reports a state it never leaves and the queue no
-    longer carries it, and ``gone`` only when accounting returns no row for it and the queue does not carry it either.
-    A record that could not be read holds every allocation, since a source that did not answer is no evidence of
-    absence. A ``BLOCKED`` allocation is the exception the queue does not hold: its dependency can never be satisfied,
-    so it will never run whatever the queue still carries, and it resolves as ``settled`` on every read rather than as
-    ``held`` on one and ``settled`` on the next.
+    reports a state it has yet to leave. It is ``settled`` when accounting reports a state it never leaves and the
+    queue no longer carries it. It is ``gone`` only when accounting returns no row for it and the queue does not carry
+    it either. A record that could not be read holds every allocation, since a source that did not answer is no
+    evidence of absence. A ``BLOCKED`` allocation is the exception the queue does not hold, because its dependency can
+    never be satisfied and it will never run whatever the queue still carries. It resolves as ``settled`` on every read
+    rather than as ``held`` on one and ``settled`` on the next.
 
-    That state and the job's own tracker together carry the ``verdict``, which is the value a caller acts on.
+    That state and the job's own tracker together carry the ``verdict``, which is the value on which a caller acts.
     ``running`` means the scheduler still holds the allocation, holds the one its tracker claims, or that tracker
-    claims to be running under an executor neither scheduler record answers for, and nothing is remediated for it.
-    ``finished`` and ``failed`` mean the job recorded an outcome, and its tracker is left exactly as
-    it stands. ``abandoned`` means nothing claims the job, so it is already runnable. ``stranded`` means the job's
-    tracker still claims to be running while no allocation is, which is the one case whose remediation writes to a
-    tracker. Each verdict also carries the ``remediation`` a default ``retire_remote_batches_tool`` call would apply
-    to it.
+    claims to be running under an executor for which neither scheduler record answers, and nothing is remediated for it.
+    ``finished`` and ``failed`` mean the job recorded an outcome, and its tracker is left exactly as it stands.
+    ``abandoned`` means nothing claims the job, so it is already runnable. ``stranded`` means the job's tracker still
+    claims to be running while no allocation is, which is the one case whose remediation writes to a tracker. Each
+    verdict also carries the ``remediation`` a default ``retire_remote_batches_tool`` call would apply to it.
 
     This tracks a run in flight. A batch stops being reported as outstanding once every one of its allocations
-    resolves to the plain ``drop`` remediation, and the call that observes that closes the batch, carries its outcome,
-    and reports what remains outstanding afterwards rather than what was outstanding before. A batch holding an
+    resolves to the plain ``drop`` remediation. The call that observes that closes the batch, carries its outcome, and
+    reports what remains outstanding afterwards rather than what was outstanding before. A batch holding an
     allocation whose remediation is anything else stays outstanding for ``retire_remote_batches_tool``, since closing
     it would drop a record while work is still held, a tracker still claims a run, or an allocation still needs
     cancelling. That closure is a derivation from the verdicts reported here rather than a second reading, so what
     closes and what this reports cannot disagree. Each call rewrites the state artifacts of the projects it covers
     before reading them, because a job records its outcome on its own tracker and nothing else regenerates those
-    artifacts while a batch runs, so a read is one server-side regeneration per project rather than a free lookup.
+    artifacts while a batch runs. A read is therefore one server-side regeneration per project rather than a free
+    lookup.
 
     Args:
         batch_ids: Restricts the report to these outstanding batches. Omit to cover all of them. Naming any batch also
@@ -281,24 +281,23 @@ def remote_batch_status(
             resources, and their log paths.
 
     Returns:
-        A response dict with ``active`` (whether any covered allocation resolves as running, which is the reading
-        behind each batch's ``progressing`` verdict), the ``batches`` covered, ``stalled_batch_ids`` naming the
-        batches that can no longer settle, ``uncovered_batch_ids`` naming any batch another process recorded while
-        this call ran, which this call's records say nothing about and which the next read covers, a ``summary``
-        counting the allocations by accounting state alongside the total, a ``breakdown`` per axis, and
-        ``scheduler_read_error``, which is empty
-        unless one of the scheduler's records could not be read. It also carries the ``outcomes`` of any batch that
-        closed on this call, which is empty when none did. Each ``batches`` entry carries the batch's
-        ``batch_id``, ``submitted_at``, ``outstanding_seconds``, ``pipelines``, ``batch_directory``, ``total_jobs``,
-        its ``progress`` verdict of ``progressing``, ``stalled``, or ``awaiting_closure``, a ``verdicts`` count per
-        allocation verdict, its ``live_allocations`` count with the ``running_allocations`` it names, its
-        ``stranded_allocation_count`` with the ``stranded_allocations`` it names, its
-        ``unresolvable_allocation_count`` with the ``unresolvable_allocations`` it names, and the ``remedy`` naming
-        what to do about that verdict. Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and
-        ``next_start_row`` whenever a filter is named or the listing is requested. If no batch is outstanding,
-        ``active`` is False with an explanatory ``message``. Returns an error when the ledger cannot be read, when the
-        server cannot be reached, when accounting or the trackers cannot be read, and when the closure of a settled
-        batch cannot be written.
+        A response dict with ``active``, which reports whether any covered allocation resolves as running and is the
+        reading behind each batch's ``progressing`` verdict, alongside the ``batches`` covered. It carries
+        ``stalled_batch_ids``, naming the batches that can no longer settle, and ``uncovered_batch_ids``, naming any
+        batch another process recorded while this call ran, about which this call's records say nothing and which the
+        next read covers. It carries a ``summary`` counting the allocations by accounting state alongside the total, a
+        ``breakdown`` per axis, and a ``scheduler_read_error`` that is empty unless one of the scheduler's records could
+        not be read. It also carries the ``outcomes`` of any batch that closed on this call, which is empty when none
+        did. Each ``batches`` entry carries the batch's ``batch_id``, ``submitted_at``, ``outstanding_seconds``,
+        ``pipelines``, ``batch_directory``, and ``total_jobs``, alongside its ``progress`` verdict of ``progressing``,
+        ``stalled``, or ``awaiting_closure`` and a ``verdicts`` count per allocation verdict. It also carries its
+        ``live_allocations`` count with the ``running_allocations`` it names, its ``stranded_allocation_count`` with the
+        ``stranded_allocations`` it names, its ``unresolvable_allocation_count`` with the ``unresolvable_allocations``
+        it names, and the ``remedy`` naming what to do about that verdict. Carries a ``jobs`` list with ``rows``,
+        ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
+        If no batch is outstanding, ``active`` is False with an explanatory ``message``. Returns an error when the
+        ledger cannot be read, when the server cannot be reached, when accounting or the trackers cannot be read, and
+        when the closure of a settled batch cannot be written.
     """
     try:
         ledger = read_ledger()
@@ -423,14 +422,14 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
 
     Canceling then resolves every named batch exactly as ``get_processing_status_tool`` resolves it. That resolution
     names the allocations a job's own tracker claims alongside the ones this machine recorded, and every one of those
-    the scheduler still holds is canceled in turn, so a job carried by an allocation another machine submitted is
-    stopped rather than left running behind a report that its batch was canceled. The ledger's own allocations are
-    canceled first, ahead of the two reads the resolution needs, so a read that cannot answer still leaves the
-    cancellation issued.
+    the scheduler still holds is canceled in turn. A job carried by an allocation another machine submitted is
+    therefore stopped rather than left running behind a report that its batch was canceled. The ledger's own
+    allocations are canceled first, ahead of the two reads the resolution needs, so a read that cannot answer still
+    leaves the cancellation issued.
 
     The batches whose every allocation resolves to a plain ``drop`` are then closed. The scheduler applies a
     cancellation asynchronously, so an allocation it still carries leaves its batch outstanding for a later read to
-    close, and so does a job whose own tracker still claims to be running the run this call just stopped, which
+    close. So does a job whose own tracker still claims to be running the run this call just stopped, which
     ``retire_remote_batches_tool`` releases.
 
     Args:
@@ -440,9 +439,9 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
         A response dict with ``canceled``, a ``canceled_jobs`` count of every allocation the cancellation named,
         including the ones that had already finished, the ``canceled_allocations`` it named, the ``batch_ids`` it
         covered, and a ``message``. Returns an error when the ledger cannot be read, when no batch is outstanding, when
-        a named identifier is not outstanding, when the named batches hold no allocation, when the server cannot be
-        reached, when either cancellation fails, and when the reads or the closure behind an issued cancellation fail,
-        which each report as themselves.
+        a named identifier is not outstanding, and when the named batches hold no allocation. It returns an error as
+        well when the server cannot be reached, when either cancellation fails, and when the reads or the closure
+        behind an issued cancellation fail, which each report as themselves.
     """
     try:
         ledger = read_ledger()
@@ -541,22 +540,22 @@ def remote_batch_retire(
     decides what happens to it. A ``stranded`` allocation has its job returned to the scheduled state on that job's own
     tracker, which is what releases a job no rerun could otherwise reach. A ``finished``, ``failed``, or ``abandoned``
     allocation has its tracker left exactly as it stands, so no result is discarded and no failure is silently
-    cleared. What every named batch's jobs recorded is then snapshotted through the same closure a settled batch goes
-    through, and the ledger entries are dropped.
+    cleared. What every named batch's jobs recorded is then snapshotted through the same closure applied to a settled
+    batch, and the ledger entries are dropped.
 
     Two guarantees stand in front of that, and each is waived by its own flag and by nothing else. A batch holding an
     allocation that resolves as ``running`` is refused, because remediating it would disturb work the scheduler is
     still carrying. ``force`` waives that one, and then every allocation those entries leave held is canceled before
     any tracker is written, so no tracker is reset underneath an allocation the scheduler was never told to stop. That
     cancellation covers the allocation a job's own tracker claims as well as the one this machine recorded, including
-    a claim another machine submitted, since that is the allocation actually carrying the job and resetting its
-    tracker while it runs is the destruction this resolution exists to refuse. An allocation neither of the
-    scheduler's records answers for is cancelable by nothing, so waiving the refusal for it drops its entry with
-    nothing canceled and its tracker exactly as it stands. A batch whose outcome cannot be snapshotted is refused,
-    because the ledger entry is the last record naming the run, and ``drop_without_outcome`` waives that one.
+    a claim another machine submitted. That claim is the allocation actually carrying the job, and resetting its
+    tracker while it runs is the destruction this resolution exists to refuse. An allocation for which neither of the
+    scheduler's records answers is cancelable by nothing, so waiving the refusal for it drops its entry with nothing
+    canceled and its tracker exactly as it stands. A batch whose outcome cannot be snapshotted is refused, because the
+    ledger entry is the last record naming the run, and ``drop_without_outcome`` waives that one.
 
     A failure that leaves nothing changed is reported rather than waived. An unreachable server hides both scheduler
-    records and the trackers, so every allocation resolves as ``running`` and the refusal names ``force``; a
+    records and the trackers, so every allocation resolves as ``running`` and the refusal names ``force``. A
     cancellation or a tracker reset that fails stops the remediation with the ledger untouched, so retrying it costs
     nothing.
 
@@ -575,19 +574,21 @@ def remote_batch_retire(
             What the jobs recorded is then read from the project's own job artifact instead.
 
     Returns:
-        A response dict with ``retired``, the ``batch_ids`` the ledger held and dropped, ``total_allocations``
-        counting the allocations they held, a ``batches`` list carrying each batch's ``batch_id``, its
-        ``covered_batch_ids``, its ``allocations``, and its ``outstanding_seconds``, and an ``allocations`` list
-        carrying, for each allocation, its identity, its ``scheduler_state``, its ``tracker_status``, its ``verdict``,
-        the ``remediation`` applied, and whether it was ``cancelled``, whether its ``tracker_reset`` ran, whether its
-        ``snapshot_recorded``, and whether its ``entry_dropped``. It also carries ``cancelled_allocations``, a
-        ``reset_jobs`` count, the ``outcomes`` closure recorded, the ``outcome_directory`` on this machine holding
-        those outcome files and the state snapshots they cite, a ``snapshot_error`` that is empty when every snapshot
-        succeeded and names the batches that failed otherwise, and a ``message``. Returns an error when the ledger
-        cannot be read or written, when no batch is outstanding, when no identifier is named, when a named identifier
-        is not outstanding, when the jobs' own processing trackers cannot be read, when the scheduler's accounting
-        cannot be read, when an allocation resolves as running and ``force`` is not set, when a cancellation or a
-        tracker reset fails, and when a snapshot fails and ``drop_without_outcome`` is not set.
+        A response dict with ``retired``, the ``batch_ids`` the ledger held and dropped, and ``total_allocations``
+        counting the allocations they held. It carries a ``batches`` list, whose entries hold each batch's
+        ``batch_id``, its ``covered_batch_ids``, its ``allocations``, and its ``outstanding_seconds``. It carries an
+        ``allocations`` list as well, whose entries hold each allocation's identity, its ``scheduler_state``, its
+        ``tracker_status``, its ``verdict``, and the ``remediation`` applied. Each allocation entry also reports whether
+        it was ``cancelled``, whether its ``tracker_reset`` ran, whether its ``snapshot_recorded``, and whether its
+        ``entry_dropped``. The response also carries ``cancelled_allocations``, a ``reset_jobs`` count, the ``outcomes``
+        closure recorded, and the ``outcome_directory`` on this machine holding those outcome files and the state
+        snapshots they cite. It closes with a ``snapshot_error`` that is empty when every snapshot succeeded and names
+        the batches that failed otherwise, and a ``message``. Returns an error when the ledger cannot be read or
+        written, when no batch is outstanding, when no identifier is named, and when a named identifier is not
+        outstanding. It returns an error as well when the jobs' own processing trackers cannot be read, when the
+        scheduler's accounting cannot be read, and when an allocation resolves as running while ``force`` is not set. A
+        cancellation or a tracker reset that fails is an error too, and so is a snapshot that fails while
+        ``drop_without_outcome`` is not set.
     """
     try:
         ledger = read_ledger()
@@ -743,7 +744,7 @@ def _drop_batches(
 
     Args:
         batches: The recorded batches being remediated.
-        resolutions: The resolutions the remediation acted on.
+        resolutions: The resolutions on which the remediation acted.
         outcomes: The outcomes the snapshot recorded, one per covered batch it could read.
         cancelled: The allocations the cancellation named.
         reset: The unit path and job identifier of each job whose tracker was reset.
@@ -812,7 +813,7 @@ def _render_remediation(
         covers the allocation its job's tracker claims alongside the one the ledger recorded.
 
     Args:
-        resolution: The resolution the remediation acted on.
+        resolution: The resolution on which the remediation acted.
         cancelled: The allocations the cancellation named.
         reset: The unit path and job identifier of each job whose tracker was reset.
         recorded: The batches whose snapshot was recorded.
@@ -850,8 +851,8 @@ def _applied_remediation(*, cancelled: bool, reset: bool, dropped: bool) -> str:
     """Resolves the remediation one allocation actually had applied to it.
 
     Notes:
-        This is composed from what ran rather than copied from the verdict, because the verdict a caller was shown is
-        the one resolved before the cancellation and the tracker of a cancelled allocation is written only when its
+        This is composed from what ran rather than copied from the verdict. The verdict a caller was shown is the one
+        resolved before the cancellation, and the tracker of a cancelled allocation is written only when its
         post-cancellation verdict is stranded. A cancelled allocation whose job recorded an outcome therefore reports
         the drop it received rather than a reset it was deliberately spared, and the ``cancelled`` flag beside it is
         what says the scheduler was told to stop it.
@@ -924,7 +925,7 @@ def _named_allocations(resolutions: Sequence[AllocationResolution], verdict: str
     """Returns the allocations that resolved to one verdict.
 
     Args:
-        resolutions: The resolutions to select from.
+        resolutions: The resolutions from which to select.
         verdict: The verdict whose allocations to name.
 
     Returns:

@@ -30,6 +30,9 @@ def unsupported_host_message(host: str) -> str:
 
     Args:
         host: The unrecognized host name to report back.
+
+    Returns:
+        The message naming the unsupported host and the hosts the tools do support.
     """
     return f"Unsupported host '{host}'. Available: {', '.join(sorted(HOST_LABELS))}."
 

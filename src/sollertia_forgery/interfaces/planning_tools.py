@@ -50,7 +50,7 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "cores",
     "memory_mb",
 )
-"""The job fields a semi-detail listing carries, which is the job's subject, its identity, and its figures."""
+"""The job fields a semi-detail listing carries, which are the job's subject, its identity, and its figures."""
 
 _PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "memory_modeled", "prerequisite_ids")
 """The job fields detail adds, which are the tracked job's identifier, whether a model of the job's own input produced
