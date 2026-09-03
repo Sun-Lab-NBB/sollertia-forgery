@@ -137,7 +137,7 @@ donated by that member:
 | Video tracking                 | The pass that reads the session's pose predictions and writes its tracking outputs         |
 | Two-photon data locator        | The raw imaging directory the two-photon pipeline hands to cindra                          |
 | Cindra configuration resolvers | The single-recording and multi-recording configurations passed to cindra                   |
-| Forging assembler              | The per-session worker that assembles the dataset row, plus its column meanings            |
+| Forging assembler              | The per-session worker that assembles the session's `data.feather`, plus its columns       |
 | Assembly geometry resolver     | The heights at which the system's own assembler holds a session's frame and its sources    |
 | Assembly source resolver       | The height at which that assembler holds each source it reads for a session                |
 | Forging admission policy       | The pipelines a session of each type completes before it joins a dataset                   |
@@ -319,9 +319,10 @@ Use `slf --help` or `slf SUBCOMMAND --help` for detailed usage information.
 
 The `process` group parses the session path, the job identifier, the worker budget, and the progress flag, so those
 options come before the subcommand name, as `-pp` does on the `manifest` group. Without a job identifier, a subcommand
-runs every job that remains outstanding for the session on this host, and with one it runs exactly the job named by that
-identifier. That is how a scheduler drives cross-job parallelism, by dispatching each identifier as its own allocation.
-The `runtime` subcommand uses no identifier, since its single-job pipeline has no remote-dispatch job.
+runs every job the session's data supports on this host, re-running the ones that already succeeded, and with one it
+runs exactly the job named by that identifier. Resolving only the outstanding work belongs to batch preparation rather
+than to a direct invocation. That is how a scheduler drives cross-job parallelism, by dispatching each identifier as its
+own allocation. The `runtime` subcommand uses no identifier, since its single-job pipeline has no remote-dispatch job.
 
 ***Note,*** on macOS the Numba threading layer resolves its OpenMP runtime from the dynamic loader's default search
 path alone. Run `slf omp` once per host to report what it would link, and `slf omp -y` through `sudo` to create the
@@ -449,9 +450,10 @@ ataraxis-video-system, ataraxis-communication-interface, and cindra libraries ea
 own MCP server, so this server leaves those tools to them. `assets:working-directory` sets the data root, and the
 `assets:project-hierarchy`, `assets:session-discovery`, and `assets:datasets` skills produce the paths named below.
 
-Every tool names a filesystem path by what that path holds, and the same name means the same thing in every tool. A
-`session_path` names one session's root directory, a `dataset_path` names one forged dataset's root, and a
-`project_path` names a project root under the data root. Most tools take a `host`, which is `local` for the data on this
+Every tool names a filesystem path by what that path holds. On the batch tools, `session_paths` names a processing
+unit root, which is a session root for every session pipeline and a dataset root for `forging`. A `dataset_path` on the
+forging and planning tools names one forged dataset's root, and a `project_path` names a project root under the data
+root. Most tools take a `host`, which is `local` for the data on this
 machine and `remote` for the data on the compute server. Eight tools take none. `execute_jobs_tool` takes none because a
 batch runs where it was prepared, `forget_prepared_batches_tool` and `read_resource_model_tool` answer for this machine
 alone, the two server-configuration tools are always local, and `discover_remote_project_tool`,
@@ -751,9 +753,10 @@ donation.
    a column the schema no longer declares.
 4. Create the category package. Its `__init__.py` exports the pipeline entry point, every stage job name, and the job
    discovery and prerequisite callables the orchestration layer binds.
-5. Add the pipeline to the batch pipeline set and give it a dispatch entry that supplies its unit loader, job discovery,
-   batch worker, prerequisites, tracker path, output path, unit name, sizing pass, remote command renderer, and any
-   priming hook. An import-time check fails on either half alone.
+5. Add the pipeline to the batch pipeline set and give it a dispatch entry that supplies its unit kind, unit loader,
+   job discovery, batch worker, prerequisites, tracker path, output path, unit name, sizing pass, remote command
+   renderer, any priming hook, and any external output paths. An import-time check fails on either half alone, and it
+   also refuses an entry declaring an unknown unit kind.
 6. Declare the core allocation and the sizing model of every job type the pipeline resolves, following [Adding a New
    Processing Stage](#adding-a-new-processing-stage).
 7. Add the pipeline's CLI surface, which is a `slf process` subcommand for a per-session processing pipeline of that

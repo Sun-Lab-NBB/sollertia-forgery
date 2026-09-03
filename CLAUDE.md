@@ -237,7 +237,8 @@ column, and when a roster names a column the schema does not declare. Then add i
 - A stage backed by a library `execute_job` binding reuses the job-name constant that library exports rather than a
   local string, so the tracker identifiers stay aligned with the library's own. The forging pipeline is the one
   exception. Its tracker interleaves cindra's cross-recording stages with the assembly stage this library owns and
-  records all of them under local names, and `_MULTIDAY_JOB_NAMES` is the one table where the two vocabularies meet.
+  records all of them under local names, which `_MULTIDAY_JOB_NAMES` mints. A new cindra stage also needs its core
+  allocation in `orchestration/dispatch.py` and its sizing branch in `orchestration/footprints.py`.
 - The test suite covers 100% of the measured statements. Interface modules are excluded per module through the
   `[tool.coverage.run] omit` list rather than through a directory glob.
 - A test that spawns a process pool or mutates process-wide state carries `@pytest.mark.xdist_group`, because the suite
