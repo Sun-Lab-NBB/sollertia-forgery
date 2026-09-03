@@ -72,7 +72,8 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
     default=None,
     help=(
         "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
-        "(remote mode). If not provided, discovers and runs every available job for the session (local mode)."
+        "(remote mode). If not provided, discovers and runs every available job for the session (local mode). The "
+        "'runtime' subcommand ignores it, since its single-job pipeline has no remote-dispatch job."
     ),
 )
 @click.option(

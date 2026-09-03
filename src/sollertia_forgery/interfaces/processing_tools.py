@@ -375,8 +375,9 @@ def execute_jobs_tool(
         ``submissions`` list pairing each job with the allocation that runs it. Either host adds an ``invalid_jobs``
         list when a recorded descriptor could not be built into a job. Returns an error when the prepared-batch
         registry cannot be read, when an identifier resolves to no prepared batch, or when no batch is named. Returns
-        an error as well when the named batches mix hosts, when every prepared job is blocked or already succeeded, or
-        when no recorded descriptor builds into a job. A remote dispatch reports each of its own steps as itself,
+        an error as well when the named batches mix hosts, when every prepared job is blocked or already succeeded,
+        when no recorded descriptor builds into a job, or, on a local dispatch, when a batch is already running in this
+        process, since one pool holds one batch. A remote dispatch reports each of its own steps as itself,
         returning an error when the server cannot be reached, when the reconciliation cannot resolve what already runs,
         when the host refuses to clear the dispatched jobs' records, and when the scheduler rejects the submission.
     """
@@ -471,8 +472,9 @@ def get_processing_status_tool(
     scheduler's queue, and the processing tracker of the job the allocation carries. Each allocation reports the
     ``scheduler_state`` those first two records place it in, the ``tracker_status`` the third holds, the ``verdict``
     the three of them carry, and the ``remediation`` that verdict prescribes. A verdict of ``running`` means the
-    scheduler still holds the recorded allocation, or holds the one this job's own tracker claims, and nothing is
-    remediated for it, which is how work another machine submitted is left alone by a ledger that never recorded it.
+    scheduler still holds the recorded allocation, holds the one this job's own tracker claims, or that tracker claims
+    to be running under an executor neither scheduler record answers for, and nothing is remediated for it, which is
+    how work another machine submitted is left alone by a ledger that never recorded it.
     ``finished`` and ``failed`` mean the job recorded an outcome its tracker keeps, ``abandoned`` means nothing claims
     the job, and ``stranded`` means its tracker still claims to be running while no allocation is. Each batch also
     carries a ``progress`` verdict of ``progressing``, ``stalled``, or ``awaiting_closure`` alongside the remedy for
@@ -676,7 +678,8 @@ def retire_remote_batches_tool(
 
     This drops the ledger entries of the named batches, and the snapshot it takes first replaces each covered batch's
     prepared document with the outcome recorded for it. It removes neither those outcomes nor the state snapshots
-    beside them: ``forget_prepared_batches_tool`` clears the batch registry that holds both.
+    beside them: ``forget_prepared_batches_tool`` drops the prepared document and the recorded outcome, while the
+    delivered state snapshots under the batch directory are left on disk for the caller to remove.
 
     Args:
         batch_ids: The outstanding batches to remediate, as ``get_processing_status_tool`` reports them with
@@ -716,8 +719,9 @@ def reset_processing_jobs_tool(
     tracker locations.
 
     One call covers every named unit, because each unit resets only the identifiers it actually tracks. Passing a whole
-    batch's identifiers alongside all of its units therefore costs a single operation, which remotely is one lightweight
-    server-side invocation rather than one per unit. Omitting the identifiers resets every job each unit tracks.
+    batch's identifiers alongside all of its units therefore costs a single operation, and remotely the per-unit
+    invocations are chained into one round trip, so a batch spanning many units still costs a single connection.
+    Omitting the identifiers resets every job each unit tracks.
 
     Works independently of any running batch, and note that ``execute_jobs_tool`` already resets what it dispatches, so
     this is for the case where a caller wants a unit returned to a clean slate without running anything.
@@ -735,7 +739,7 @@ def reset_processing_jobs_tool(
         A response dict with ``pipeline``, ``host``, ``total_units``, a ``jobs_reset`` count of the identifiers the
         caller named, which is null when none were named, and a ``message`` stating what was reset. The host does not
         report how many records it actually cleared, so ``jobs_reset`` is an upper bound rather than an outcome.
-        Returns an error when the pipeline or the host is not supported.
+        Returns an error when the pipeline or the host is not supported, and when the host cannot carry out the reset.
     """
     if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
@@ -789,7 +793,8 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
     Returns:
         A response dict with ``pipeline``, ``host``, ``total_paths`` removed, ``removed_bytes`` freed across every
         unit, and a ``removed`` list carrying each path and the bytes it held. Returns an error when a batch is
-        running locally, since removing the output of a job in flight would fail that job.
+        running locally, since removing the output of a job in flight would fail that job, when the pipeline or the
+        host is not supported, and when the host cannot carry out the removal.
     """
     if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))

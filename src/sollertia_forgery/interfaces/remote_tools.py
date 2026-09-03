@@ -68,9 +68,10 @@ _REMOTE_STATUS_AXES: tuple[str, ...] = (
     "verdict",
     "unit_path",
 )
-"""The job attributes by which a caller may filter a remote batch, and the axes a status breakdown counts. The three
-resolved axes are counted alongside the raw accounting state, so a caller reads how many allocations carry each verdict
-without listing them."""
+"""The axes a remote status breakdown counts. The three resolved axes are counted alongside the raw accounting state,
+so a caller reads how many allocations carry each verdict without listing them. A caller filters on the ``batch_id``,
+``pipeline``, ``job_name``, ``status`` and ``unit_path`` axes and on the job identifier, while the resolved axes are
+counted alone."""
 
 _REMOTE_STATUS_SEMI_FIELDS: tuple[str, ...] = (
     "batch_id",
@@ -233,9 +234,9 @@ def remote_batch_status(
 
     A bare call covers every outstanding batch and resolves each of its allocations against three records: the
     scheduler's accounting, the scheduler's queue, and the processing tracker of the job that allocation carries. It
-    reports the counts alongside a ``breakdown`` naming every batch, pipeline, job type, scheduler state, tracker
-    status, and verdict. Naming a filter adds a page of allocations, and opting into detail adds the evidence behind
-    each verdict, the resources the allocation requested, and the log files it wrote.
+    reports the counts alongside a ``breakdown`` naming every batch, pipeline, job type, processing unit, accounting
+    state, scheduler state, tracker status, and verdict. Naming a filter adds a page of allocations, and opting into
+    detail adds the evidence behind each verdict, the resources the allocation requested, and the log files it wrote.
 
     Every allocation resolves to one ``scheduler_state``. It is ``held`` when the queue carries it or accounting
     reports a state it has yet to leave, ``settled`` when accounting reports a state it never leaves and the queue no
@@ -246,8 +247,9 @@ def remote_batch_status(
     ``held`` on one and ``settled`` on the next.
 
     That state and the job's own tracker together carry the ``verdict``, which is the value a caller acts on.
-    ``running`` means the scheduler still holds the allocation or the one its tracker claims, and nothing is
-    remediated for it. ``finished`` and ``failed`` mean the job recorded an outcome, and its tracker is left exactly as
+    ``running`` means the scheduler still holds the allocation, holds the one its tracker claims, or that tracker
+    claims to be running under an executor neither scheduler record answers for, and nothing is remediated for it.
+    ``finished`` and ``failed`` mean the job recorded an outcome, and its tracker is left exactly as
     it stands. ``abandoned`` means nothing claims the job, so it is already runnable. ``stranded`` means the job's
     tracker still claims to be running while no allocation is, which is the one case whose remediation writes to a
     tracker. Each verdict also carries the ``remediation`` a default ``retire_remote_batches_tool`` call would apply

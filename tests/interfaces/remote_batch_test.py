@@ -1,5 +1,6 @@
 """Contains tests for the remote batch surface: the verdict a status read resolves for every outstanding allocation,
-and the remediation that acts on those verdicts before the ledger entries are dropped.
+the cancellation that stops the allocations a batch holds, and the remediation that acts on those verdicts before the
+ledger entries are dropped.
 """
 
 from __future__ import annotations
@@ -53,10 +54,11 @@ _UNIT_PATH: str = "/data/Project/305/2024_11_04"
 """The path to the processing unit under which these tests place their jobs."""
 
 _MICROSECONDS_PER_HOUR: int = 60 * 60 * 1_000_000
-"""The divisor placing a recorded submission a whole number of hours in the past."""
+"""The multiplier placing a recorded submission a whole number of hours in the past."""
 
 _SNAPSHOT_FAILURE: RuntimeError = RuntimeError("the state table could not be regenerated")
-"""The failure a snapshot raises for a batch this host cannot read."""
+"""The failure raised by the two steps that regenerate a host's state artifacts, which are the tracker read and the
+outcome snapshot."""
 
 
 @dataclass
@@ -592,10 +594,11 @@ def test_cancelling_a_batch_the_ledger_does_not_hold_is_rejected(remote: _Remote
 
 
 def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStub) -> None:
-    """Verifies that the cancellation, the two reads behind it, and the closure each name their own cause.
+    """Verifies that the connection, the cancellation, the two reads behind it, and the closure each name their own
+    cause.
 
     A cancellation that never reached the scheduler leaves work running, while a read that failed behind an accepted
-    one leaves that cancellation standing, so folding the four into one report would tell a caller neither.
+    one leaves that cancellation standing, so folding the five into one report would tell a caller neither.
     """
     _record_batch()
     remote.statuses = {"1000": JobStatus.RUNNING}

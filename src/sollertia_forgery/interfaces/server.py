@@ -55,7 +55,8 @@ _BATCH_HEADERS: list[str] = [
     "pipelines",
 ]
 """The headers of the outstanding-batch report, which pairs each batch's size with the verdict on whether the
-scheduler is still advancing it and with the counts of the two verdicts a caller acts on."""
+scheduler is still advancing it, with the counts of the two verdicts a caller acts on, and with the count of the
+allocations neither scheduler record answers for."""
 
 _ALLOCATION_HEADERS: list[str] = [
     "batch_id",
@@ -301,8 +302,8 @@ def report_remote_batches_command(batch_id: tuple[str, ...], *, allocations: boo
     the scheduler's queue, and the processing tracker of the job the allocation carries, and reports per batch how
     long it has been outstanding and what those records resolve to. A batch is 'stalled' when none of its allocations
     resolves as running and at least one is gone from both scheduler records, which no later query changes, and the
-    reported remedy names the command that remediates it. Closes and retires any batch whose allocations have all
-    settled, exactly as the agentic status read does.
+    reported remedy names the command that remediates it. Closes and retires any batch whose allocations all resolve
+    to a plain drop, exactly as the agentic status read does.
     """
     response = remote_batch_status(batch_ids=list(batch_id) or None, limit=0, include_items=allocations)
     _reject_failed_response(response=response)
@@ -436,9 +437,9 @@ def _report_allocations(jobs: list[dict[str, Any]]) -> None:
     """Prints one row per resolved allocation, carrying the verdict and the remediation it prescribes.
 
     Notes:
-        A listed row leaves out the fields that hold nothing, so every field is read with a default rather than
-        indexed. A job that never started carries no tracker status, and a job of a single-stage pipeline carries no
-        specifier.
+        A listed row leaves out the fields that hold nothing, so the specifier and the tracker status are read with
+        a default rather than indexed. A job that never started carries no tracker status, and a job of a single-stage
+        pipeline carries no specifier.
 
     Args:
         jobs: The allocation rows the status read listed.

@@ -83,7 +83,8 @@ def manifest_cli(context: click.Context, project_path: Path | None) -> None:
 def create_manifest(shared: _SharedManifestParameters, *, no_progress: bool) -> None:
     """Creates the manifest .feather file that captures the snapshot of the target project's state.
 
-    An existing manifest for the project is recreated (overwritten) with a fresh snapshot.
+    An existing manifest for the project is recreated (overwritten) with a fresh snapshot. The project job artifact,
+    '<project>_jobs.feather', is published into the same root ahead of the manifest itself.
     """
     generate_project_manifest(project_directory=shared.require_project_path(), display_progress=not no_progress)
 

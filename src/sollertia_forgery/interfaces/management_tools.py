@@ -72,8 +72,8 @@ def generate_project_manifest_tool(project_path: str, host: str = "local") -> di
         project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
             ``remote``.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
-            A remote generation reports the row counts it produced, and the artifacts themselves are mirrored onto this
-            machine the first time a read tool is called with ``host='remote'``.
+            A remote generation reports the row counts it produced, and the artifacts themselves stay on the server
+            until a read tool is called with ``host='remote'``, which mirrors them onto this machine.
 
     Returns:
         A response dict with ``project_path``, ``host``, ``manifest_path``, ``jobs_path``, the ``total_jobs`` the job
