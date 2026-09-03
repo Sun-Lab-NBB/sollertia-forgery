@@ -51,12 +51,8 @@ class PendingJob:
 
     @property
     def prerequisite_keys(self) -> tuple[tuple[str, str], ...]:
-        """Returns the dispatch keys of this job's upstream jobs.
-
-        Notes:
-            A job identifier is derived from the job name and specifier alone, so the same stage of two different
-            units shares one identifier. Pairing each identifier with this job's unit keeps a batch spanning many
-            units from treating one unit's completed stage as every unit's.
+        """Returns the dispatch keys of this job's upstream jobs, each pairing this job's unit with one prerequisite
+        identifier.
         """
         return tuple((str(self.unit_path), prerequisite) for prerequisite in self.prerequisite_ids)
 
@@ -215,52 +211,6 @@ def build_batch_document(
     )
 
 
-def _build_job_descriptor(
-    state_row: dict[str, Any],
-    plan_row: dict[str, Any],
-    unit_path: Path,
-    unit_name: str,
-    pipeline: str,
-    options: dict[str, Any],
-    trackable_ids: set[str],
-    tracker_path: str = "",
-) -> dict[str, Any]:
-    """Renders one job as the descriptor that both backends dispatch.
-
-    Args:
-        state_row: The job's row in the state table, carrying the status and the executor its tracker recorded.
-        plan_row: The job's row in the plan table.
-        unit_path: The path to the unit on which the job operates.
-        unit_name: The name of that unit.
-        pipeline: The pipeline that owns the job.
-        options: The pipeline-specific parameters given to the job.
-        trackable_ids: The job identifiers the unit tracks, to which the recorded ordering is narrowed.
-        tracker_path: Where the unit's tracker sits, or empty when this backend never opens it.
-
-    Returns:
-        The job descriptor.
-    """
-    return {
-        "job_id": state_row["job_id"],
-        "job_name": state_row["job_name"],
-        "specifier": state_row["specifier"] or "",
-        # Carried from the state artifact preparation regenerated on the host, so reconciliation reads what a job's
-        # tracker recorded without opening that tracker while the batch runs.
-        "status": state_row["status"],
-        "executor_id": state_row.get("executor_id") or "",
-        "unit_path": str(unit_path),
-        "unit_name": unit_name,
-        "pipeline": pipeline,
-        "tracker_path": tracker_path,
-        "cores": int(plan_row["cores"]),
-        "memory_mb": int(plan_row["memory_mb"]),
-        "prerequisite_ids": [
-            prerequisite for prerequisite in (plan_row["prerequisite_ids"] or []) if prerequisite in trackable_ids
-        ],
-        "options": dict(options),
-    }
-
-
 def index_rows_by_unit(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, dict[str, Any]]]:
     """Indexes table rows by their unit and then by their job identifier.
 
@@ -278,58 +228,6 @@ def index_rows_by_unit(rows: list[dict[str, Any]], key: str) -> dict[str, dict[s
             continue
         indexed.setdefault(str(unit), {})[row["job_id"]] = row
     return indexed
-
-
-def _partition_blocked_jobs(
-    jobs: list[dict[str, Any]], succeeded: set[str]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Splits a unit's outstanding jobs into the ones this run may dispatch and the ones it may not.
-
-    Notes:
-        A prerequisite that neither runs in this batch nor already succeeded is one this run cannot produce. Blocking
-        propagates, so a stage waiting on a blocked stage is blocked in turn.
-
-    Args:
-        jobs: The unit's outstanding job descriptors.
-        succeeded: The identifiers of the unit's jobs already recorded as succeeded.
-
-    Returns:
-        A tuple of the dispatchable descriptors and the blocked entries, each naming its unsatisfied prerequisites.
-    """
-    runnable: dict[str, dict[str, Any]] = {descriptor["job_id"]: descriptor for descriptor in jobs}
-    blocked: dict[str, list[str]] = {}
-    while True:
-        newly_blocked = {
-            job_id: unsatisfied
-            for job_id, descriptor in runnable.items()
-            if job_id not in blocked
-            and (
-                unsatisfied := [
-                    prerequisite
-                    for prerequisite in descriptor.get("prerequisite_ids", ())
-                    if prerequisite not in succeeded and (prerequisite not in runnable or prerequisite in blocked)
-                ]
-            )
-        }
-        if not newly_blocked:
-            break
-        blocked.update(newly_blocked)
-
-    dispatchable = [descriptor for descriptor in jobs if descriptor["job_id"] not in blocked]
-    blocked_entries = [
-        {
-            "job_id": descriptor["job_id"],
-            "job_name": descriptor["job_name"],
-            "specifier": descriptor["specifier"],
-            "pipeline": descriptor["pipeline"],
-            "unit_path": descriptor["unit_path"],
-            "unit_name": descriptor["unit_name"],
-            "unsatisfied_prerequisite_ids": blocked[descriptor["job_id"]],
-        }
-        for descriptor in jobs
-        if descriptor["job_id"] in blocked
-    ]
-    return dispatchable, blocked_entries
 
 
 def resolve_dispatch_priorities[PendingJobT: PendingJob](
@@ -460,6 +358,104 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         status=job.get("status") or "",
         executor_id=job.get("executor_id") or "",
     )
+
+
+def _build_job_descriptor(
+    state_row: dict[str, Any],
+    plan_row: dict[str, Any],
+    unit_path: Path,
+    unit_name: str,
+    pipeline: str,
+    options: dict[str, Any],
+    trackable_ids: set[str],
+    tracker_path: str = "",
+) -> dict[str, Any]:
+    """Renders one job as the descriptor that both backends dispatch.
+
+    Args:
+        state_row: The job's row in the state table, carrying the status and the executor its tracker recorded.
+        plan_row: The job's row in the plan table.
+        unit_path: The path to the unit on which the job operates.
+        unit_name: The name of that unit.
+        pipeline: The pipeline that owns the job.
+        options: The pipeline-specific parameters given to the job.
+        trackable_ids: The job identifiers the unit tracks, to which the recorded ordering is narrowed.
+        tracker_path: Where the unit's tracker sits, or empty when this backend never opens it.
+
+    Returns:
+        The job descriptor.
+    """
+    return {
+        "job_id": state_row["job_id"],
+        "job_name": state_row["job_name"],
+        "specifier": state_row["specifier"] or "",
+        # Carried from the state artifact preparation regenerated on the host, so reconciliation reads what a job's
+        # tracker recorded without opening that tracker while the batch runs.
+        "status": state_row["status"],
+        "executor_id": state_row.get("executor_id") or "",
+        "unit_path": str(unit_path),
+        "unit_name": unit_name,
+        "pipeline": pipeline,
+        "tracker_path": tracker_path,
+        "cores": int(plan_row["cores"]),
+        "memory_mb": int(plan_row["memory_mb"]),
+        "prerequisite_ids": [
+            prerequisite for prerequisite in (plan_row["prerequisite_ids"] or []) if prerequisite in trackable_ids
+        ],
+        "options": dict(options),
+    }
+
+
+def _partition_blocked_jobs(
+    jobs: list[dict[str, Any]], succeeded: set[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Splits a unit's outstanding jobs into the ones this run may dispatch and the ones it may not.
+
+    Notes:
+        A prerequisite that neither runs in this batch nor already succeeded is one this run cannot produce. Blocking
+        propagates, so a stage waiting on a blocked stage is blocked in turn.
+
+    Args:
+        jobs: The unit's outstanding job descriptors.
+        succeeded: The identifiers of the unit's jobs already recorded as succeeded.
+
+    Returns:
+        A tuple of the dispatchable descriptors and the blocked entries, each naming its unsatisfied prerequisites.
+    """
+    runnable: dict[str, dict[str, Any]] = {descriptor["job_id"]: descriptor for descriptor in jobs}
+    blocked: dict[str, list[str]] = {}
+    while True:
+        newly_blocked = {
+            job_id: unsatisfied
+            for job_id, descriptor in runnable.items()
+            if job_id not in blocked
+            and (
+                unsatisfied := [
+                    prerequisite
+                    for prerequisite in descriptor.get("prerequisite_ids", ())
+                    if prerequisite not in succeeded and (prerequisite not in runnable or prerequisite in blocked)
+                ]
+            )
+        }
+        if not newly_blocked:
+            break
+        blocked.update(newly_blocked)
+
+    dispatchable = [descriptor for descriptor in jobs if descriptor["job_id"] not in blocked]
+    blocked_entries = [
+        {
+            "job_id": descriptor["job_id"],
+            "job_name": descriptor["job_name"],
+            "specifier": descriptor["specifier"],
+            "pipeline": descriptor["pipeline"],
+            "unit_path": descriptor["unit_path"],
+            "unit_name": descriptor["unit_name"],
+            "unsatisfied_prerequisite_ids": blocked[descriptor["job_id"]],
+        }
+        for descriptor in jobs
+        if descriptor["job_id"] in blocked
+    ]
+    return dispatchable, blocked_entries
 
 
 def _unresolved_unit(unit_path: Path, reason: str) -> dict[str, Any]:

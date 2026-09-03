@@ -15,19 +15,19 @@ from sollertia_shared_assets import DATASET_MARKER_FILENAME, ProcessingTrackers
 from ataraxis_data_structures import ProcessingStatus
 
 from .graph import build_pending_job, index_rows_by_unit, resolve_submission_order
-from .hosts import RemoteHost, environment_command, state_artifact_paths
+from .hosts import environment_command, state_artifact_paths
 from .ledger import SubmissionBatch, RemoteSubmission, record_batch, current_timestamp
 from ..server import TERMINAL_JOB_STATUSES, Job, Server, JobStatus, discover_project_markers, get_server_configuration
 from ..forging import DATASET_STATE_FILENAME
 from .dispatch import resolve_unit_kind, resolve_job_command
 from .planning import project_plan_path
 from ..managing import project_jobs_path, project_manifest_path
-from .preparation import prepare_batch, resolve_project_root
+from .preparation import resolve_project_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from .graph import BatchDocument, GenericPendingJob
+    from .graph import GenericPendingJob
     from .hosts import ExecutionHost
 
 
@@ -64,9 +64,9 @@ Notes:
 """
 
 SETTLED_ALLOCATION: str = "settled"
-"""The scheduler state of an allocation accounting reports in a state it never leaves and the queue no longer carries,
-of one the queue reports as permanently blocked, and of one this reading has since cancelled. The scheduler has
-finished with it, or will never start it, so nothing it holds can change again."""
+"""The scheduler state of an allocation that accounting reports in a state it never leaves and that the queue no longer
+carries, of one the queue reports as permanently blocked, and of one this reading has since cancelled. The scheduler
+has finished with it, or will never start it, so nothing it holds can change again."""
 
 GONE_ALLOCATION: str = "gone"
 """The scheduler state of an allocation accounting returns no row for and the queue does not carry. Both records
@@ -86,13 +86,14 @@ FAILED_ALLOCATION: str = "failed"
 as it stands, because a failure is a real verdict the operator must see and clear deliberately."""
 
 ABANDONED_ALLOCATION: str = "abandoned"
-"""The verdict on an allocation the scheduler no longer holds whose job never left the scheduled state, or that its
-tracker holds no record of at all. Nothing claims that job, so it is already runnable once the ledger entry is gone."""
+"""The verdict on an allocation the scheduler no longer holds, whose job either never left the scheduled state or
+carries no record on its tracker at all. Nothing claims that job, so it is already runnable once the ledger entry is
+gone."""
 
 STRANDED_ALLOCATION: str = "stranded"
 """The verdict on an allocation the scheduler no longer holds whose job's tracker still claims to be running it under
-an executor the scheduler can answer for. This is the one verdict whose remediation writes to a tracker, because that
-claim is what no rerun can otherwise clear."""
+an executor for which the scheduler can answer. This is the one verdict whose remediation writes to a tracker, because
+that claim is what no rerun can otherwise clear."""
 
 NO_REMEDIATION: str = "none"
 """The remediation prescribed for a running allocation, which is to leave it alone."""
@@ -123,8 +124,8 @@ not drop, which is a stranded job, or when that closure failed, and an explicit 
 
 AWAITING_CLOSURE_BATCH: str = "awaiting_closure"
 """The verdict a batch carries when every allocation it holds has settled. The read that observes a batch resolving
-entirely to the plain drop also closes it, so a batch outstanding under this verdict is one holding an entry that
-closure may not drop or one whose closure failed, and the next read retries it."""
+entirely to the plain drop also closes it. A batch outstanding under this verdict is therefore one holding an entry
+that closure may not drop or one whose closure failed, and the next read retries it."""
 
 _VERDICT_REMEDIATIONS: dict[str, str] = {
     RUNNING_ALLOCATION: NO_REMEDIATION,
@@ -163,15 +164,7 @@ class TrackerClaim:
 
     @property
     def unqueryable_executor(self) -> bool:
-        """Determines whether the tracker names an executor whose state this resolution is unable to read.
-
-        Notes:
-            An executor that names no scheduler allocation answers for nothing here, so a job running under one can be
-            neither shown to be live nor shown to have stopped.
-
-        Returns:
-            True when the tracker recorded an executor that resolves to no scheduler allocation.
-        """
+        """Returns True when the tracker recorded an executor that resolves to no scheduler allocation."""
         return bool(self.executor_id) and not self.allocation
 
 
@@ -199,22 +192,22 @@ class SchedulerReading:
     that did not answer is no evidence that the scheduler has finished with an allocation."""
 
     def resolve_state(self, allocation: str) -> str:
-        """Resolves one allocation to the state the scheduler's two records place it in.
+        """Resolves one allocation to the state in which the scheduler's two records place it.
 
         Notes:
             The invariant this holds is that an allocation's state follows from what each record says about it and
             never from the order in which the two were read. Accounting and the queue are read one after the other
             rather than as one snapshot, so they answer for different moments and can disagree about the same
-            allocation, and a resolution that let the earlier read win would answer differently on two reads of one
+            allocation. A resolution that let the earlier read win would answer differently on two reads of one
             unchanged batch.
 
             The ``BLOCKED`` state is where that disagreement bites, and it is why the accounting map is consulted for
             it ahead of the queue. Accounting calls such an allocation pending, so the state is derived from the
-            queue's own reason field, which means every allocation carrying it was in the queue when accounting was
-            read while the later queue snapshot may already have released it. A dependency that can never be satisfied
-            is permanent: the allocation never runs, so it never writes to its job's tracker and nothing it holds can
-            change again. That is the settled state, and resolving it here answers the same way whichever side of the
-            queue's own release of the allocation the two reads fall on. Deciding it from the queue instead would hold
+            queue's own reason field. Every allocation carrying it was therefore in the queue when accounting was
+            read, while the later queue snapshot may already have released it. A dependency that can never be satisfied
+            is permanent. The allocation never runs, so it never writes to its job's tracker and nothing it holds can
+            change again. That is the settled state, and resolving it here answers the same way on whichever side of
+            the queue's own release of the allocation the two reads fall. Deciding it from the queue instead would hold
             the allocation on one read and settle it on the next, leaving its batch reported as progressing for as
             long as the queue kept a job that will never start.
 
@@ -277,14 +270,14 @@ class AllocationResolution:
     submission: RemoteSubmission
     """The recorded submission, naming both the job and the allocation that carries it."""
     scheduler_state: str
-    """The state the scheduler's records place the recorded allocation in."""
+    """The state in which the scheduler's records place the recorded allocation."""
     claim_state: str
-    """The state those same records place the allocation this job's tracker claims in, or empty when it claims
+    """The state in which those same records place the allocation this job's tracker claims, or empty when it claims
     none."""
     tracker: TrackerClaim
     """What the job's own tracker recorded, which is the record that gates rerunning it."""
     verdict: str
-    """The verdict the two states resolve to."""
+    """The verdict to which the two states resolve."""
     remediation: str
     """The remediation that verdict prescribes."""
 
@@ -300,33 +293,6 @@ def remote_batch_directory(server: Server, batch_id: str) -> Path:
         The path to the batch's directory on the server.
     """
     return server.root.joinpath(_BATCH_DIRECTORY_NAME, batch_id)
-
-
-def _prepare_remote_batch(
-    server: Server, pipeline: str, unit_paths: Sequence[str], options: dict[str, Any] | None = None
-) -> BatchDocument:
-    """Resolves a pipeline's submittable jobs for the named units on the remote compute server.
-
-    Notes:
-        Delegates to the shared preparation, so a remote batch is resolved by the same code that resolves a local one.
-        The only difference is the host that materializes the artifacts and delivers them here.
-
-    Args:
-        server: The connected server holding the units.
-        pipeline: The batch pipeline to prepare.
-        unit_paths: The processing unit directories on the server whose jobs to prepare.
-        options: The pipeline-specific parameters given to the prepared jobs.
-
-    Returns:
-        The prepared batch document.
-
-    Raises:
-        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, or if the named
-            units do not share one project.
-        FileNotFoundError: If the server holds no plan table for the units' project.
-        RuntimeError: If a server-side command fails.
-    """
-    return prepare_batch(host=RemoteHost(server=server), pipeline=pipeline, unit_paths=unit_paths, options=options)
 
 
 def submit_batch(
@@ -350,8 +316,8 @@ def submit_batch(
         The record is merged into whatever the ledger already holds for this batch, so re-running a batch the scheduler
         only partly accepted keeps the allocations the first attempt queued. An entry this call re-submitted is
         replaced rather than duplicated. The merge is left to the recording call, which reads the entries it carries
-        forward under the same lock that writes them, so an entry a concurrent writer committed against the same batch
-        is never dropped by a list this call read before that lock was taken.
+        forward under the same lock that writes them. An entry a concurrent writer committed against the same batch is
+        therefore never dropped by a list this call read before that lock was taken.
 
         An adopted job's allocation seeds the dependency map before anything is submitted, so a dependent of a job that
         is already running waits on the allocation running it rather than on a second one.
@@ -473,7 +439,7 @@ def resolve_tracker_claims(
     Notes:
         The trackers are rewritten into the host's state artifacts before they are read, because a job records its
         outcome on its tracker and nothing regenerates those artifacts while a batch runs. Reading them as they stand
-        would report the state the batch was prepared against, which is what would let a finished job read as one
+        would report the state against which the batch was prepared, which is what would let a finished job read as one
         still running and be reset.
 
         The regeneration is issued once per project and unit kind, since a session artifact covers a whole project
@@ -559,7 +525,7 @@ def read_scheduler_records(server: Server, allocations: Sequence[str]) -> Schedu
         output and reporting that as 'no row for anything' would resolve every allocation as gone at once.
 
         The queue is read second and a failure there is carried rather than raised, because the reading it leaves is
-        still usable: every allocation the reading has neither cancelled nor found permanently blocked resolves as
+        still usable. Every allocation the reading has neither cancelled nor found permanently blocked resolves as
         held, which is the reading that disturbs nothing.
 
     Args:
@@ -591,11 +557,12 @@ def resolve_allocations(
 
     Notes:
         Every allocation is resolved from the batch's own submissions rather than from the answer a query returned,
-        so an allocation neither record answered for is still resolved rather than passed over.
+        so an allocation for which neither record answered is still resolved rather than passed over.
 
         An allocation resolves as running whenever the scheduler holds it, holds the allocation its job's tracker
-        claims, or that tracker claims to be running under an executor neither of the scheduler's records answers for.
-        Everything else is resolved by what that tracker recorded, because the tracker is what gates rerunning the job.
+        claims, or that tracker claims to be running under an executor for which neither of the scheduler's records
+        answers. Everything else is resolved by what that tracker recorded, because the tracker is what gates rerunning
+        the job.
 
     Args:
         batches: The recorded batches whose allocations to resolve.
@@ -660,7 +627,7 @@ def classify_batch(resolutions: Sequence[AllocationResolution]) -> str:
         outstanding, so nothing has to be tuned and a slow run is never mistaken for a stopped one.
 
         A batch every allocation of which has settled is awaiting closure rather than progressing or stalled, since
-        the read that observes a batch resolving entirely to the plain drop also closes it, and such a batch is
+        the read that observes a batch resolving entirely to the plain drop also closes it. Such a batch is
         outstanding only because it holds an entry that closure may not drop or because that closure failed. A batch
         holding no allocation at all resolves the same way, since there is nothing left for the scheduler to advance.
 
@@ -683,7 +650,7 @@ def reset_stranded_jobs(host: ExecutionHost, resolutions: Sequence[AllocationRes
     Notes:
         Only a stranded job is reset. A job that recorded success would lose that result, a job that recorded failure
         would lose the verdict its operator has yet to see, and a job that never left the scheduled state is already
-        runnable, so a write to any of those trackers would destroy or invent a record rather than release one.
+        runnable. A write to any of those trackers would destroy or invent a record rather than release one.
 
         The identifiers are grouped by pipeline and by unit, because a job identifier names a stage rather than a
         unit and two units of one project share the identifier of the same stage. A unit named with no identifier at
@@ -720,11 +687,11 @@ def render_allocation(resolution: AllocationResolution, reading: SchedulerReadin
 
     Args:
         resolution: The resolution to render.
-        reading: The reading the resolution was resolved against, which carries the state accounting reported.
+        reading: The reading against which the resolution was resolved, which carries the state accounting reported.
 
     Returns:
-        The submission's own fields alongside the batch that recorded it, the state each scheduler record placed it
-        in, what its job's tracker holds, the verdict, and the remediation that verdict prescribes.
+        The submission's own fields alongside the batch that recorded it, the state in which each scheduler record
+        placed it, what its job's tracker holds, the verdict, and the remediation that verdict prescribes.
     """
     allocation = resolution.submission.slurm_job_id
     return {
@@ -829,7 +796,7 @@ def _regenerate_recorded_state(
 
     Args:
         host: The host holding the units.
-        group: The unit kind and project root the artifacts are written for.
+        group: The unit kind and project root for which the artifacts are written.
         unit_paths: The unit directories the artifacts cover.
 
     Returns:
@@ -853,8 +820,8 @@ def _resolve_verdict(scheduler_state: str, claim_state: str, tracker: TrackerCla
     """Resolves one allocation's verdict from its scheduler state and what its job's tracker recorded.
 
     Notes:
-        A held allocation resolves as running whatever its tracker holds, since the tracker of a job the scheduler is
-        still carrying may be written at any moment and a verdict read off it would be a verdict about the past.
+        A held allocation resolves as running whatever its tracker holds. The tracker of a job the scheduler is still
+        carrying may be written at any moment, so a verdict read off it would be a verdict about the past.
 
         A tracker claiming to be running under an executor that names no scheduler allocation resolves as running too,
         rather than as stranded. Neither of the scheduler's records answers for such an executor, so calling that job
@@ -863,8 +830,9 @@ def _resolve_verdict(scheduler_state: str, claim_state: str, tracker: TrackerCla
         the tracker exactly as it stands.
 
     Args:
-        scheduler_state: The state the scheduler's records place the recorded allocation in.
-        claim_state: The state they place the allocation the job's tracker claims in, or empty when it claims none.
+        scheduler_state: The state in which the scheduler's records place the recorded allocation.
+        claim_state: The state in which they place the allocation the job's tracker claims, or empty when it claims
+            none.
         tracker: What the job's own tracker recorded, which names both the status and the executor holding it.
 
     Returns:

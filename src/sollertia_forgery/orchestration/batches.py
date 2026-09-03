@@ -74,18 +74,6 @@ def batch_directory() -> Path:
     return remote_state_path().joinpath(_BATCH_DIRECTORY_NAME)
 
 
-def _batch_path(batch_id: str) -> Path:
-    """Resolves where one prepared batch is recorded.
-
-    Args:
-        batch_id: The identifier of the batch.
-
-    Returns:
-        The path to the batch's file.
-    """
-    return batch_directory().joinpath(f"{batch_id}.yaml")
-
-
 def record_prepared_batch(document: BatchDocument) -> str:
     """Records one prepared batch and returns the identifier that resolves it.
 
@@ -196,10 +184,6 @@ def forget_batch_records(batch_ids: list[str]) -> list[str]:
 def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
     """Writes what a batch's jobs finally recorded into the batch's own outcome file.
 
-    Notes:
-        This is the step that makes a finished batch answerable, so it runs before the batch is retired from anything
-        that tracks it as outstanding.
-
     Args:
         batch_id: The identifier of the batch that receives the outcome.
         outcome: The rendered outcome to store.
@@ -239,13 +223,24 @@ def retire_prepared_batch(batch_id: str) -> None:
 
     Notes:
         The document is the larger half of what a batch leaves behind, and it describes work that has finished, so it
-        is dropped once the outcome answers for the run. A caller that asks about the batch afterwards reads that
-        outcome, and a caller that wants the work again prepares it against the state the run left.
+        is dropped once the outcome answers for the run.
 
     Args:
         batch_id: The identifier of the batch to retire.
     """
     _remove_record(path=_batch_path(batch_id=batch_id))
+
+
+def _batch_path(batch_id: str) -> Path:
+    """Resolves where one prepared batch is recorded.
+
+    Args:
+        batch_id: The identifier of the batch.
+
+    Returns:
+        The path to the batch's file.
+    """
+    return batch_directory().joinpath(f"{batch_id}.yaml")
 
 
 def _outcome_path(batch_id: str) -> Path:

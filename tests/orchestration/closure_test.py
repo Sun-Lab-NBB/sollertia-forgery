@@ -9,7 +9,6 @@ import pytest
 
 from sollertia_forgery.server import JobStatus
 from sollertia_forgery.orchestration import (
-    TrackerClaim,
     SchedulerReading,
     close_batch,
     read_ledger,
@@ -25,6 +24,9 @@ from sollertia_forgery.orchestration.ledger import (
     SubmissionBatch,
     RemoteSubmission,
     record_batch,
+)
+from sollertia_forgery.orchestration.remote import (
+    TrackerClaim,
 )
 from sollertia_forgery.orchestration.closure import _OUTCOME_FIELD_LIMIT, _resolve_outcome
 
@@ -317,9 +319,6 @@ def _resolutions(
 def test_a_forging_batch_spanning_two_datasets_counts_every_dataset_it_dispatched() -> None:
     """Verifies that a dataset batch reads one same-named state table per dataset, unlike a session batch's single
     project table.
-
-    Each table therefore has to be read where the host holds it rather than from a delivered copy, and delivered
-    somewhere it cannot overwrite the same-named table already delivered by another dataset.
     """
     alpha, beta = "/data/Project/alpha", "/data/Project/beta"
     batch_id = record_prepared_batch(
@@ -353,7 +352,9 @@ def test_a_forging_batch_spanning_two_datasets_counts_every_dataset_it_dispatche
 
 
 def test_a_batch_whose_jobs_all_succeeded_reports_complete() -> None:
-    """Verifies that a batch whose jobs all succeeded reports as complete."""
+    """Verifies that completeness comes with a count placing every job under succeeded and none under the other three
+    counters the outcome carries.
+    """
     outcome = _resolve_batch_outcome(
         jobs=[_make_job(job_id="a"), _make_job(job_id="b")],
         rows=[_make_state_row(job_id="a", status="SUCCEEDED"), _make_state_row(job_id="b", status="SUCCEEDED")],
@@ -364,7 +365,9 @@ def test_a_batch_whose_jobs_all_succeeded_reports_complete() -> None:
 
 
 def test_a_failed_job_is_counted_and_carries_its_error_text() -> None:
-    """Verifies that a failed job is counted and carries the error text it recorded."""
+    """Verifies that the recorded text is reached through the outcome's own failed-job listing, and that one failure
+    leaves the batch incomplete however many of its jobs succeeded.
+    """
     outcome = _resolve_batch_outcome(
         jobs=[_make_job(job_id="a"), _make_job(job_id="b")],
         rows=[
@@ -379,7 +382,9 @@ def test_a_failed_job_is_counted_and_carries_its_error_text() -> None:
 
 
 def test_a_job_waiting_on_a_failed_prerequisite_counts_as_blocked() -> None:
-    """Verifies that a job waiting on a failed prerequisite is counted as blocked."""
+    """Verifies that the outcome names the unsatisfied prerequisite beside the count, so a caller reads which job the
+    block waits on.
+    """
     outcome = _resolve_batch_outcome(
         jobs=[_make_job(job_id="up"), _make_job(job_id="down", prerequisites=("up",))],
         rows=[_make_state_row(job_id="up", status="FAILED"), _make_state_row(job_id="down", status="SCHEDULED")],
@@ -402,14 +407,18 @@ def test_a_job_that_simply_never_ran_counts_as_outstanding() -> None:
 
 
 def test_a_job_absent_from_the_state_artifact_counts_as_outstanding() -> None:
-    """Verifies that a job absent from the state artifact is counted as outstanding."""
+    """Verifies that a state artifact holding no row at all leaves the job counted as work still to run rather than as
+    work that succeeded.
+    """
     outcome = _resolve_batch_outcome(jobs=[_make_job(job_id="a")], rows=[])
 
     assert (outcome.outstanding, outcome.succeeded) == (1, 0)
 
 
 def test_jobs_blocked_at_preparation_reach_the_totals() -> None:
-    """Verifies that jobs blocked at preparation are included in the batch totals."""
+    """Verifies that a job the preparation never dispatched reaches the total and the blocked count, though the state
+    artifact holds no row for it.
+    """
     blocked = [
         {
             "job_id": "late",
@@ -429,7 +438,9 @@ def test_jobs_blocked_at_preparation_reach_the_totals() -> None:
 
 
 def test_a_settled_batch_is_snapshotted_before_it_leaves_the_ledger() -> None:
-    """Verifies that a settled batch is snapshotted before it leaves the ledger."""
+    """Verifies that the snapshot is readable by the batch's own identifier once the ledger no longer holds its entry,
+    so closing a batch loses nothing it reported.
+    """
     batch = _record_settled_batch()
     host = _StubHost(rows=[_make_state_row(job_id="a", status="SUCCEEDED")])
 
@@ -444,11 +455,7 @@ def test_a_settled_batch_is_snapshotted_before_it_leaves_the_ledger() -> None:
 
 
 def test_snapshotting_a_submission_records_an_outcome_and_leaves_its_ledger_entry() -> None:
-    """Verifies that snapshotting a submission's prepared batches writes their outcomes without retiring the entry.
-
-    An explicit retirement snapshots a batch that never settled, so the snapshot has to be reachable on its own and
-    has to leave the decision to drop the ledger entry with its caller.
-    """
+    """Verifies that snapshotting a submission's prepared batches writes their outcomes without retiring the entry."""
     batch = _record_settled_batch()
     host = _StubHost(rows=[_make_state_row(job_id="a", status="SUCCEEDED")])
 
@@ -456,6 +463,8 @@ def test_snapshotting_a_submission_records_an_outcome_and_leaves_its_ledger_entr
 
     assert [outcome.batch_id for outcome in outcomes] == [batch.batch_id]
     assert read_batch_outcome(batch_id=batch.batch_id)["complete"]
+    # An explicit retirement snapshots a batch that never settled, so the snapshot has to be reachable on its own and
+    # has to leave the decision to drop the ledger entry with its caller.
     assert [recorded.batch_id for recorded in read_ledger().batches] == [batch.batch_id]
 
 
@@ -581,7 +590,9 @@ def test_the_enumerated_examples_are_capped_while_the_counts_stay_whole() -> Non
 
 
 def test_a_settled_batch_this_host_never_prepared_is_retired_without_an_outcome() -> None:
-    """Verifies that a settled batch with no prepared record on this host is retired without an outcome."""
+    """Verifies that such a batch never reaches the host at all, and that its ledger entry is dropped anyway so it
+    does not stay outstanding forever.
+    """
     batch = SubmissionBatch(
         batch_id="unprepared",
         submissions=[RemoteSubmission(job_id="a", slurm_job_id="7", unit_path=_UNIT_PATH)],
@@ -602,11 +613,6 @@ def test_a_settled_batch_this_host_never_prepared_is_retired_without_an_outcome(
 def test_a_batch_whose_job_is_stranded_is_never_closed_automatically() -> None:
     """Verifies that an automatic closure covers the plain drop alone, so a tracker still claiming a run is never
     dropped by a read.
-
-    The scheduler has finished with this batch's allocation, so a closure resolving settlement for itself would drop
-    it. Its job's tracker still claims to be running it, which the resolution prescribes a reset for, and only the
-    explicit remediation performs that reset. Dropping the entry here would discard the last record naming a claim no
-    rerun can clear.
     """
     batch = _record_settled_batch()
     claims = {(_UNIT_PATH, "a"): TrackerClaim(status="RUNNING", executor_id="slurm:7", allocation="7")}
@@ -618,18 +624,17 @@ def test_a_batch_whose_job_is_stranded_is_never_closed_automatically() -> None:
         resolutions=_resolutions(batches=[batch], reading=_settled(allocations=["7"]), claims=claims),
     )
 
+    # The scheduler has finished with this batch's allocation, so a closure resolving settlement for itself would
+    # drop it. Its job's tracker still claims to be running it, and only the explicit remediation performs the reset
+    # the resolution prescribes. Dropping the entry here would discard the last record naming a claim no rerun can
+    # clear.
     assert not closed
     assert host.materialized == 0, "a batch holding a stranded job reached the host"
     assert [recorded.batch_id for recorded in read_ledger().batches] == [batch.batch_id]
 
 
 def test_a_batch_whose_job_runs_outside_the_scheduler_is_never_closed_automatically() -> None:
-    """Verifies that a job claiming an executor the scheduler does not answer for holds its batch open.
-
-    The recorded allocation has settled and the tracker names a process rather than an allocation, so neither record
-    can show that job to have stopped. The resolution refuses it, and the closure derives that refusal rather than
-    resolving settlement of its own.
-    """
+    """Verifies that a job claiming an executor the scheduler does not answer for holds its batch open."""
     batch = _record_settled_batch()
     claims = {(_UNIT_PATH, "a"): TrackerClaim(status="RUNNING", executor_id="pid:4821")}
     host = _StubHost(rows=[_make_state_row(job_id="a", status="RUNNING")])
@@ -640,6 +645,9 @@ def test_a_batch_whose_job_runs_outside_the_scheduler_is_never_closed_automatica
         resolutions=_resolutions(batches=[batch], reading=_settled(allocations=["7"]), claims=claims),
     )
 
+    # The recorded allocation has settled and the tracker names a process rather than an allocation, so neither
+    # record can show that job to have stopped. The resolution refuses it, and the closure derives that refusal
+    # rather than resolving settlement of its own.
     assert not closed
     assert [recorded.batch_id for recorded in read_ledger().batches] == [batch.batch_id]
 
@@ -687,11 +695,7 @@ def test_only_the_settled_batches_leave_the_ledger() -> None:
 
 
 def test_a_batch_the_queue_still_carries_is_left_outstanding() -> None:
-    """Verifies that an allocation the queue holds keeps its batch open though accounting reports no row for it.
-
-    The controller queues an allocation before accounting commits a row for it, so closing this batch on accounting's
-    answer alone would drop a run that has yet to start.
-    """
+    """Verifies that an allocation the queue holds keeps its batch open though accounting reports no row for it."""
     batch = _record_settled_batch()
     reading = SchedulerReading(statuses={"7": JobStatus.UNRESOLVED}, queued=frozenset({"7"}))
     host = _StubHost(rows=[_make_state_row(job_id="a", status="SUCCEEDED")])
@@ -700,18 +704,15 @@ def test_a_batch_the_queue_still_carries_is_left_outstanding() -> None:
         host=host, batches=[batch], resolutions=_resolutions(batches=[batch], reading=reading)
     )
 
+    # The controller queues an allocation before accounting commits a row for it, so closing this batch on
+    # accounting's answer alone would drop a run that has yet to start.
     assert not closed
     assert host.materialized == 0, "a batch the queue still carries reached the host"
     assert [recorded.batch_id for recorded in read_ledger().batches] == [batch.batch_id]
 
 
 def test_a_batch_whose_allocation_can_never_start_is_closed_however_long_the_queue_carries_it() -> None:
-    """Verifies that a permanently blocked allocation stops holding its batch open.
-
-    Such an allocation waits on a dependency that can never be satisfied, so nothing the scheduler does advances the
-    batch and nothing that allocation holds can change again. Leaving it open on the strength of its queue row would
-    keep the batch outstanding forever and report it as progressing the whole time.
-    """
+    """Verifies that a permanently blocked allocation stops holding its batch open."""
     batch = _record_settled_batch()
     reading = SchedulerReading(statuses={"7": JobStatus.BLOCKED}, queued=frozenset({"7"}))
     host = _StubHost(rows=[_make_state_row(job_id="a", status="SUCCEEDED")])
@@ -720,6 +721,9 @@ def test_a_batch_whose_allocation_can_never_start_is_closed_however_long_the_que
         host=host, batches=[batch], resolutions=_resolutions(batches=[batch], reading=reading)
     )
 
+    # Such an allocation waits on a dependency that can never be satisfied, so nothing the scheduler does advances
+    # the batch and nothing that allocation holds can change again. Leaving it open on the strength of its queue row
+    # would keep the batch outstanding forever and report it as progressing the whole time.
     assert [outcome.batch_id for outcome in closed] == [batch.batch_id]
     assert not read_ledger().batches
 
@@ -742,7 +746,9 @@ def test_a_batch_holding_no_allocation_is_closed_and_retired() -> None:
 
 
 def test_naming_no_identifier_resolves_every_outstanding_batch() -> None:
-    """Verifies that a status query naming no identifier resolves every outstanding batch."""
+    """Verifies that an empty identifier list is distinct from naming none, resolving no batch where an omitted list
+    resolves them all.
+    """
     record_batch(batch=SubmissionBatch(batch_id="first"))
     record_batch(batch=SubmissionBatch(batch_id="second"))
     ledger = read_ledger()

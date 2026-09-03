@@ -142,7 +142,10 @@ def test_a_pipeline_outside_the_dispatch_table_resets_nothing(experiment_session
     """Verifies that a caller naming an unsupported pipeline gets an empty result rather than a partial reset of
     something else.
     """
-    assert reset_tracked_jobs(pipeline="unregistered_pipeline", unit_paths=[session_root(experiment_session)]) == []
+    assert (
+        reset_tracked_jobs(pipeline="unregistered_pipeline", unit_paths=[session_root(session=experiment_session)])
+        == []
+    )
 
 
 def test_naming_no_identifier_returns_the_whole_unit_to_a_clean_slate(
@@ -153,10 +156,10 @@ def test_naming_no_identifier_returns_the_whole_unit_to_a_clean_slate(
     """
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
 
-    reset = reset_tracked_jobs(pipeline="video", unit_paths=[session_root(experiment_session)])
+    reset = reset_tracked_jobs(pipeline="video", unit_paths=[session_root(session=experiment_session)])
 
-    assert sorted(reset) == sorted(job_identifier(job) for job in _VIDEO_JOBS)
-    assert set(tracker_statuses(tracker_path).values()) == {ProcessingStatus.SCHEDULED}
+    assert sorted(reset) == sorted(job_identifier(job=job) for job in _VIDEO_JOBS)
+    assert set(tracker_statuses(path=tracker_path).values()) == {ProcessingStatus.SCHEDULED}
     assert video_tracker.file_path == tracker_path
 
 
@@ -168,10 +171,12 @@ def test_only_the_named_identifiers_are_reset(
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
     target = job_identifier(job=_VIDEO_JOBS[0])
 
-    reset = reset_tracked_jobs(pipeline="video", unit_paths=[session_root(experiment_session)], job_ids=[target])
+    reset = reset_tracked_jobs(
+        pipeline="video", unit_paths=[session_root(session=experiment_session)], job_ids=[target]
+    )
 
     assert reset == [target]
-    statuses = tracker_statuses(tracker_path)
+    statuses = tracker_statuses(path=tracker_path)
     assert statuses[target] is ProcessingStatus.SCHEDULED
     assert statuses[job_identifier(job=_VIDEO_JOBS[1])] is ProcessingStatus.SUCCEEDED
 
@@ -184,16 +189,16 @@ def test_an_identifier_the_unit_does_not_track_is_dropped(
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
 
     reset = reset_tracked_jobs(
-        pipeline="video", unit_paths=[session_root(experiment_session)], job_ids=["0123456789abcdef"]
+        pipeline="video", unit_paths=[session_root(session=experiment_session)], job_ids=["0123456789abcdef"]
     )
 
     assert reset == []
-    assert set(tracker_statuses(tracker_path).values()) == {ProcessingStatus.SUCCEEDED}
+    assert set(tracker_statuses(path=tracker_path).values()) == {ProcessingStatus.SUCCEEDED}
 
 
 def test_a_unit_holding_no_tracker_is_skipped(experiment_session: SessionData) -> None:
     """Verifies a pipeline that never ran for the unit has no record to clear, so the call reports nothing for it."""
-    assert reset_tracked_jobs(pipeline="video", unit_paths=[session_root(experiment_session)]) == []
+    assert reset_tracked_jobs(pipeline="video", unit_paths=[session_root(session=experiment_session)]) == []
 
 
 def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_reset(
@@ -205,14 +210,17 @@ def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_reset(
     unresolvable = tmp_path.joinpath("not_a_session")
     unresolvable.mkdir()
 
-    reset = reset_tracked_jobs(pipeline="video", unit_paths=[unresolvable, session_root(experiment_session)])
+    reset = reset_tracked_jobs(pipeline="video", unit_paths=[unresolvable, session_root(session=experiment_session)])
 
-    assert sorted(reset) == sorted(job_identifier(job) for job in _VIDEO_JOBS)
+    assert sorted(reset) == sorted(job_identifier(job=job) for job in _VIDEO_JOBS)
 
 
 def test_a_pipeline_outside_the_dispatch_table_removes_nothing(experiment_session: SessionData) -> None:
     """Verifies that an unsupported pipeline identifier never reaches a unit's files at all."""
-    assert clean_pipeline_output(pipeline="unregistered_pipeline", unit_paths=[session_root(experiment_session)]) == []
+    assert (
+        clean_pipeline_output(pipeline="unregistered_pipeline", unit_paths=[session_root(session=experiment_session)])
+        == []
+    )
 
 
 def test_a_pipeline_that_owns_a_directory_removes_it_alongside_its_tracker(
@@ -224,7 +232,7 @@ def test_a_pipeline_that_owns_a_directory_removes_it_alongside_its_tracker(
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
     output_directory.joinpath("motion_energy.feather").write_bytes(b"0123456789")
 
-    removed = clean_pipeline_output(pipeline="video", unit_paths=[session_root(experiment_session)])
+    removed = clean_pipeline_output(pipeline="video", unit_paths=[session_root(session=experiment_session)])
 
     assert [entry["path"] for entry in removed] == [str(tracker_path), str(output_directory)]
     assert removed[1]["removed_bytes"] == 10
@@ -251,7 +259,7 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
 
     assert lock_path.is_file(), "the tracker did not leave the lock file the cleanup is expected to remove"
 
-    removed = clean_pipeline_output(pipeline="checksum", unit_paths=[session_root(experiment_session)])
+    removed = clean_pipeline_output(pipeline="checksum", unit_paths=[session_root(session=experiment_session)])
 
     assert [entry["path"] for entry in removed] == [str(tracker_path)]
     assert not tracker_path.exists()
@@ -263,7 +271,7 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
 
 def test_a_unit_with_nothing_recorded_removes_nothing(experiment_session: SessionData) -> None:
     """Verifies that a pipeline that never ran leaves neither a tracker nor an output directory behind to remove."""
-    assert clean_pipeline_output(pipeline="video", unit_paths=[session_root(experiment_session)]) == []
+    assert clean_pipeline_output(pipeline="video", unit_paths=[session_root(session=experiment_session)]) == []
 
 
 def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_cleaned(
@@ -276,7 +284,9 @@ def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_cleaned(
     unresolvable.mkdir()
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
 
-    removed = clean_pipeline_output(pipeline="video", unit_paths=[unresolvable, session_root(experiment_session)])
+    removed = clean_pipeline_output(
+        pipeline="video", unit_paths=[unresolvable, session_root(session=experiment_session)]
+    )
 
     assert [entry["path"] for entry in removed] == [
         str(tracker_path),

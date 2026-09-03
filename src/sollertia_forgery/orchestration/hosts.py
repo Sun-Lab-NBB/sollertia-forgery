@@ -595,7 +595,7 @@ class RemoteHost:
             RuntimeError: If the invocation exits with a non-zero status.
         """
         result = self._server.execute_command(
-            command=environment_commands(environment=self._server.environment, commands=commands)
+            command=_environment_commands(environment=self._server.environment, commands=commands)
         )
         if result.return_code != 0:
             _raise_command_failure(commands=commands, return_code=result.return_code, stderr=result.stderr)
@@ -611,13 +611,13 @@ class RemoteHost:
             RuntimeError: If the invocation exits with a non-zero status.
         """
         result = self._server.execute_command(
-            command=environment_commands(environment=self._server.environment, commands=commands)
+            command=_environment_commands(environment=self._server.environment, commands=commands)
         )
         if result.return_code != 0:
             _raise_command_failure(commands=commands, return_code=result.return_code, stderr=result.stderr)
 
 
-def environment_commands(environment: str, commands: Sequence[Sequence[str]]) -> str:
+def _environment_commands(environment: str, commands: Sequence[Sequence[str]]) -> str:
     """Wraps several commands so they run in order inside the server's shared processing environment.
 
     Notes:
@@ -646,7 +646,7 @@ def environment_command(environment: str, command: Sequence[str]) -> str:
     Returns:
         The shell command to issue on the server.
     """
-    return environment_commands(environment=environment, commands=[command])
+    return _environment_commands(environment=environment, commands=[command])
 
 
 def state_artifact_paths(project_root: Path, unit_paths: Sequence[Path], unit_kind: str) -> list[Path]:
@@ -832,7 +832,10 @@ def _raise_command_failure(commands: Sequence[Sequence[str]], return_code: int, 
         RuntimeError: Always, since this reports a failure that stops the caller.
     """
     rendered = " && ".join(shlex.join(command) for command in commands)
-    message = f"The server-side invocation '{rendered}' exited with code {return_code}. {stderr.strip()}"
+    message = (
+        f"Unable to complete the server-side invocation '{rendered}'. The invocation must exit with code 0, but it "
+        f"exited with code {return_code}. {stderr.strip()}"
+    )
     console.error(message=message, error=RuntimeError)
 
 

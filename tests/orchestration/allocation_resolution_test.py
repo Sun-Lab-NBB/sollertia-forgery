@@ -17,18 +17,11 @@ from sollertia_forgery.orchestration import (
     STALLED_BATCH,
     NO_REMEDIATION,
     GONE_ALLOCATION,
-    HELD_ALLOCATION,
     DROP_REMEDIATION,
-    FAILED_ALLOCATION,
-    PROGRESSING_BATCH,
     RESET_REMEDIATION,
     RUNNING_ALLOCATION,
-    SETTLED_ALLOCATION,
-    FINISHED_ALLOCATION,
     STRANDED_ALLOCATION,
-    ABANDONED_ALLOCATION,
     AWAITING_CLOSURE_BATCH,
-    TrackerClaim,
     SchedulerReading,
     classify_batch,
     render_allocation,
@@ -40,6 +33,15 @@ from sollertia_forgery.orchestration import (
     resolve_queried_allocations,
 )
 from sollertia_forgery.orchestration.ledger import SubmissionBatch, RemoteSubmission
+from sollertia_forgery.orchestration.remote import (
+    HELD_ALLOCATION,
+    FAILED_ALLOCATION,
+    PROGRESSING_BATCH,
+    SETTLED_ALLOCATION,
+    FINISHED_ALLOCATION,
+    ABANDONED_ALLOCATION,
+    TrackerClaim,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -92,7 +94,9 @@ class _StubHost:
         """Records one reset request."""
         if self.reset_error is not None:
             raise self.reset_error
-        self.reset_calls.append((pipeline, {str(unit): list(ids) for unit, ids in job_ids_by_unit.items()}))
+        self.reset_calls.append(
+            (pipeline, {str(unit): list(identifiers) for unit, identifiers in job_ids_by_unit.items()})
+        )
 
 
 @dataclass
@@ -120,7 +124,7 @@ class _StubServer:
         return set(self.queued)
 
 
-def build_submission(
+def _build_submission(
     job_id: str = "job0",
     slurm_job_id: str = "1000",
     unit_path: str = str(_SESSION_PATH),
@@ -143,12 +147,12 @@ def build_submission(
     )
 
 
-def build_batch(batch_id: str = "batch01", submissions: Sequence[RemoteSubmission] = ()) -> SubmissionBatch:
+def _build_batch(batch_id: str = "batch01", submissions: Sequence[RemoteSubmission] = ()) -> SubmissionBatch:
     """Builds one recorded batch holding the given submissions."""
     return SubmissionBatch(batch_id=batch_id, batch_ids=[batch_id], submissions=list(submissions))
 
 
-def build_row(
+def _build_row(
     job_id: str = "job0",
     status: str = "SCHEDULED",
     executor_id: str | None = None,
@@ -194,39 +198,33 @@ def test_a_record_that_could_not_be_read_holds_every_allocation() -> None:
 
 
 def test_an_allocation_the_queue_holds_is_held_though_accounting_reports_no_row() -> None:
-    """Verifies that a submission the controller has queued but slurmdbd has not committed reads as held.
-
-    This is the allocation that accounting alone cannot see. Reporting it as gone would retire a batch whose work is
-    about to start, and a rerun would then submit a second allocation over the same tracker.
-    """
+    """Verifies that a submission the controller has queued but slurmdbd has not committed reads as held."""
     reading = SchedulerReading(statuses={"1000": JobStatus.UNRESOLVED}, queued=frozenset({"1000"}))
 
+    # This is the allocation that accounting alone cannot see. Reporting it as gone would retire a batch whose work
+    # is about to start, and a rerun would then submit a second allocation over the same tracker.
     assert reading.resolve_state(allocation="1000") == HELD_ALLOCATION
 
 
 def test_a_blocked_allocation_settles_whichever_way_the_two_snapshots_fall() -> None:
-    """Verifies that a permanently blocked allocation resolves the same way on every read of one unchanged batch.
-
-    The state is derived from the queue's own reason field while the queue membership is a second, later read, so the
-    two disagree exactly when the scheduler releases such an allocation between them. Deciding the state from the
-    queue would hold the allocation on one read and settle it on the next, so it is decided from the blocked state
-    alone: a dependency that can never be satisfied means the allocation never runs and never changes what it holds.
-    """
+    """Verifies that a permanently blocked allocation resolves the same way on every read of one unchanged batch."""
     carried = SchedulerReading(statuses={"1000": JobStatus.BLOCKED}, queued=frozenset({"1000"}))
     released = SchedulerReading(statuses={"1000": JobStatus.BLOCKED})
 
+    # The state is derived from the queue's own reason field while the queue membership is a second, later read, so
+    # the two disagree exactly when the scheduler releases such an allocation between them. The blocked state alone
+    # therefore decides the outcome, because a dependency that can never be satisfied means the allocation never runs
+    # and never changes what it holds.
     assert carried.resolve_state(allocation="1000") == SETTLED_ALLOCATION
     assert released.resolve_state(allocation="1000") == SETTLED_ALLOCATION
 
 
 def test_a_blocked_allocation_settles_though_the_queue_could_not_be_read() -> None:
-    """Verifies that the blocked state is positive evidence rather than the absence a failed read would leave.
-
-    An unread record holds every allocation it says nothing about, but a blocked state is something accounting's own
-    read reported, so it settles the allocation rather than resolving as one nothing answered for.
-    """
+    """Verifies that the blocked state is positive evidence rather than the absence a failed read would leave."""
     reading = SchedulerReading(statuses={"1000": JobStatus.BLOCKED}, unreadable_reason="the queue is down")
 
+    # An unread record holds every allocation on which it is silent, but a blocked state is something accounting's
+    # own read reported, so it settles the allocation rather than leaving it unresolved.
     assert reading.resolve_state(allocation="1000") == SETTLED_ALLOCATION
 
 
@@ -280,7 +278,7 @@ def test_a_failed_queue_read_is_carried_rather_than_raised() -> None:
 
 def test_a_query_covers_the_allocation_a_tracker_claims_alongside_the_recorded_one() -> None:
     """Verifies that a job claimed by another machine's allocation is queried too, and that empties are dropped."""
-    submissions = [build_submission(slurm_job_id="1000"), build_submission(job_id="job1", slurm_job_id="")]
+    submissions = [_build_submission(slurm_job_id="1000"), _build_submission(job_id="job1", slurm_job_id="")]
     claims = {
         (str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:2000", allocation="2000"),
         (str(_SESSION_PATH), "job1"): TrackerClaim(),
@@ -294,9 +292,9 @@ def test_a_query_covers_the_allocation_a_tracker_claims_alongside_the_recorded_o
 
 def test_a_tracker_claim_is_read_out_of_freshly_regenerated_state() -> None:
     """Verifies that the artifacts are rewritten before they are read, so a finished job never reads as running."""
-    host = _StubHost(rows={_JOBS_ARTIFACT: [build_row(status="RUNNING", executor_id="slurm:1000")]})
+    host = _StubHost(rows={_JOBS_ARTIFACT: [_build_row(status="RUNNING", executor_id="slurm:1000")]})
 
-    claims = resolve_tracker_claims(host=host, submissions=[build_submission()])
+    claims = resolve_tracker_claims(host=host, submissions=[_build_submission()])
 
     assert host.generated == [("session", str(_PROJECT_ROOT), [str(_SESSION_PATH)])]
     assert claims[(str(_SESSION_PATH), "job0")] == TrackerClaim(
@@ -306,9 +304,9 @@ def test_a_tracker_claim_is_read_out_of_freshly_regenerated_state() -> None:
 
 def test_a_job_the_state_artifact_holds_no_row_for_carries_an_empty_claim() -> None:
     """Verifies that a tracker that lost an entry claims nothing rather than claiming the row of another job."""
-    host = _StubHost(rows={_JOBS_ARTIFACT: [build_row(job_id="other", status="RUNNING")]})
+    host = _StubHost(rows={_JOBS_ARTIFACT: [_build_row(job_id="other", status="RUNNING")]})
 
-    claims = resolve_tracker_claims(host=host, submissions=[build_submission()])
+    claims = resolve_tracker_claims(host=host, submissions=[_build_submission()])
 
     assert claims[(str(_SESSION_PATH), "job0")] == TrackerClaim()
 
@@ -317,7 +315,7 @@ def test_a_submission_naming_no_unit_reads_no_tracker() -> None:
     """Verifies that a record that does not say which unit it ran against is skipped rather than resolved."""
     host = _StubHost()
 
-    claims = resolve_tracker_claims(host=host, submissions=[build_submission(unit_path="")])
+    claims = resolve_tracker_claims(host=host, submissions=[_build_submission(unit_path="")])
 
     assert host.generated == []
     assert claims[("", "job0")] == TrackerClaim()
@@ -325,9 +323,9 @@ def test_a_submission_naming_no_unit_reads_no_tracker() -> None:
 
 def test_an_executor_that_is_not_an_allocation_claims_none() -> None:
     """Verifies that a process identifier is read as claiming no allocation, so nothing is queried for it."""
-    host = _StubHost(rows={_JOBS_ARTIFACT: [build_row(status="RUNNING", executor_id="pid:4242")]})
+    host = _StubHost(rows={_JOBS_ARTIFACT: [_build_row(status="RUNNING", executor_id="pid:4242")]})
 
-    claims = resolve_tracker_claims(host=host, submissions=[build_submission()])
+    claims = resolve_tracker_claims(host=host, submissions=[_build_submission()])
 
     assert claims[(str(_SESSION_PATH), "job0")].allocation == ""
 
@@ -337,14 +335,14 @@ def test_one_project_is_regenerated_once_for_every_pipeline_it_holds() -> None:
     host = _StubHost(
         rows={
             _JOBS_ARTIFACT: [
-                build_row(job_id="job0", status="RUNNING", pipeline="video"),
-                build_row(job_id="job1", status="FAILED", pipeline="checksum"),
+                _build_row(job_id="job0", status="RUNNING", pipeline="video"),
+                _build_row(job_id="job1", status="FAILED", pipeline="checksum"),
             ]
         }
     )
     submissions = [
-        build_submission(job_id="job0", pipeline="video"),
-        build_submission(job_id="job1", slurm_job_id="1001", pipeline="checksum"),
+        _build_submission(job_id="job0", pipeline="video"),
+        _build_submission(job_id="job1", slurm_job_id="1001", pipeline="checksum"),
     ]
 
     claims = resolve_tracker_claims(host=host, submissions=submissions)
@@ -359,11 +357,11 @@ def test_a_forging_batch_reads_each_datasets_own_state_artifact() -> None:
     host = _StubHost(
         rows={
             _DATASET_ARTIFACT: [
-                build_row(status="SUCCEEDED", pipeline=None, unit_column="dataset", unit_name="Dataset")
+                _build_row(status="SUCCEEDED", pipeline=None, unit_column="dataset", unit_name="Dataset")
             ]
         }
     )
-    submission = build_submission(unit_path=str(_DATASET_PATH), pipeline="forging")
+    submission = _build_submission(unit_path=str(_DATASET_PATH), pipeline="forging")
 
     claims = resolve_tracker_claims(host=host, submissions=[submission])
 
@@ -376,7 +374,7 @@ def test_a_host_that_cannot_regenerate_its_state_raises() -> None:
     host = _StubHost(generate_error=_HOST_FAILURE)
 
     with pytest.raises(RuntimeError, match=r"could not be regenerated"):
-        resolve_tracker_claims(host=host, submissions=[build_submission()])
+        resolve_tracker_claims(host=host, submissions=[_build_submission()])
 
 
 # Tests for the verdict the two states carry together
@@ -403,7 +401,7 @@ def test_the_state_table_resolves_every_pairing(
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status=tracker_status)}
 
     resolved = resolve_allocations(
-        batches=[build_batch(submissions=[build_submission()])], reading=reading, claims=claims
+        batches=[_build_batch(submissions=[_build_submission()])], reading=reading, claims=claims
     )
 
     assert [entry.verdict for entry in resolved] == [verdict]
@@ -411,18 +409,16 @@ def test_the_state_table_resolves_every_pairing(
 
 
 def test_a_job_a_live_allocation_claims_is_running_though_its_own_allocation_is_gone() -> None:
-    """Verifies that a job another machine is still running is never resolved as stranded.
-
-    Its own recorded allocation is gone and its tracker says running, which is the stranded pairing exactly. The
-    allocation the tracker claims is held, though, and resetting that job would destroy work that is still live.
-    """
+    """Verifies that a job another machine is still running is never resolved as stranded."""
     reading = SchedulerReading(statuses={"1000": JobStatus.UNRESOLVED, "2000": JobStatus.RUNNING})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:2000", allocation="2000")}
 
     resolved = resolve_allocations(
-        batches=[build_batch(submissions=[build_submission()])], reading=reading, claims=claims
+        batches=[_build_batch(submissions=[_build_submission()])], reading=reading, claims=claims
     )
 
+    # Its own recorded allocation is gone and its tracker says running, which is the stranded pairing exactly. The
+    # allocation the tracker claims is held, though, and resetting that job would destroy work that is still live.
     assert resolved[0].scheduler_state == GONE_ALLOCATION
     assert resolved[0].claim_state == HELD_ALLOCATION
     assert resolved[0].verdict == RUNNING_ALLOCATION
@@ -434,7 +430,7 @@ def test_a_job_whose_claiming_allocation_is_also_gone_is_stranded() -> None:
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:2000", allocation="2000")}
 
     resolved = resolve_allocations(
-        batches=[build_batch(submissions=[build_submission()])], reading=reading, claims=claims
+        batches=[_build_batch(submissions=[_build_submission()])], reading=reading, claims=claims
     )
 
     assert resolved[0].claim_state == GONE_ALLOCATION
@@ -445,7 +441,9 @@ def test_an_allocation_with_no_tracker_claim_resolves_without_one() -> None:
     """Verifies that a job the claims mapping does not cover is resolved as claiming nothing."""
     reading = SchedulerReading(statuses={"1000": JobStatus.UNRESOLVED})
 
-    resolved = resolve_allocations(batches=[build_batch(submissions=[build_submission()])], reading=reading, claims={})
+    resolved = resolve_allocations(
+        batches=[_build_batch(submissions=[_build_submission()])], reading=reading, claims={}
+    )
 
     assert resolved[0].claim_state == ""
     assert resolved[0].verdict == ABANDONED_ALLOCATION
@@ -457,7 +455,7 @@ def test_an_allocation_with_no_tracker_claim_resolves_without_one() -> None:
 def test_a_batch_holding_a_running_allocation_is_progressing() -> None:
     """Verifies that one running allocation makes a batch progressing, whatever the others resolve to."""
     reading = SchedulerReading(statuses={"1000": JobStatus.RUNNING, "1001": JobStatus.UNRESOLVED})
-    batch = build_batch(submissions=[build_submission(), build_submission(job_id="job1", slurm_job_id="1001")])
+    batch = _build_batch(submissions=[_build_submission(), _build_submission(job_id="job1", slurm_job_id="1001")])
 
     assert classify_batch(resolutions=resolve_allocations(batches=[batch], reading=reading, claims={})) == (
         PROGRESSING_BATCH
@@ -467,7 +465,7 @@ def test_a_batch_holding_a_running_allocation_is_progressing() -> None:
 def test_a_batch_holding_a_gone_allocation_is_stalled() -> None:
     """Verifies that an allocation both records disclaim stalls its batch, since no query moves it again."""
     reading = SchedulerReading(statuses={"1000": JobStatus.COMPLETED, "1001": JobStatus.UNRESOLVED})
-    batch = build_batch(submissions=[build_submission(), build_submission(job_id="job1", slurm_job_id="1001")])
+    batch = _build_batch(submissions=[_build_submission(), _build_submission(job_id="job1", slurm_job_id="1001")])
 
     assert classify_batch(resolutions=resolve_allocations(batches=[batch], reading=reading, claims={})) == STALLED_BATCH
 
@@ -475,7 +473,7 @@ def test_a_batch_holding_a_gone_allocation_is_stalled() -> None:
 def test_a_batch_whose_allocations_have_all_settled_awaits_closure() -> None:
     """Verifies that a settled batch still in the ledger is one whose closure failed rather than a stalled one."""
     reading = SchedulerReading(statuses={"1000": JobStatus.COMPLETED})
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
 
     assert classify_batch(resolutions=resolve_allocations(batches=[batch], reading=reading, claims={})) == (
         AWAITING_CLOSURE_BATCH
@@ -491,18 +489,16 @@ def test_a_batch_holding_no_allocation_awaits_closure() -> None:
 
 
 def test_a_job_running_under_an_executor_outside_the_scheduler_is_refused_rather_than_stranded() -> None:
-    """Verifies that a tracker claiming to run under a process rather than an allocation is never called stranded.
-
-    Only the scheduler's own scheme names an allocation, so a local run's process identifier resolves to no claim and
-    neither scheduler record answers for it. Calling such a job stranded would reset a tracker whose own executor may
-    still be writing to it, so it resolves as running and its remediation leaves the tracker alone.
-    """
+    """Verifies that a tracker claiming to run under a process rather than an allocation is never called stranded."""
     reading = SchedulerReading(statuses={"1000": JobStatus.COMPLETED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="pid:4821")}
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
 
     resolved = resolve_allocations(batches=[batch], reading=reading, claims=claims)[0]
 
+    # Only the scheduler's own scheme names an allocation, so a local run's process identifier resolves to no claim
+    # and neither scheduler record answers for it. Calling such a job stranded would reset a tracker whose own
+    # executor may still be writing to it.
     assert resolved.scheduler_state == SETTLED_ALLOCATION
     assert resolved.claim_state == ""
     assert resolved.verdict == RUNNING_ALLOCATION
@@ -510,17 +506,15 @@ def test_a_job_running_under_an_executor_outside_the_scheduler_is_refused_rather
 
 
 def test_a_job_running_under_no_recorded_executor_is_still_stranded() -> None:
-    """Verifies that the refusal covers a named executor alone, so a tracker naming none stays releasable.
-
-    A tracker that recorded no executor names nothing that could still be running, which is exactly the claim the
-    stranded verdict exists to clear.
-    """
+    """Verifies that the refusal covers a named executor alone, so a tracker naming none stays releasable."""
     reading = SchedulerReading(statuses={"1000": JobStatus.COMPLETED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING")}
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
 
     resolved = resolve_allocations(batches=[batch], reading=reading, claims=claims)[0]
 
+    # A tracker that recorded no executor names nothing that could still be running, which is exactly the claim the
+    # stranded verdict exists to clear.
     assert resolved.verdict == STRANDED_ALLOCATION
     assert resolved.remediation == RESET_REMEDIATION
 
@@ -529,7 +523,7 @@ def test_a_job_that_recorded_an_outcome_outside_the_scheduler_keeps_its_verdict(
     """Verifies that the refusal covers a running claim alone, so a recorded outcome still resolves as one."""
     reading = SchedulerReading(statuses={"1000": JobStatus.COMPLETED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="SUCCEEDED", executor_id="pid:4821")}
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
 
     resolved = resolve_allocations(batches=[batch], reading=reading, claims=claims)[0]
 
@@ -541,20 +535,19 @@ def test_a_job_that_recorded_an_outcome_outside_the_scheduler_keeps_its_verdict(
 
 
 def test_every_allocation_a_running_resolution_leaves_held_is_named() -> None:
-    """Verifies that both allocations of a resolution are named, so a cancellation reaches the one carrying the job.
-
-    The recorded allocation is this host's own submission and the claimed one may be another machine's, so naming the
-    recorded one alone would leave the allocation actually running free to write into the tracker that is then reset.
-    """
+    """Verifies that both allocations of a resolution are named, so a cancellation reaches the one carrying the job."""
     reading = SchedulerReading(statuses={"1000": JobStatus.RUNNING, "2000": JobStatus.RUNNING})
     claims = {
         (str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:2000", allocation="2000"),
         (str(_SESSION_PATH), "job1"): TrackerClaim(status="RUNNING"),
     }
-    batch = build_batch(submissions=[build_submission(), build_submission(job_id="job1", slurm_job_id="1001")])
+    batch = _build_batch(submissions=[_build_submission(), _build_submission(job_id="job1", slurm_job_id="1001")])
 
     resolutions = resolve_allocations(batches=[batch], reading=reading, claims=claims)
 
+    # The recorded allocation is this host's own submission and the claimed one may be another machine's, so naming
+    # the recorded one alone would leave the allocation actually running free to write into the tracker that is then
+    # reset.
     assert resolve_live_allocations(resolutions=resolutions) == ["1000", "2000"]
 
 
@@ -564,7 +557,7 @@ def test_the_allocation_a_tracker_claims_is_named_though_the_recorded_one_is_gon
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:2000", allocation="2000")}
 
     resolutions = resolve_allocations(
-        batches=[build_batch(submissions=[build_submission()])], reading=reading, claims=claims
+        batches=[_build_batch(submissions=[_build_submission()])], reading=reading, claims=claims
     )
 
     assert resolve_live_allocations(resolutions=resolutions) == ["2000"]
@@ -583,11 +576,11 @@ def test_only_a_stranded_job_is_returned_to_the_scheduled_state() -> None:
         (str(_SESSION_PATH), "job1"): TrackerClaim(status="SUCCEEDED"),
         (str(_SESSION_PATH), "job2"): TrackerClaim(status="FAILED"),
     }
-    batch = build_batch(
+    batch = _build_batch(
         submissions=[
-            build_submission(),
-            build_submission(job_id="job1", slurm_job_id="1001"),
-            build_submission(job_id="job2", slurm_job_id="1002"),
+            _build_submission(),
+            _build_submission(job_id="job1", slurm_job_id="1001"),
+            _build_submission(job_id="job2", slurm_job_id="1002"),
         ]
     )
     host = _StubHost()
@@ -605,8 +598,8 @@ def test_one_stranded_job_of_two_batches_is_named_once() -> None:
     reading = SchedulerReading(statuses={"1000": JobStatus.UNRESOLVED, "1001": JobStatus.UNRESOLVED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING")}
     batches = [
-        build_batch(batch_id="first", submissions=[build_submission()]),
-        build_batch(batch_id="second", submissions=[build_submission(slurm_job_id="1001")]),
+        _build_batch(batch_id="first", submissions=[_build_submission()]),
+        _build_batch(batch_id="second", submissions=[_build_submission(slurm_job_id="1001")]),
     ]
     host = _StubHost()
 
@@ -619,7 +612,7 @@ def test_a_batch_holding_no_stranded_job_reaches_the_host_not_at_all() -> None:
     """Verifies that a remediation with nothing to release never names a unit, which would reset every job it holds."""
     reading = SchedulerReading(statuses={"1000": JobStatus.COMPLETED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="SUCCEEDED")}
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
     host = _StubHost()
 
     assert (
@@ -633,7 +626,7 @@ def test_a_reset_the_host_refuses_raises() -> None:
     """Verifies that a tracker that could not be cleared is reported rather than passed over."""
     reading = SchedulerReading(statuses={"1000": JobStatus.UNRESOLVED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING")}
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
     host = _StubHost(reset_error=_HOST_FAILURE)
 
     with pytest.raises(RuntimeError, match=r"could not be regenerated"):
@@ -647,7 +640,7 @@ def test_a_resolved_allocation_reports_the_evidence_behind_its_verdict() -> None
     """Verifies that the rendered row carries what each record said alongside the verdict they carry together."""
     reading = SchedulerReading(statuses={"1000": JobStatus.UNRESOLVED, "2000": JobStatus.UNRESOLVED})
     claims = {(str(_SESSION_PATH), "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:2000", allocation="2000")}
-    batch = build_batch(submissions=[build_submission()])
+    batch = _build_batch(submissions=[_build_submission()])
 
     resolved = resolve_allocations(batches=[batch], reading=reading, claims=claims)
     rendered = render_allocation(resolution=resolved[0], reading=reading)

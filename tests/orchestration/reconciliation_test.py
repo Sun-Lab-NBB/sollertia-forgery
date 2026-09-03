@@ -242,12 +242,8 @@ def test_a_live_allocation_named_by_the_tracker_is_adopted(
 def test_the_allocation_the_tracker_names_outranks_the_one_the_ledger_recorded(
     running_job: Callable[[str | None], GenericPendingJob],
 ) -> None:
-    """Verifies that a job claimed by both sources is adopted onto the allocation its tracker names, not the ledger's.
-
-    An executor identifier appears only once an allocation starts running, so it describes a later moment than this
-    host's record of submitting one. Preferring the ledger's stale identifier would query an allocation that has already
-    finished, read the job as finished with it, and submit a second allocation over the files the live one is still
-    writing.
+    """Verifies that a job claimed by both sources is adopted onto the allocation its tracker names, not the
+    ledger's.
     """
     job = running_job("slurm:991")
     record_batch(
@@ -262,6 +258,9 @@ def test_the_allocation_the_tracker_names_outranks_the_one_the_ledger_recorded(
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
 
+    # An executor identifier appears only once an allocation starts running, so it describes a later moment than
+    # this host's record of submitting one. Preferring the ledger's stale identifier would query an allocation
+    # that has already finished and submit a second one over the files the live allocation still writes.
     assert reconciliation.adopted == {(_UNIT_PATH, job.job_id): "991"}
     # Dispatching the job again would run two allocations over the same tracker and the same output.
     assert not reconciliation.dispatchable
@@ -271,13 +270,7 @@ def test_the_allocation_the_tracker_names_outranks_the_one_the_ledger_recorded(
 def test_an_executor_naming_the_scheduler_but_no_allocation_is_withheld(
     running_job: Callable[[str | None], GenericPendingJob],
 ) -> None:
-    """Verifies that a truncated executor identifier names nothing to query and nothing to adopt, so its job is held.
-
-    A record carrying the scheme without an allocation names nothing the scheduler can be asked about, which is the
-    reading under which the resolution reports the job as running and prescribes no remediation. Dispatching it would
-    clear a record whose own executor may still be writing to it, and there is no allocation for a dependent to wait
-    on, so this run neither submits it nor touches it.
-    """
+    """Verifies that a truncated executor identifier names nothing to query and nothing to adopt, so its job is held."""
     job = running_job("slurm:")
     server = _StubServer(statuses={})
 
@@ -285,6 +278,9 @@ def test_an_executor_naming_the_scheduler_but_no_allocation_is_withheld(
 
     assert server.queried == [], "a job claiming no allocation sent the scheduler a query"
     assert not reconciliation.adopted
+    # A record carrying the scheme without an allocation names nothing the scheduler can resolve, so the
+    # resolution reports the job as running and prescribes no remediation. Dispatching it would clear a record
+    # its own executor may still be writing, and it names no allocation for a dependent to await.
     assert not reconciliation.dispatchable
     assert not reconciliation.resettable
     assert [withheld.job_id for withheld in reconciliation.withheld] == [job.job_id]
@@ -305,12 +301,7 @@ def test_a_finished_allocation_is_submitted_again(running_job: Callable[[str | N
 def test_an_off_scheduler_executor_is_withheld_rather_than_run_a_second_time(
     running_job: Callable[[str | None], GenericPendingJob],
 ) -> None:
-    """Verifies that a job whose tracker names a bare process identifier is neither submitted nor cleared.
-
-    Neither of the scheduler's records answers for such an executor, so the job can be shown neither to be live nor to
-    have stopped. That is the verdict whose remediation is to leave everything as it stands, and submitting an
-    allocation for it would run a second copy over the tracker and the output its own process may still be writing.
-    """
+    """Verifies that a job whose tracker names a bare process identifier is neither submitted nor cleared."""
     job = running_job("pid:4242")
     server = _StubServer(statuses={})
 
@@ -318,6 +309,9 @@ def test_an_off_scheduler_executor_is_withheld_rather_than_run_a_second_time(
 
     # A bare process identifier was never a scheduler allocation, so there is nothing to adopt onto either.
     assert not reconciliation.adopted
+    # Neither scheduler record answers for such an executor, so the job can be shown neither to be live nor to
+    # have stopped. Submitting an allocation for it would run a second copy over the tracker and the output its
+    # own process may still be writing.
     assert not reconciliation.dispatchable
     assert not reconciliation.resettable
     assert [withheld.job_id for withheld in reconciliation.withheld] == [job.job_id]
@@ -347,28 +341,21 @@ def test_the_ledger_claims_an_allocation_the_tracker_cannot_yet_name(scheduled_j
 def test_a_claim_the_queue_still_carries_stays_adopted_though_accounting_reports_no_row(
     scheduled_job: GenericPendingJob,
 ) -> None:
-    """Verifies that a submission the controller queued but accounting has not committed keeps its job adopted.
-
-    Accounting answers the same way for a submission it has not registered yet and for one the scheduler has purged,
-    so releasing the claim on that answer alone would run a second allocation over the tracker of one about to start.
-    The queue is the record that separates the two, and it holds this allocation.
-    """
+    """Verifies that a submission the controller queued but accounting has not committed keeps its job adopted."""
     record_batch(batch=_claiming_batch(job_id=scheduled_job.job_id))
     server = _StubServer(statuses={"777": JobStatus.UNRESOLVED}, queued={"777"})
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])
 
+    # Accounting answers the same way for a submission it has not registered yet and for one the scheduler purged.
+    # Releasing the claim on that answer alone would run a second allocation over the tracker of one about to start.
+    # The queue is the record separating the two, and it holds this allocation.
     assert reconciliation.adopted == {(_UNIT_PATH, scheduled_job.job_id): "777"}
     assert not reconciliation.dispatchable
 
 
 def test_a_claim_neither_scheduler_record_carries_releases_its_job(scheduled_job: GenericPendingJob) -> None:
-    """Verifies that a job is run again once both scheduler records disclaim the allocation the ledger recorded.
-
-    Accounting returning no row is on its own no evidence that the scheduler released an allocation, but the queue
-    disclaiming it too is. Nothing then carries the job, and its own tracker never left the scheduled state, so the
-    run that adopting it forever would have blocked is exactly the run this reconciliation dispatches.
-    """
+    """Verifies that a job is run again once both scheduler records disclaim the allocation the ledger recorded."""
     record_batch(batch=_claiming_batch(job_id=scheduled_job.job_id))
     server = _StubServer(statuses={"777": JobStatus.UNRESOLVED})
 
@@ -376,39 +363,38 @@ def test_a_claim_neither_scheduler_record_carries_releases_its_job(scheduled_job
 
     assert server.queried == ["777"]
     assert server.queue_reads == 1
+    # Accounting returning no row is on its own no evidence that the scheduler released an allocation, but the
+    # queue disclaiming it too is. Nothing then carries the job, and its own tracker never left the scheduled
+    # state.
     assert not reconciliation.adopted
     assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [scheduled_job.job_id]
     assert [resettable.job_id for resettable in reconciliation.resettable] == [scheduled_job.job_id]
 
 
 def test_a_queue_that_cannot_be_read_leaves_every_claimed_job_adopted(scheduled_job: GenericPendingJob) -> None:
-    """Verifies that a queue read which fails is carried rather than raised, and holds every claimed allocation.
-
-    A record that did not answer is no evidence that the scheduler finished with an allocation, so a dispatch made
-    through a failed queue read adopts rather than submits. That is the reading that disturbs nothing, and it keeps a
-    scheduler outage from turning a routine dispatch into a second allocation over a live one.
-    """
+    """Verifies that a queue read which fails is carried rather than raised, and holds every claimed allocation."""
     record_batch(batch=_claiming_batch(job_id=scheduled_job.job_id))
     server = _StubServer(statuses={"777": JobStatus.UNRESOLVED}, queue_error=RuntimeError("squeue: error"))
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])
 
+    # A record that did not answer is no evidence that the scheduler finished with an allocation, so a dispatch
+    # made through a failed queue read adopts rather than submits. That reading keeps a scheduler outage from
+    # turning a routine dispatch into a second allocation over a live one.
     assert reconciliation.adopted == {(_UNIT_PATH, scheduled_job.job_id): "777"}
     assert not reconciliation.dispatchable
 
 
 def test_an_allocation_in_a_state_this_stack_cannot_read_is_adopted(scheduled_job: GenericPendingJob) -> None:
-    """Verifies that a job whose allocation reports an unmodeled state is adopted rather than submitted again.
-
-    Accounting names live states this library does not model, such as suspended, requeued, or completing, and every
-    one of them reads as unknown here. The row proves the scheduler still holds the allocation, so it can never be
-    written off however long it stays in that state.
-    """
+    """Verifies that a job whose allocation reports an unmodeled state is adopted rather than submitted again."""
     record_batch(batch=_claiming_batch(job_id=scheduled_job.job_id))
     server = _StubServer(statuses={"777": JobStatus.UNKNOWN})
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])
 
+    # Accounting names live states this library does not model, such as suspended, requeued, or completing, and
+    # each reads as unknown here. The row proves the scheduler still holds the allocation, so it is never
+    # written off.
     assert reconciliation.adopted == {(_UNIT_PATH, scheduled_job.job_id): "777"}
     assert not reconciliation.dispatchable
 
@@ -416,32 +402,27 @@ def test_an_allocation_in_a_state_this_stack_cannot_read_is_adopted(scheduled_jo
 def test_a_claim_the_ledger_does_not_hold_is_resolved_against_the_scheduler_all_the_same(
     running_job: Callable[[str | None], GenericPendingJob],
 ) -> None:
-    """Verifies that a tracker-sourced claim the ledger never recorded is queried and resolved like any other.
-
-    An executor identifier read off a tracker names an allocation another machine submitted, which this host's ledger
-    holds no entry for. It reaches the query all the same, and both scheduler records disclaiming it is what releases
-    the job. Its tracker still claims that run, which is the stranded verdict, so the record the dispatch clears is
-    exactly the claim no rerun could otherwise reach.
-    """
+    """Verifies that a tracker-sourced claim the ledger never recorded is queried and resolved like any other."""
     job = running_job("slurm:991")
     server = _StubServer(statuses={"991": JobStatus.UNRESOLVED})
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
 
     assert server.queried == ["991"], "a claim the ledger does not record was never queried"
+    # An executor identifier read off a tracker names an allocation another machine submitted, for which this
+    # host's ledger holds no entry. It reaches the query all the same, and both scheduler records disclaiming it
+    # releases the job.
     assert not reconciliation.adopted
     assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job.job_id]
+    # The tracker still claims that run, which is the stranded verdict, so this dispatch clears the one claim no
+    # rerun could otherwise reach.
     assert [resettable.job_id for resettable in reconciliation.resettable] == [job.job_id]
 
 
 def test_a_job_withheld_from_the_batch_withholds_the_jobs_that_wait_on_it(
     tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]
 ) -> None:
-    """Verifies that a dependent of a withheld job is withheld too, rather than started against absent input.
-
-    A withheld job names no allocation, so a dependent submitted here would wait on nothing and run while the stage it
-    reads is still being produced. An adopted job names one, so its own dependents are submitted and wired to it.
-    """
+    """Verifies that a dependent of a withheld job is withheld too, rather than started against absent input."""
     tracker_path = tmp_path.joinpath("tracker.yaml")
     write_tracker(path=tracker_path, jobs=[_TRACKER_JOB, _SECOND_TRACKER_JOB, _THIRD_TRACKER_JOB])
     withheld = _make_job(
@@ -459,6 +440,9 @@ def test_a_job_withheld_from_the_batch_withholds_the_jobs_that_wait_on_it(
 
     reconciliation = reconcile_remote_jobs(server=_StubServer(statuses={}), jobs=[withheld, dependent, unrelated])
 
+    # A withheld job names no allocation, so a dependent submitted here would wait on nothing and run while the
+    # stage it reads is still being produced. An adopted job names one, so its own dependents are submitted and
+    # wired to it.
     assert [entry.job_id for entry in reconciliation.withheld] == [withheld.job_id, dependent.job_id]
     assert [entry.job_id for entry in reconciliation.dispatchable] == [unrelated.job_id]
     assert [entry.job_id for entry in reconciliation.resettable] == [unrelated.job_id]
@@ -529,11 +513,7 @@ def test_batches_prepared_against_different_hosts_are_not_dispatched_together() 
 
 
 def test_a_job_no_allocation_ever_started_is_submitted(scheduled_job: GenericPendingJob) -> None:
-    """Verifies that a job never started by any allocation is submitted without reading either scheduler record.
-
-    Neither record answers for an allocation nobody named, so a batch carrying no claim at all is resolved from its
-    own trackers and a first dispatch costs no scheduler round trip.
-    """
+    """Verifies that a job never started by any allocation is submitted without reading either scheduler record."""
     server = _StubServer(statuses={})
 
     reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])

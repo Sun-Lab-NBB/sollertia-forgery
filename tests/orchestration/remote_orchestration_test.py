@@ -14,9 +14,8 @@ from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.server import Job, JobStatus
 from sollertia_forgery.forging import DATASET_STATE_FILENAME
-from sollertia_forgery.managing import project_jobs_path
 from sollertia_forgery.forging.state import _DATASET_STATE_SCHEMA
-from sollertia_forgery.managing.jobs import _PROJECT_JOBS_SCHEMA
+from sollertia_forgery.managing.jobs import _PROJECT_JOBS_SCHEMA, project_jobs_path
 from sollertia_forgery.orchestration import (
     PROJECT_PLAN_SCHEMA,
     REMOTE_JOB_WALLTIME_MINUTES,
@@ -24,8 +23,6 @@ from sollertia_forgery.orchestration import (
     submit_batch,
     resolve_batches,
     connect_to_server,
-    project_plan_path,
-    render_submission,
     cancel_submissions,
     sync_project_state,
     read_scheduler_records,
@@ -40,7 +37,7 @@ from sollertia_forgery.orchestration.graph import (
     _partition_blocked_jobs,
     resolve_submission_order,
 )
-from sollertia_forgery.orchestration.hosts import environment_command
+from sollertia_forgery.orchestration.hosts import RemoteHost, environment_command
 from sollertia_forgery.orchestration.ledger import (
     SubmissionBatch,
     RemoteSubmission,
@@ -50,9 +47,10 @@ from sollertia_forgery.orchestration.ledger import (
     record_batch,
     forget_batches,
 )
-from sollertia_forgery.orchestration.remote import _prepare_remote_batch
+from sollertia_forgery.orchestration.remote import render_submission
 from sollertia_forgery.orchestration.dispatch import resolve_job_command
-from sollertia_forgery.orchestration.preparation import resolve_project_root
+from sollertia_forgery.orchestration.planning import project_plan_path
+from sollertia_forgery.orchestration.preparation import prepare_batch, resolve_project_root
 
 if TYPE_CHECKING:
     from sollertia_forgery.server import Server
@@ -590,10 +588,7 @@ def test_a_submitted_batch_is_recorded_so_it_outlives_the_process_that_submitted
 
 
 def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
-    """Verifies that the record is the only description this host keeps of a queued allocation, and a later dispatch
-    matches an already-queued job by the unit and job the record names, so every field has to describe that job
-    rather than a neighboring one.
-    """
+    """Verifies that the record is the only description this host keeps of a queued allocation."""
     server = StubServer()
     jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1", cores=16, memory_mb=4096)]
 
@@ -602,6 +597,9 @@ def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
     batch_directory = server.root.joinpath("processing_batches", "batch01")
     recorded = read_ledger().resolve_batch(batch_id="batch01")
     assert recorded is not None
+
+    # A later dispatch matches an already-queued job by the unit and job the record names, so every field has to
+    # describe that job rather than a neighboring one.
     assert recorded.submissions == [
         RemoteSubmission(
             job_id="energy",
@@ -621,16 +619,16 @@ def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
 
 
 def test_a_submission_records_every_prepared_batch_it_dispatched() -> None:
-    """Verifies that one submission may merge several prepared batches into the directory the first of them names, and
-    closure snapshots an outcome for each batch the record lists, so a record naming the directory's batch alone
-    leaves the others open once the record is retired.
-    """
+    """Verifies that one submission may merge several prepared batches into the directory the first of them names."""
     jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
 
     submit_batch(server=StubServer(), jobs=jobs, batch_id="batch01", covered_batch_ids=["batch01", "batch02"])
 
     recorded = read_ledger().resolve_batch(batch_id="batch01")
     assert recorded is not None
+
+    # Closure snapshots an outcome for each batch the record lists, so a record naming the directory's batch alone
+    # leaves the others open once the record is retired.
     assert recorded.batch_ids == ["batch01", "batch02"]
     assert recorded.covered_batch_ids == ["batch01", "batch02"]
 
@@ -692,12 +690,7 @@ def test_re_submitting_a_batch_keeps_the_allocations_its_first_attempt_queued() 
 
 
 def test_an_entry_committed_while_a_batch_submits_survives_its_record() -> None:
-    """Verifies that the entries a re-submission carries forward are read under the same lock that writes them.
-
-    Another writer can commit against the same batch while this one is submitting, changing an entry this submission
-    does not re-submit. Computing the carried entries from a read taken before the lock would write that commit back
-    out of the record, dropping an allocation the ledger is the only record of.
-    """
+    """Verifies that the entries a re-submission carries forward are read under the same lock that writes them."""
     record_batch(
         batch=build_batch(
             batch_id="batch01",
@@ -735,6 +728,9 @@ def test_an_entry_committed_while_a_batch_submits_survives_its_record() -> None:
 
     recorded = read_ledger().resolve_batch(batch_id="batch01")
     assert recorded is not None
+    # Another writer can commit against the same batch while this one is submitting, changing an entry this
+    # submission does not re-submit. Computing the carried entries from a read taken before the lock would write that
+    # commit back out of the record, dropping an allocation for which the ledger is the only record.
     # The concurrently committed allocation of the job this submission did not cover is the one that is carried.
     assert [(entry.job_id, entry.slurm_job_id) for entry in recorded.submissions] == [
         ("rename", "902"),
@@ -829,8 +825,8 @@ def test_a_batch_joins_the_state_table_to_the_planned_figures() -> None:
     """Verifies that state names which jobs exist and the plan sizes them, which is the whole descriptor."""
     document = build_document(
         pipeline="video",
-        plan=build_plan_frame([{"job_id": "energy", "cores": 16, "memory_mb": 5000}]),
-        state=build_state_frame([{"job_id": "energy"}]),
+        plan=build_plan_frame(rows=[{"job_id": "energy", "cores": 16, "memory_mb": 5000}]),
+        state=build_state_frame(rows=[{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
     )
@@ -873,8 +869,8 @@ def test_a_unit_the_state_table_does_not_cover_is_reported_without_aborting_the_
     """Verifies that one unit carrying none of a pipeline's data never stops the units that do."""
     document = build_document(
         pipeline="video",
-        plan=build_plan_frame([{"job_id": "energy"}]),
-        state=build_state_frame([{"job_id": "energy"}]),
+        plan=build_plan_frame(rows=[{"job_id": "energy"}]),
+        state=build_state_frame(rows=[{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04"), Path("/root/Project/306/2024_11_05")],
         options={},
     )
@@ -890,7 +886,7 @@ def test_an_outstanding_job_the_plan_does_not_size_is_reported_as_an_error() -> 
     document = build_document(
         pipeline="video",
         plan=build_plan_frame(rows=[]),
-        state=build_state_frame([{"job_id": "energy"}]),
+        state=build_state_frame(rows=[{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
     )
@@ -960,8 +956,8 @@ def test_a_descriptor_carries_the_tracker_location_the_host_resolved() -> None:
         pipeline="video",
         host="local",
         unit_column="session",
-        plan_rows=build_plan_frame([{"job_id": "energy"}]).to_dicts(),
-        state_rows=build_state_frame([{"job_id": "energy"}]).to_dicts(),
+        plan_rows=build_plan_frame(rows=[{"job_id": "energy"}]).to_dicts(),
+        state_rows=build_state_frame(rows=[{"job_id": "energy"}]).to_dicts(),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
         tracker_paths={"/root/Project/305/2024_11_04": "/root/Project/305/2024_11_04/processed_data/video.yaml"},
@@ -976,8 +972,8 @@ def test_a_descriptor_carries_no_tracker_location_when_the_host_resolves_none() 
         pipeline="video",
         host="remote",
         unit_column="session",
-        plan_rows=build_plan_frame([{"job_id": "energy"}]).to_dicts(),
-        state_rows=build_state_frame([{"job_id": "energy"}]).to_dicts(),
+        plan_rows=build_plan_frame(rows=[{"job_id": "energy"}]).to_dicts(),
+        state_rows=build_state_frame(rows=[{"job_id": "energy"}]).to_dicts(),
         unit_paths=[Path("/data/Project/305/2024_11_04")],
         options={},
     )
@@ -1006,7 +1002,7 @@ def test_a_remote_batch_is_resolved_from_the_projects_own_artifacts(
         frame=build_state_frame([{"job_id": "energy"}]),
     )
 
-    document = _prepare_remote_batch(server=connected_server, pipeline="video", unit_paths=[str(session_path)])
+    document = prepare_batch(host=RemoteHost(server=connected_server), pipeline="video", unit_paths=[str(session_path)])
 
     assert document.host == "remote"
     assert document.pipeline == "video"
@@ -1048,7 +1044,9 @@ def test_a_remote_forging_batch_reads_each_named_datasets_own_state(
         frame=build_dataset_state_frame(rows=[{"job_id": "forge"}]),
     )
 
-    document = _prepare_remote_batch(server=connected_server, pipeline="forging", unit_paths=[str(dataset_path)])
+    document = prepare_batch(
+        host=RemoteHost(server=connected_server), pipeline="forging", unit_paths=[str(dataset_path)]
+    )
 
     assert [job["job_id"] for job in document.jobs] == ["forge"]
     assert document.jobs[0]["unit_path"] == str(dataset_path)
@@ -1058,8 +1056,8 @@ def test_a_remote_forging_batch_reads_each_named_datasets_own_state(
 def test_preparing_an_unsupported_pipeline_is_rejected(connected_server: Server) -> None:
     """Verifies the dispatch table states which pipelines the batch tools drive, so an absent one names no batch."""
     with pytest.raises(ValueError, match="which is not a supported batch pipeline"):
-        _prepare_remote_batch(
-            server=connected_server,
+        prepare_batch(
+            host=RemoteHost(server=connected_server),
             pipeline="not_a_pipeline",
             unit_paths=[str(_SERVER_PROJECT_ROOT.joinpath("305", "2024_11_04"))],
         )
@@ -1070,8 +1068,8 @@ def test_preparing_a_batch_the_host_holds_no_plan_for_is_rejected(connected_serv
     all.
     """
     with pytest.raises(FileNotFoundError, match="holds no plan table for project 'TestProject'"):
-        _prepare_remote_batch(
-            server=connected_server,
+        prepare_batch(
+            host=RemoteHost(server=connected_server),
             pipeline="video",
             unit_paths=[str(_SERVER_PROJECT_ROOT.joinpath("305", "2024_11_04"))],
         )
@@ -1134,17 +1132,15 @@ def test_the_scheduler_reports_the_state_of_every_submitted_allocation(
 def test_the_scheduler_read_reports_an_unreported_allocation_as_unresolved(
     connected_server: Server, stub_ssh_transport: Any
 ) -> None:
-    """Verifies that an allocation accounting holds no row for reports as unresolved on every read.
-
-    A dependent allocation of a submitted graph sits queued behind its prerequisites, and accounting registers a
-    submission only after the scheduler accepts it, so an unreported answer says nothing about whether the allocation
-    is alive. The read therefore reports what accounting said and never rewrites it into a settled state.
-    """
+    """Verifies that an allocation accounting holds no row for reports as unresolved on every read."""
     record_batch(batch=build_batch(batch_id="batch01", submissions=[build_submission(slurm_job_id="1000")]))
     stub_ssh_transport.job_statuses = {}
 
     reading = read_scheduler_records(server=connected_server, allocations=["1000"])
 
+    # A dependent allocation of a submitted graph sits queued behind its prerequisites, and accounting registers a
+    # submission only after the scheduler accepts it, so an unreported answer says nothing about whether the
+    # allocation is alive. The read therefore reports what accounting said and never rewrites it into a settled state.
     assert reading.statuses == {"1000": JobStatus.UNRESOLVED}
     assert read_ledger().resolve_batch(batch_id="batch01") is not None, "a status read retired an outstanding batch"
 
@@ -1235,9 +1231,8 @@ def test_mirroring_regenerates_the_state_before_it_pulls_it(
 def test_mirroring_covers_every_dataset_the_project_holds(
     connected_server: Server, stub_ssh_transport: Any, tmp_path: Path
 ) -> None:
-    """Verifies that a read tool resolves a dataset from its mirrored marker and its jobs from its mirrored state table,
-    so a project's every dataset has to be regenerated and pulled rather than one of them, which would leave the rest
-    reported as unforged and carrying no job.
+    """Verifies that a read tool resolves a dataset from its mirrored marker and its jobs from its mirrored state
+    table.
     """
     server_project = stub_ssh_transport.local_path(_SERVER_PROJECT_ROOT)
     for name in ("Alpha", "Beta"):
@@ -1249,6 +1244,9 @@ def test_mirroring_covers_every_dataset_the_project_holds(
     mirrored = sync_project_state(server=connected_server, project="TestProject", local_directory=tmp_path)
 
     issued = " ".join(stub_ssh_transport.commands)
+
+    # A project's every dataset therefore has to be regenerated and pulled rather than one of them, which would leave
+    # the rest reported as unforged and carrying no job.
     assert (
         f"slf dataset-state -dp {_SERVER_PROJECT_ROOT.joinpath('Alpha')} -dp {_SERVER_PROJECT_ROOT.joinpath('Beta')}"
         in issued

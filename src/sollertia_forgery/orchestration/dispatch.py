@@ -160,8 +160,8 @@ Notes:
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     # Hashes its session across readers that each stream a file, so the stage's rate is the storage's rate. Past a
-    # few jobs the readers compete for the same device and the array delivers less in total than it does to fewer of
-    # them, so a wider batch finishes the same work more slowly while holding cores that other work could use.
+    # few jobs the readers compete for the same device, and the array delivers less in total than it does to fewer of
+    # them. A wider batch therefore finishes the same work more slowly while holding cores that other work could use.
     CHECKSUM_JOB_NAME: 3,
     # Decoder throughput across the host stops climbing once enough decoders are open, and this stage opens one
     # decoder per core it holds. Three jobs at its core allocation reach that ceiling, so this limit keeps the stage
@@ -196,10 +196,10 @@ Notes:
 """
 
 _JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
-    # The plane-registration stage gates the plane job that waits on it and the plane-processing stage holds the
-    # batch's scarcest cores once the two-photon chain opens, so both give a share back. cindra declares how large
-    # that share is, and both convert spare capacity into progress, so each hold is released whenever nothing else
-    # can use what it gives up.
+    # The plane-registration stage gates the plane job that waits on it, and the plane-processing stage holds the
+    # batch's scarcest cores once the two-photon chain opens. Both therefore give a share back, and cindra declares
+    # how large that share is. Both also convert spare capacity into progress, so each hold is released whenever
+    # nothing else can use what it gives up.
     str(job_name): reservation
     for job_name in SingleRecordingJobNames
     if (reservation := RESOURCE_CLASS_BY_JOB_NAME[job_name].concurrency_reservation) is not None
@@ -237,12 +237,11 @@ class PipelineDispatch[UnitT]:
     pipeline: ProcessingPipelines
     """The pipeline this entry dispatches."""
     unit_kind: str
-    """The kind of processing unit this pipeline's jobs operate on, which is one of ``SESSION_UNIT`` or
+    """The kind of processing unit on which this pipeline's jobs operate, which is one of ``SESSION_UNIT`` or
     ``DATASET_UNIT``. Every caller that resolves a unit's project root, its artifacts, or its plan reads this rather
     than the pipeline's own identity."""
     load: Callable[[Path], UnitT]
-    """Loads the processing unit from its root directory, reading its markers alone. A caller that needs only the
-    unit's own locations uses this, so locating a tracker or an output directory never runs job resolution."""
+    """Loads the processing unit from its root directory, reading its markers alone."""
     discover: Callable[[Path], tuple[UnitT, list[tuple[str, str]], list[tuple[str, str]]]]
     """The job resolver returning the loaded unit, the job universe, and the possible subset."""
     worker: Callable[..., None]
@@ -264,14 +263,10 @@ class PipelineDispatch[UnitT]:
     that a dependency owns answers with the width that dependency's own sizing pass picked. A job whose input cannot
     be read raises, since a job nothing can size is a job the unit cannot run."""
     command: Callable[[GenericPendingJob], tuple[str, ...]]
-    """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
-    backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
-    allocation."""
+    """Renders the command line that runs one job on a host holding the data, as an argument vector."""
     prime: Callable[[Path], None] | None = None
     """Materializes whatever a unit needs before its jobs can be resolved, or None for a pipeline that needs nothing.
-    A preparation pass calls this before ``discover``, keeping resolution read-only for a pipeline whose job model
-    lives in state a dependency writes. Priming is idempotent, so a unit that already carries what it needs is left
-    untouched."""
+    Priming is idempotent, so a unit that already carries what it needs is left untouched."""
     external_output_paths: Callable[[UnitT], tuple[Path, ...]] | None = None
     """Resolves the directories this pipeline owns outside the unit it processes, which a cleanup removes alongside
     the unit's own output, or None for a pipeline that writes nothing outside its unit. Each resolved path names a
@@ -358,7 +353,7 @@ def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch[An
 
 
 def resolve_unit_kind(pipeline: str | ProcessingPipelines) -> str:
-    """Resolves the kind of processing unit one batch pipeline's jobs operate on.
+    """Resolves the kind of processing unit on which one batch pipeline's jobs operate.
 
     Notes:
         An identifier the dispatch table does not carry answers with ``SESSION_UNIT``, since every artifact this

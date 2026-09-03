@@ -139,30 +139,6 @@ class _JobPlan(YamlConfig):
         return {entry.key: entry for entry in self.entries}
 
 
-def _session_plan_path(session: SessionData) -> Path:
-    """Resolves the path to a session's job plan cache.
-
-    Args:
-        session: The loaded session whose plan cache to locate.
-
-    Returns:
-        The path to the session's job plan file, beside the outputs its jobs produce.
-    """
-    return session.processed_data_path.joinpath(_PLAN_FILENAME)
-
-
-def _dataset_plan_path(dataset: DatasetData) -> Path:
-    """Resolves the path to a dataset's job plan cache.
-
-    Args:
-        dataset: The resolved dataset whose plan cache to locate.
-
-    Returns:
-        The path to the dataset's job plan file, at the dataset root beside its forging tracker.
-    """
-    return dataset.dataset_data_path.parent.joinpath(_PLAN_FILENAME)
-
-
 def project_plan_path(project_directory: Path) -> Path:
     """Resolves the path to a project's job plan projection.
 
@@ -327,6 +303,30 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
             level=LogLevel.SUCCESS,
         )
     return plan_path
+
+
+def _session_plan_path(session: SessionData) -> Path:
+    """Resolves the path to a session's job plan cache.
+
+    Args:
+        session: The loaded session whose plan cache to locate.
+
+    Returns:
+        The path to the session's job plan file, beside the outputs its jobs produce.
+    """
+    return session.processed_data_path.joinpath(_PLAN_FILENAME)
+
+
+def _dataset_plan_path(dataset: DatasetData) -> Path:
+    """Resolves the path to a dataset's job plan cache.
+
+    Args:
+        dataset: The resolved dataset whose plan cache to locate.
+
+    Returns:
+        The path to the dataset's job plan file, at the dataset root beside its forging tracker.
+    """
+    return dataset.dataset_data_path.parent.joinpath(_PLAN_FILENAME)
 
 
 def _resolve_unit_plan(
@@ -592,7 +592,7 @@ def _size_jobs_separately(
         unsized: The mapping into which this call records the reason for each job it cannot size.
 
     Returns:
-        The footprint of every job the sizing pass answered for.
+        The footprint of every job for which the sizing pass answered.
     """
     footprints: dict[tuple[str, str], JobFootprint] = {}
     for job_name, specifier in jobs:

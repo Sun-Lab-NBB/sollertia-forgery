@@ -267,7 +267,7 @@ def write_tracker_universe(tracker_path: Path, jobs: list[tuple[str, str]]) -> P
     return tracker
 
 
-def descriptor(
+def build_descriptor(
     job_id: str = "a_job",
     job_name: str = "motion_energy",
     pipeline: str = "video",
@@ -334,7 +334,8 @@ def restored_console() -> Iterator[None]:
     The console is a process-global singleton, so a test that silences it to stand in for the MCP server on the stdio
     transport would otherwise leave every later test running against a silent console.
 
-    Yields: Nothing, since the fixture exists for the restoration it performs.
+    Yields:
+        Nothing, since the fixture exists for the restoration it performs.
     """
     enabled = console.enabled
     yield
@@ -349,12 +350,14 @@ def recorded_opencv_thread_counts(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Records the width to which the worker initializer pins the OpenCV core thread pool.
 
     OpenCV selects its parallel backend at build time, and the backend shipped by the macOS wheels accepts a pinned
-    width without reporting it back through the reader, so the request itself is what states that the pin happened
-    on every platform this package supports.
+    width without reporting it back through the reader. The request itself is therefore what states that the pin
+    happened on every platform this package supports.
 
-    Args: monkeypatch: The fixture used to replace the OpenCV thread setter for the duration of one test.
+    Args:
+        monkeypatch: The fixture used to replace the OpenCV thread setter for the duration of one test.
 
-    Returns: The list to which every requested thread count is appended, in request order.
+    Returns:
+        The list to which every requested thread count is appended, in request order.
     """
     counts: list[int] = []
     monkeypatch.setattr(cv2, "setNumThreads", counts.append)
@@ -441,7 +444,7 @@ def test_admission_fills_both_budgets_and_defers_what_neither_can_hold() -> None
     jobs = [make_job(job_id=f"job{index}", cores=16, memory_mb=1024) for index in range(6)]
     state = build_state(jobs=jobs)
 
-    pool = admit(state)
+    pool = admit(state=state)
 
     assert len(pool.submitted) == 4
     assert len(state.pending_jobs) == 2
@@ -451,18 +454,16 @@ def test_admission_fills_both_budgets_and_defers_what_neither_can_hold() -> None
 def test_a_later_pass_counts_the_cores_the_already_running_jobs_committed() -> None:
     """Verifies that every pass recomputes the committed totals from the running set, so capacity already taken is never
     reoffered.
-
-    A pass that began its core tally at zero would see a full pool as an idle one and admit another budget's worth of
-    work on top of it, running twice the cores budgeted for the batch.
     """
     jobs = [make_job(job_id=f"job{index}", cores=16, memory_mb=1024) for index in range(6)]
     state = build_state(jobs=jobs)
 
-    first = admit(state)
-    second = admit(state)
+    first = admit(state=state)
+    second = admit(state=state)
 
     # The first pass commits all sixty-four cores, and the memory budget stays wide open throughout, so cores are the
-    # only term that can hold the two remaining jobs back.
+    # only term that can hold the two remaining jobs back. A pass that began its core tally at zero would read a full
+    # pool as an idle one and admit another budget's worth of work on top of it.
     assert len(first.submitted) == 4
     assert second.submitted == []
     assert len(state.pending_jobs) == 2
@@ -482,7 +483,7 @@ def test_a_job_whose_prerequisite_has_not_succeeded_waits_in_the_queue() -> None
     dependent = make_job(job_id="dependent", prerequisites=("upstream",))
     state = build_state(jobs=[dependent])
 
-    assert admit(state).submitted == []
+    assert admit(state=state).submitted == []
     assert [job.job_id for job in state.pending_jobs] == ["dependent"]
     assert state.blocked_jobs == []
 
@@ -493,7 +494,7 @@ def test_a_job_whose_prerequisite_failed_is_dropped_rather_than_queued() -> None
     state = build_state(jobs=[dependent])
     state.failed_job_keys.add((str(dependent.unit_path), "upstream"))
 
-    assert admit(state).submitted == []
+    assert admit(state=state).submitted == []
     assert [job.job_id for job in state.blocked_jobs] == ["dependent"]
     assert not state.pending_jobs
 
@@ -506,7 +507,7 @@ def test_a_satisfied_prerequisite_releases_the_job_waiting_on_it() -> None:
     state = build_state(jobs=[dependent])
     state.succeeded_job_keys.add((str(dependent.unit_path), "upstream"))
 
-    assert [job.job_id for job in admit(state).submitted] == ["dependent"]
+    assert [job.job_id for job in admit(state=state).submitted] == ["dependent"]
 
 
 def test_a_declared_ceiling_holds_a_type_while_the_budgets_stay_open() -> None:
@@ -516,7 +517,7 @@ def test_a_declared_ceiling_holds_a_type_while_the_budgets_stay_open() -> None:
     jobs = [make_job(job_id=f"stream{index}", job_name="streamed", cores=1, memory_mb=64) for index in range(5)]
     state = build_state(jobs=jobs, limits={"streamed": 2})
 
-    pool = admit(state)
+    pool = admit(state=state)
 
     assert len(pool.submitted) == 2
     assert len(state.pending_jobs) == 3
@@ -529,7 +530,7 @@ def test_a_reservation_lifts_once_nothing_else_can_use_the_room_it_holds() -> No
     reserved = [make_job(job_id=f"wide{index}", job_name="wide_stage", cores=1, memory_mb=64) for index in range(4)]
     state = build_state(jobs=reserved, reservations={"wide_stage": 2})
 
-    assert len(admit(state).submitted) == 4
+    assert len(admit(state=state).submitted) == 4
 
 
 def test_a_reservation_offers_its_room_to_other_runnable_work_first() -> None:
@@ -538,7 +539,7 @@ def test_a_reservation_offers_its_room_to_other_runnable_work_first() -> None:
     others = [make_job(job_id=f"light{index}", job_name="light_stage", cores=14, memory_mb=64) for index in range(3)]
     state = build_state(jobs=[*reserved, *others], reservations={"wide_stage": 1})
 
-    admitted = {job.job_id for job in admit(state).submitted}
+    admitted = {job.job_id for job in admit(state=state).submitted}
 
     # The first pass admits one reserved job and hands the rest of the budget to the queue that has no reservation,
     # which leaves the second pass no room for widening the reserved type.
@@ -795,6 +796,7 @@ def test_the_worker_initializer_mirrors_a_silenced_parent_console(
     assert console.enabled
 
 
+@pytest.mark.xdist_group(name="console")
 def test_the_pool_hands_its_children_whatever_console_state_the_parent_holds(
     monkeypatch: pytest.MonkeyPatch, restored_console: None
 ) -> None:
@@ -828,14 +830,12 @@ def test_the_pool_hands_its_children_whatever_console_state_the_parent_holds(
     assert [initargs[1] for initargs in recorded] == [False, True]
 
 
+@pytest.mark.xdist_group(name="console")
 def test_the_pool_spawns_the_batchs_own_width_while_pinning_its_children_to_the_thread_ceiling(
     monkeypatch: pytest.MonkeyPatch, restored_console: None
 ) -> None:
     """Verifies that the width at which the pool spawns and the threads to which each child pins its libraries are
     two unrelated figures.
-
-    The batch tools size the pool from the host's cores and leave the thread ceiling at its default of one, so a pool
-    spawned at the ceiling instead would run every local batch strictly serially with nothing reported about it.
     """
     recorded: list[tuple[int, tuple[Any, ...]]] = []
 
@@ -861,6 +861,8 @@ def test_the_pool_spawns_the_batchs_own_width_while_pinning_its_children_to_the_
     console.enable()
     job_execution_manager(state=state)
 
+    # The batch tools size the pool from the host's cores and leave the thread ceiling at its default of one. A pool
+    # spawned at the ceiling instead would run every local batch strictly serially.
     assert recorded == [(8, (2, False))]
 
 
@@ -929,7 +931,7 @@ def test_only_the_types_that_declare_one_carry_a_concurrency_reservation() -> No
 
 def test_the_microcontroller_command_names_the_job_the_allocation_runs() -> None:
     """Verifies one dispatch table states both how a job runs in-process and how it runs as a scheduled allocation."""
-    job = build_pending_job(job=descriptor(job_name="extraction", pipeline="microcontroller", cores=8))
+    job = build_pending_job(job=build_descriptor(job_name="extraction", pipeline="microcontroller", cores=8))
 
     assert resolve_job_command(job=job) == (
         "slf",
@@ -947,17 +949,18 @@ def test_the_microcontroller_command_names_the_job_the_allocation_runs() -> None
 
 def test_rendering_a_command_for_an_unsupported_pipeline_is_rejected() -> None:
     """Verifies that a descriptor naming a pipeline absent from the table names no command a host could run."""
-    job = build_pending_job(job=descriptor(pipeline="not_a_pipeline"))
+    job = build_pending_job(job=build_descriptor(pipeline="not_a_pipeline"))
 
     with pytest.raises(ValueError, match="Unable to render the command for job 'a_job'"):
         resolve_job_command(job=job)
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_running_a_job_of_an_unsupported_pipeline_is_rejected(pinned_thread_environment: None) -> None:
     """Verifies that the shared worker routes on the pipeline the job carries, so an unroutable job stops rather than
     running.
     """
-    job = build_pending_job(job=descriptor(pipeline="not_a_pipeline"))
+    job = build_pending_job(job=build_descriptor(pipeline="not_a_pipeline"))
 
     with pytest.raises(ValueError, match="Unable to run batch job 'a_job'"):
         run_batch_job(job=job)
@@ -1004,6 +1007,7 @@ def test_running_a_job_of_an_unsupported_pipeline_is_rejected(pinned_thread_envi
         ),
     ],
 )
+@pytest.mark.xdist_group(name="worker_pool")
 def test_each_pipeline_worker_forwards_the_job_to_its_own_entry_point(
     pipeline: str,
     job_name: str,
@@ -1013,7 +1017,7 @@ def test_each_pipeline_worker_forwards_the_job_to_its_own_entry_point(
     pinned_thread_environment: None,
 ) -> None:
     """Verifies that the pipeline a job names is what selects the stage it runs and that stage's width."""
-    job = build_pending_job(job=descriptor(job_name=job_name, pipeline=pipeline, unit_path=unit_path))
+    job = build_pending_job(job=build_descriptor(job_name=job_name, pipeline=pipeline, unit_path=unit_path))
 
     run_batch_job(job=job)
 
@@ -1021,6 +1025,7 @@ def test_each_pipeline_worker_forwards_the_job_to_its_own_entry_point(
     assert os.environ["TIFFFILE_NUM_THREADS"] == "4"
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_the_checksum_worker_takes_its_mode_from_the_options_the_job_carries(
     recorded_pipeline_calls: dict[str, dict[str, Any]],
     pinned_thread_environment: None,
@@ -1029,7 +1034,7 @@ def test_the_checksum_worker_takes_its_mode_from_the_options_the_job_carries(
     mode.
     """
     job = build_pending_job(
-        job=descriptor(job_name="checksum_resolution", pipeline="checksum", options={"regenerate_checksum": True})
+        job=build_descriptor(job_name="checksum_resolution", pipeline="checksum", options={"regenerate_checksum": True})
     )
 
     run_batch_job(job=job)

@@ -126,8 +126,8 @@ stated here rather than imported back out of it, so that retuning one moves this
 sides of the comparison together."""
 
 _UNDERSTATED_CHECKSUM_READER_MEMORY_MB: int = 190
-"""The figure the checksum model charged one reader while it stood below the shared spawned-child cost. Kept here so
-the comparison below states what the correction is worth rather than only that some figure is reported."""
+"""The figure one reader would carry were it modeled below the shared spawned-child cost. The comparison below names
+it so the assertion states which candidate model the reported memory came from."""
 
 _CHECKSUM_WIDE_CORES: int = 16
 """The cores the wider of the two synthetic checksum jobs declares. Every estimate is reported at a whole gigabyte,
@@ -154,9 +154,9 @@ _ASSEMBLY_WRITE_COPIES: int = 1
 """The copies of the assembled fluorescence volume the same model charges at the write, anchored on the same terms."""
 
 _ASSEMBLY_LOAD_TRANSIENT_COLUMNS: int = 1
-"""The extra fluorescence columns, at the recording's own detected region count, the same model charges for the
-masked selection an assembly holds beside the contiguous copy it builds from it while loading one single-day column,
-anchored on the same terms."""
+"""The extra fluorescence columns, at the recording's own detected region count, the same model charges while loading
+one single-day column. They cover the masked selection an assembly holds beside the contiguous copy it builds from
+it, anchored on the same terms."""
 
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the same model charges the assembled behavior, runtime, and video columns per sample of the reference
@@ -179,7 +179,7 @@ expectation does not move with the model it checks."""
 
 _NARROW_ARCHIVE_MEMORY_MB: int = 1024
 """The memory the same model reports for a controller whose archive holds a handful of messages, which is the figure
-a parse job charged its own narrow archive receives rather than the one its wide-archive neighbour receives."""
+a parse job charged its own narrow archive receives rather than the one its wide-archive neighbor receives."""
 
 _WIDE_CLOCK_FRAMES: int = 3_000_000
 """The frames the wider of the two synthetic camera clocks holds. Every estimate is reported at a whole gigabyte, and
@@ -229,8 +229,9 @@ _SOURCED_ASSEMBLY_MEMORY_MB: int = 3072
 expectation does not move with the model it checks."""
 
 _SOURCED_FRAME_ONLY_MEMORY_MB: int = 1024
-"""The memory the same session would report were the sources left out and the reference clock charged alone, which is
-the figure the estimate carried while it under-reserved the job."""
+"""The memory the same session would report were the sources left out and the reference clock charged alone. The
+comparison below names it so the assertion states that the reported memory covers the sources as well as the
+frame."""
 
 _SOURCED_SOURCES_ONLY_MEMORY_MB: int = 2048
 """The memory the same session would report were the assembled frame left out and its sources charged alone."""
@@ -267,8 +268,8 @@ them."""
 
 _POOLED_REGION_TEST_REGIONS: int = 25_000
 """The regions each recording of the incomplete-set comparison reports. The discovery stage is quadratic in the pooled
-region count of the set it spans, and every estimate is reported at a whole gigabyte, so the recordings are made wide
-enough that halving the set moves the figure across a gigabyte boundary rather than inside one."""
+region count of the set it spans, and every estimate is reported at a whole gigabyte. The recordings are therefore
+made wide enough that halving the set moves the figure across a gigabyte boundary rather than inside one."""
 
 _POOLED_REGION_TEST_SAMPLES: int = 64
 """The samples each of those recordings' traces hold, kept short so a recording wide enough to move the quadratic term
@@ -615,8 +616,8 @@ def write_camera_manifest(session: SessionData, cameras: Mapping[str, str]) -> P
     """Writes the acquisition-time camera manifest through which a motion-energy specifier reaches its camera.
 
     The specifier a motion-energy job carries is a source identifier, and the colloquial name that locates that
-    camera's recording on disk lives in this manifest, so a session that registers no camera leaves every one of its
-    energy jobs measuring no recording.
+    camera's recording on disk lives in this manifest. A session that registers no camera therefore leaves every one
+    of its energy jobs measuring no recording.
 
     Args:
         session: The session whose raw behavior data receives the manifest.
@@ -871,11 +872,6 @@ def test_checksum_memory_scales_with_the_readers_a_job_opens(experiment_session:
 def test_a_checksum_reader_is_charged_the_spawned_child_it_is(experiment_session: SessionData) -> None:
     """Verifies that a checksum worker is charged the shared cost of a spawned child plus the buffer it streams files
     through, rather than a figure standing below that shared cost.
-
-    The pool that opens the workers is spawn-started, so each worker pays the interpreter and import graph the shared
-    figure covers and holds its read buffer above it. The width compared here is the one at which the correction is
-    worth a whole reportable gigabyte, so a model charging the understated figure reports a different bucket rather
-    than the same one.
     """
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.CHECKSUM,
@@ -883,6 +879,8 @@ def test_a_checksum_reader_is_charged_the_spawned_child_it_is(experiment_session
         jobs=[(CHECKSUM_JOB_NAME, "", _CHECKSUM_WIDE_CORES)],
     )
 
+    # The pool that opens the workers is spawn-started, so each worker pays the interpreter and import graph the
+    # shared figure covers and holds its read buffer above it.
     assert estimates[CHECKSUM_JOB_NAME, ""].memory_mb == _CHECKSUM_WIDE_MEMORY_MB
     # A reader modeled below the shared spawned-child cost reserves the job a whole gigabyte less than it holds.
     assert (
@@ -998,8 +996,7 @@ def test_an_archive_above_the_parallel_threshold_earns_each_librarys_declared_wi
     experiment_session: SessionData, write_log_archive: Callable[..., Path]
 ) -> None:
     """Verifies that an archive dense enough to repay a pool earns the allocation declared by the library that owns
-    the stage, and the memory that comes back is the memory of that width rather than of the width this package
-    requested.
+    the stage.
     """
     archive = write_log_archive(
         experiment_session.raw_data.behavior_data_path.joinpath("77_log.npz"),
@@ -1013,6 +1010,8 @@ def test_an_archive_above_the_parallel_threshold_earns_each_librarys_declared_wi
         jobs=[(CAMERA_EXTRACTION_JOB_NAME, "77", 1), (CONTROLLER_EXTRACTION_JOB_NAME, "77", 1)],
     )
 
+    # Both jobs are requested at one core, so the width and the memory that come back are the library's own rather
+    # than the ones this package asked for.
     assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"] == camera_library_footprint(archive=archive)
     assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"].cores == CAMERA_EXTRACTION_JOB_CORES
     assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "77"] == controller_library_footprint(archive=archive)
@@ -1036,7 +1035,7 @@ def test_a_parse_estimate_follows_the_archive_of_its_own_controller(
     )
 
     # The two archives report different whole gigabytes, so the module of the narrow controller is charged the narrow
-    # figure while its wide-archive neighbour is charged the wide one. A model reading either archive for both jobs
+    # figure while its wide-archive neighbor is charged the wide one. A model reading either archive for both jobs
     # would move one of the two.
     assert wider.stat().st_size > owned.stat().st_size
     assert estimates[PARSE_JOB_NAME, "51-1-1"] == JobFootprint(cores=1, memory_mb=_WIDE_ARCHIVE_MEMORY_MB)
@@ -1064,7 +1063,7 @@ def test_every_parse_job_of_one_controller_carries_the_bound_they_share(
     )
 
     # Two modules of one controller are charged one figure between them, and it is the whole archive rather than a
-    # share of it: the same module sized as its controller's only parse job receives exactly the same figure, so
+    # share of it. The same module sized as its controller's only parse job receives exactly the same figure, so
     # nothing divides the archive among the jobs that read it.
     assert shared[PARSE_JOB_NAME, "51-2-1"] == shared[PARSE_JOB_NAME, "51-4-1"]
     assert shared[PARSE_JOB_NAME, "51-2-1"] == alone[PARSE_JOB_NAME, "51-2-1"]
@@ -1117,10 +1116,6 @@ def test_each_motion_energy_job_is_charged_the_recording_of_its_own_camera(
 ) -> None:
     """Verifies that a motion-energy job reads only the recording of the camera its specifier names, so it is charged
     that camera's own frame and that camera's own length rather than whatever the session's other camera recorded.
-
-    The two cameras are written so that one plans a single decode chunk while the other plans a pool, which puts the
-    two jobs in different reportable gigabytes. A job charged its sibling's recording therefore reports its sibling's
-    figure rather than collapsing onto the quantum every estimate is rounded to.
     """
     write_camera_manifest(
         session=experiment_session, cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _BODY_CAMERA}
@@ -1191,10 +1186,6 @@ def test_a_recording_too_short_to_chunk_is_charged_one_decoder_and_no_child(
 ) -> None:
     """Verifies that a job whose recording is shorter than one decode chunk is charged the single decoder it opens in
     its own process rather than the decoders its full core allocation would permit.
-
-    The stage opens a pool only when it plans more than one chunk, and it plans one chunk for every recording below
-    the shared chunk minimum. A rig recording calibration and training clips beside full sessions runs many such jobs,
-    and charging each of them the allocation is most of what those jobs reserve.
     """
     write_camera_manifest(session=experiment_session, cameras={_FACE_SOURCE_ID: _FACE_CAMERA})
     write_camera_recording(
@@ -1210,6 +1201,8 @@ def test_a_recording_too_short_to_chunk_is_charged_one_decoder_and_no_child(
         jobs=[(ENERGY_JOB_NAME, _FACE_SOURCE_ID, _CHUNKED_ENERGY_JOB_CORES)],
     )
 
+    # The stage opens a pool only when it plans more than one chunk, and it plans one chunk for every recording
+    # below the shared chunk minimum.
     assert estimates[ENERGY_JOB_NAME, _FACE_SOURCE_ID].memory_mb == _SINGLE_CHUNK_ENERGY_MEMORY_MB
     # The same job charged one decoder per allocated core reserves six times what the stage goes on to hold.
     assert (
@@ -1230,15 +1223,14 @@ def test_a_recording_too_short_to_chunk_is_charged_one_decoder_and_no_child(
 def test_a_single_chunk_job_is_charged_no_spawned_child() -> None:
     """Verifies that a job planning one decode chunk is charged the decoder it holds in its own process and no spawned
     child, since the stage opens a pool only once it plans more than one chunk.
-
-    A spawned child costs a fraction of the gigabyte every estimate is rounded to, so the frame compared here stands
-    at the width where that fraction crosses a boundary rather than at any width a camera records.
     """
     single_chunk = _size_motion_energy_job(
         recording=_EnergyRecording(frame_pixels=_UNCHUNKED_WIDE_FRAME_PIXELS, frame_count=MINIMUM_CHUNK_FRAMES - 1),
         cores=_CHUNKED_ENERGY_JOB_CORES,
     )
 
+    # A spawned child costs a fraction of the gigabyte every estimate is rounded to, so the frame compared here
+    # stands at the width where that fraction crosses a boundary rather than at any width a camera records.
     assert single_chunk.memory_mb == _UNCHUNKED_WIDE_MEMORY_MB
     frame_buffers = _bytes_to_megabytes(
         byte_count=_UNCHUNKED_WIDE_FRAME_PIXELS * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS
@@ -1310,11 +1302,6 @@ def test_a_motion_energy_job_whose_camera_the_manifest_omits_is_charged_its_full
 ) -> None:
     """Verifies that a specifier the camera manifest does not register is charged no frame and the full width its
     allocation permits, rather than refused, since the stage skips such a camera and completes.
-
-    No container was read for that specifier, so nothing states how many chunks the stage would plan, and the width
-    the allocation permits is the only figure that cannot understate the job. Its sibling recorded, and the two report
-    different reportable gigabytes, so a job charged the session's recordings rather than its own camera's would
-    report that recording's figure here.
     """
     write_camera_manifest(session=experiment_session, cameras={_FACE_SOURCE_ID: _FACE_CAMERA})
     write_camera_recording(
@@ -1333,9 +1320,13 @@ def test_a_motion_energy_job_whose_camera_the_manifest_omits_is_charged_its_full
         ],
     )
 
+    # No container was read for that specifier, so nothing states how many chunks the stage would plan, and the width
+    # the allocation permits is the only figure that cannot understate the job.
     assert estimates[ENERGY_JOB_NAME, _BODY_SOURCE_ID].memory_mb == energy_memory(
         frame_pixels=0, frame_count=_UNRESOLVED_FRAME_COUNT, cores=_ENERGY_JOB_CORES
     )
+    # The sibling camera recorded, and the two land in different reportable gigabytes, so a job charged the session's
+    # recordings rather than its own camera's would report that recording's figure here.
     assert (
         estimates[ENERGY_JOB_NAME, _BODY_SOURCE_ID].memory_mb != estimates[ENERGY_JOB_NAME, _FACE_SOURCE_ID].memory_mb
     )
@@ -1346,9 +1337,6 @@ def test_a_registered_camera_that_left_no_recording_is_charged_no_frame(
 ) -> None:
     """Verifies that a camera the manifest registers but which recorded nothing is charged its decoders alone, since
     the stage reports such a camera as skipped and completes rather than failing.
-
-    Its sibling camera did record, so the figure states that the absent camera was resolved on its own name rather
-    than falling back to whatever recording the directory happened to hold.
     """
     write_camera_manifest(
         session=experiment_session, cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _BODY_CAMERA}
@@ -1366,6 +1354,8 @@ def test_a_registered_camera_that_left_no_recording_is_charged_no_frame(
         jobs=[(ENERGY_JOB_NAME, _BODY_SOURCE_ID, _ENERGY_JOB_CORES)],
     )
 
+    # The sibling camera did record, so the figure states that the absent camera was resolved on its own name rather
+    # than falling back to whatever recording the directory happened to hold.
     assert estimates[ENERGY_JOB_NAME, _BODY_SOURCE_ID].memory_mb == energy_memory(
         frame_pixels=0, frame_count=_UNRESOLVED_FRAME_COUNT, cores=_ENERGY_JOB_CORES
     )
@@ -1393,10 +1383,6 @@ def test_a_pose_estimate_is_charged_the_table_rather_than_the_file_holding_it(
 ) -> None:
     """Verifies that the pose estimate follows the table's own row and column counts, so a prediction whose writer
     compressed it is charged what the stage expands in memory rather than what it occupies on disk.
-
-    The two files below hold the identical table and differ only in compression, and the compressed one is small
-    enough that a model charging its size on disk reports three whole gigabytes less than the stage goes on to hold.
-    An under-reserved job is killed by the scheduler, so this is the direction the estimate may never take.
     """
     points: Mapping[str, NDArray[np.float64]] = {
         f"point_{index}": np.zeros((_POSE_TABLE_ROWS, _POSE_COORDINATES_PER_BODYPART), dtype=np.float64)
@@ -1533,8 +1519,8 @@ def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_ses
 
 
 def test_a_session_job_naming_a_stage_nothing_models_is_refused(experiment_session: SessionData) -> None:
-    """Verifies that every job of a session is routed to a model of its own, so a name reaching the end of that routing
-    describes a stage nothing sizes and is refused rather than admitted to a batch at an allowance nobody chose.
+    """Verifies that a job naming a stage nothing sizes reaches the end of the routing that carries every session job
+    to a model, and is refused rather than admitted to a batch at an allowance nobody chose.
     """
     experiment_session.raw_data.behavior_data_path.mkdir(parents=True, exist_ok=True)
 
@@ -1762,11 +1748,6 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
 ) -> None:
     """Verifies that the write that closes an assembly job streams the frame it was handed rather than rebuilding it, so
     the stage peaks at the columns the assembly already holds.
-
-    The reportable figure is rounded up to the whole gigabyte, which leaves a recording of the scale used by the
-    other dataset tests unable to tell one copy of its fluorescence from two. This recording is therefore written
-    large enough that a second copy of its retained columns would push the reported estimate from one whole gigabyte
-    to two, which is the scale at which the copy count becomes visible.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -1780,6 +1761,8 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # The recording is written large enough that a second copy of its retained columns would push the reported
+    # estimate from one whole gigabyte to two, which is the scale at which the copy count becomes visible.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
         cores=1, memory_mb=assembly_memory(samples=150_000, regions=48)
     )
@@ -1790,15 +1773,6 @@ def test_an_imaging_assembly_is_charged_the_sources_it_reads_at_their_own_height
 ) -> None:
     """Verifies that the assembly of an imaging session is charged its behavior sources at the heights those sources
     stand at, rather than at the fluorescence clock its assembled frame is placed on.
-
-    The assembler places every column on the fluorescence clock, but it reads each source at that source's own rate
-    first and interpolates onto that clock afterwards, and it reads the sources together rather than one at a time.
-    A camera running far faster than the imaging therefore holds an array far taller than the frame it lands in, and
-    charging that array at the imaging rate reserves a fraction of what the job holds.
-
-    The four million samples the camera clock here holds carry the estimate a whole gigabyte bucket above what the
-    same session reports with no source at all, so the reported figure names the source family as its own term
-    rather than one the fluorescence clock already covered.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -1813,6 +1787,9 @@ def test_an_imaging_assembly_is_charged_the_sources_it_reads_at_their_own_height
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # The assembler reads each source at that source's own rate and interpolates onto the fluorescence clock
+    # afterwards. A camera running far faster than the imaging therefore holds an array far taller than the frame
+    # that receives it, and charging that array at the imaging rate reserves a fraction of what the job holds.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
         cores=1, memory_mb=assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,))
     )
@@ -1854,11 +1831,6 @@ def test_extraction_is_refused_for_a_dataset_its_system_performs_no_tracking_for
 ) -> None:
     """Verifies that mesoscope-VR tracks cells across experiment sessions alone, so a training dataset resolves no
     configuration, and that the assembly of such a dataset is sized from the clock its own assembler reads.
-
-    A training session joins a dataset without completing the two-photon pipeline, so its assembly attaches no
-    fluorescence column even where a stray single-recording output happens to sit beside it. The admission policy
-    therefore selects the model rather than standing in for it when imaging is absent, which this session pins by
-    carrying a processed recording that the estimate must leave out of its figure.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     write_surgery_metadata(session=session)
@@ -1888,11 +1860,6 @@ def test_the_assembly_of_a_session_recording_no_imaging_is_sized_from_the_clock_
 ) -> None:
     """Verifies that a session whose type joins a dataset without imaging is sized from the reference clock its own
     acquisition system's assembler settles on, which is the slowest camera's.
-
-    The two clocks span the same duration at different rates, so the slower camera records the fewer samples. The
-    faster camera's clock is the wider one, and the two are written far enough apart to report different whole
-    gigabytes, so a figure taken from the clock the assembler would not settle on reports the wide figure rather than
-    collapsing onto the quantum every estimate is rounded to.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     write_camera_clock(
@@ -1919,13 +1886,6 @@ def test_the_assembly_of_a_session_recording_no_imaging_is_sized_from_its_frame_
 ) -> None:
     """Verifies that the estimate charges both families of arrays the assembly holds: the frame it builds at the
     reference clock's height, and every source it reads at that source's own height.
-
-    The two families stand at different heights and neither bounds the other. The faster camera writes five times the
-    reference clock's samples and the encoder writes twice them, so a figure covering the frame alone reserves a
-    fraction of what the job holds, which is what got the job killed. A figure covering the sources alone, one
-    counting the cameras and leaving the behavior feathers out, and one placing the frame on the widest clock the
-    session recorded rather than on the clock its assembler settles on each land on a different whole gigabyte from
-    the one this model reports, so none of them passes here.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     write_camera_clock(
@@ -1941,8 +1901,10 @@ def test_the_assembly_of_a_session_recording_no_imaging_is_sized_from_its_frame_
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
-    # Every wrong model lands in its own gigabyte bucket, so the equality below discriminates against each of them
-    # rather than collapsing onto the quantum the estimates are rounded to.
+    # The rival figures are one covering the sources alone, one counting the cameras while omitting the behavior
+    # feathers, and one placing the frame on the widest clock the session recorded. Every wrong model lands in its
+    # own gigabyte bucket, so the equality below discriminates against each of them rather than collapsing onto the
+    # quantum the estimates are rounded to.
     assert (
         len(
             {
@@ -1965,15 +1927,6 @@ def test_a_camera_clock_the_assembler_would_not_settle_on_is_left_out_of_the_ref
 ) -> None:
     """Verifies that the estimate places the assembled frame on exactly the clocks its system's assembler accepts,
     since a clock that assembler refuses states the height of a frame the job never builds.
-
-    The session carries three feathers the video pipeline published. One comes from a camera outside the fixed set the
-    assembler reads, and one spans no duration at all, so neither can serve as a reference clock however many rows it
-    holds. Both are wider than the one clock that qualifies, so an estimate placing the frame on the rows of every
-    published feather reports the wide figure here.
-
-    The two roles a feather plays are separate. The zero-span feather comes from a camera the assembler does read, so
-    its rows still stand in the source term even though the frame is not placed on them, while the feather from the
-    unread camera stands in neither.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     write_camera_clock(session=session, camera="left_camera", frames=_WIDE_CLOCK_FRAMES, period_us=1)
@@ -1987,6 +1940,10 @@ def test_a_camera_clock_the_assembler_would_not_settle_on_is_left_out_of_the_ref
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # One feather comes from a camera outside the fixed set the assembler reads and one spans no duration at all, so
+    # neither can serve as a reference clock however many rows it holds. Both are wider than the one clock that
+    # qualifies, so an estimate placing the frame on the rows of every published feather reports the wide figure. The
+    # zero-span feather still stands in the source term, because the assembler does read its camera.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(cores=1, memory_mb=_NARROW_CLOCK_MEMORY_MB)
 
 
@@ -1995,17 +1952,6 @@ def test_the_assembly_of_a_session_recording_no_imaging_is_refused_without_a_cam
 ) -> None:
     """Verifies that a session recording no imaging and no usable reference clock is refused rather than sized at a
     floor, which is the answer its assembly worker gives for it as well.
-
-    A clock is defined by a mean frame rate, so a feather holding a single frame states none, and a feather written by
-    a camera the assembler does not read is not a candidate at all however many frames it holds. Each of those
-    sessions is refused on the same terms as one whose cameras wrote no feather.
-
-    The last two sessions pin the two conditions a candidate feather has to meet, each as the only candidate the
-    session carries so that dropping either condition changes this outcome. A feather holding no row at all is the
-    only input the frame-count condition ever decides: every shorter clock a session can carry already holds one row,
-    which spans no duration and is refused on that condition instead. And a feather whose frames all share one
-    timestamp is here the only camera of the set that wrote anything, so it would be settled on were its span not
-    weighed, whatever rate an unguarded reading assigned it.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     dataset = build_dataset(
@@ -2015,21 +1961,27 @@ def test_the_assembly_of_a_session_recording_no_imaging_is_refused_without_a_cam
     with pytest.raises(FileNotFoundError, match="No camera timestamp feather"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # A clock is defined by a mean frame rate, so a feather holding a single frame states none.
     write_camera_clock(session=session, camera="face_camera", frames=1)
 
     with pytest.raises(FileNotFoundError, match="No camera timestamp feather"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # A feather written by a camera the assembler does not read is no candidate at all, however many frames it holds.
     write_camera_clock(session=session, camera="left_camera", frames=_NARROW_CLOCK_FRAMES)
 
     with pytest.raises(FileNotFoundError, match="No camera timestamp feather"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # A feather holding no row at all is the only input the frame-count condition ever decides, since every shorter
+    # clock a session can carry already holds one row and is refused for spanning no duration instead.
     write_camera_clock(session=session, camera="face_camera", frames=0)
 
     with pytest.raises(FileNotFoundError, match="No camera timestamp feather"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
+    # This feather is the only camera of the set that wrote anything, so an unguarded reading would settle on it
+    # whatever rate it assigned the frames that all share one timestamp.
     write_camera_clock(session=session, camera="face_camera", frames=_NARROW_CLOCK_FRAMES, period_us=0)
 
     with pytest.raises(FileNotFoundError, match="No camera timestamp feather"):
@@ -2041,12 +1993,6 @@ def test_the_assembly_of_a_dataset_whose_session_type_joins_no_dataset_is_refuse
 ) -> None:
     """Verifies that a dataset whose session type the acquisition system's admission policy omits is refused rather
     than sized from the behavior model.
-
-    The policy maps a type to the pipelines it must complete, and a type it omits joins no dataset at all. Reading
-    that absence as an empty requirement would size such a dataset as though it were admitted while recording no
-    imaging. This pass is public and runs no admission check of its own, so a marker naming an unadmitted type reaches
-    it directly and must be refused there. The session carries a usable camera clock, so the refusal can only come
-    from the type rather than from data the pass could not read.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.WINDOW_CHECKING)
     write_camera_clock(session=session, camera="face_camera", frames=2500)
@@ -2057,6 +2003,9 @@ def test_the_assembly_of_a_dataset_whose_session_type_joins_no_dataset_is_refuse
         session_type=SessionTypes.WINDOW_CHECKING,
     )
 
+    # Reading a type the policy omits as an empty requirement would size the dataset as though it were admitted
+    # while recording no imaging. The session carries a usable camera clock, so the refusal can only come from the
+    # type rather than from data the pass could not read.
     with pytest.raises(ValueError, match="joins no dataset"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
@@ -2087,11 +2036,6 @@ def test_a_complete_recording_set_sizes_and_an_incomplete_one_is_refused(
 ) -> None:
     """Verifies that a cross-recording job is sized over the whole recording set the dataset names for its animal, and
     that a planning host holding fewer of those sessions is refused rather than sized over the subset it holds.
-
-    The stage the job runs reads back the animal's materialized configuration, which names every session the dataset
-    holds for the animal whatever this host can see. Discovery is quadratic in the pooled region count of that set, so
-    an animal sized from half its sessions is reserved a quarter of what the job goes on to hold, and a job reserved
-    less than it holds is killed by the scheduler and cancels every dependent scheduled behind it.
     """
     first = session_factory(animal_id="305", experiment_name="test_experiment")
     second = session_factory(animal_id="305", experiment_name="test_experiment")
@@ -2160,12 +2104,7 @@ def test_an_assembly_job_of_an_incomplete_recording_set_is_refused(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that the tracked-region bound is drawn from the animal's whole recording set or from none of it, so a
-    planning host holding fewer of the animal's sessions than the dataset names is refused rather than bounded from
-    the ones it holds.
-
-    Both terms of the bound fall when the set is narrowed, and the missing recording's own region count cannot be
-    recovered without its geometry, so there is nothing to bound it from. The refusal names the sessions to stage, on
-    the same terms the cross-recording sizer names them.
+    host holding fewer sessions than the dataset names is refused rather than bounded from the ones it holds.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(3)]
     for session in sessions:
@@ -2180,11 +2119,14 @@ def test_an_assembly_job_of_an_incomplete_recording_set_is_refused(
     for session in sessions[:2]:
         shutil.rmtree(project_root.joinpath("305", session.session_name))
 
+    # Both terms of the bound fall when the set is narrowed, and the missing recording's own region count cannot be
+    # recovered without its geometry, so nothing remains from which to draw the bound.
     with pytest.raises(FileNotFoundError, match="Unable to size the assembly job of session") as failure:
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[2].session_name, 1)])
 
     # The console formatter wraps the message, so it is unwrapped before the named sessions are matched in it.
     reported = " ".join(str(failure.value).split())
+    # The refusal names the sessions to stage, on the same terms the cross-recording sizer names them.
     assert all(session.session_name in reported for session in sessions[:2])
     assert "absent under the project root" in reported
 
@@ -2194,13 +2136,6 @@ def test_the_tracked_region_bound_is_drawn_from_the_animals_whole_recording_set(
 ) -> None:
     """Verifies that a host holding every session the dataset names bounds the tracked regions from all of them, so
     the pooled sum and the recording count the prevalence divides both span the whole set.
-
-    The animal contributes one recording far wider than the rest, which is the recording that carries the bound. Its
-    presence and absence separate whole gigabyte buckets, so this figure states that the bound spanned the whole set
-    rather than whichever part of it a host happened to hold.
-
-    The odd recording count here is what makes the prevalence a true ceiling: half of five rounds up to a minimum of
-    three, so this fixture is the one that pins that rounding.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(5)]
     for index, session in enumerate(sessions):
@@ -2232,13 +2167,7 @@ def test_a_complete_recording_set_bounds_the_assembly_and_an_unreadable_entry_is
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that the completeness of the recording set is judged on the geometries the bound is drawn from rather
-    than on the session directories holding them, so an entry whose processed output was removed while its directory
-    stands is refused rather than silently dropped from the bound.
-
-    Such an entry passes a directory check and then contributes to neither of the bound's terms, so the pooled sum and
-    the recording count the prevalence divides both fall while the set reads as whole. The removed entry here is the
-    widest of the five, and the same fixture is sized before and after the removal, so the figure the directory check
-    would have reported is the one this assertion pair rules out.
+    than on the session directories holding them.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(5)]
     for index, session in enumerate(sessions):
@@ -2261,6 +2190,8 @@ def test_a_complete_recording_set_bounds_the_assembly_and_an_unreadable_entry_is
     shutil.rmtree(sessions[4].processed_data.cindra_data_path)
     assert project_root.joinpath("305", sessions[4].session_name).is_dir()
 
+    # Such an entry passes a directory check and then contributes to neither of the bound's terms, so the pooled sum
+    # and the recording count the prevalence divides both fall while the set reads as whole.
     with pytest.raises(FileNotFoundError, match="Unable to size the assembly job of session") as failure:
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
 
@@ -2289,14 +2220,7 @@ def test_a_recording_set_entry_whose_session_marker_cannot_be_read_is_refused(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that an entry whose directory stands while its own session marker cannot be read is classified by this
-    bound and named in the refusal, rather than propagating a marker-loading failure that names neither the bound nor
-    the session being sized.
-
-    The geometry resolver loads each entry's marker to reach its output root, and that load refuses a hierarchy
-    holding no marker or more than one, which is what a partial transfer or a half-deleted session leaves behind. Such
-    an entry is as unmeasured as one carrying no processed output, so it is refused on the same terms rather than
-    dropped from the bound. It needs a different remedy from either an absent directory or a missing output, so it is
-    named in a clause of its own.
+    bound and named in the refusal.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(3)]
     for session in sessions:
@@ -2314,6 +2238,9 @@ def test_a_recording_set_entry_whose_session_marker_cannot_be_read_is_refused(
     sessions[1].raw_data_path.joinpath("session_data.yaml").unlink()
     assert project_root.joinpath("305", sessions[1].session_name).is_dir()
 
+    # The geometry resolver loads each entry's marker to reach its output root, and that load refuses a hierarchy
+    # holding no marker or more than one. Such an entry is as unmeasured as one carrying no processed output, so it
+    # is refused on the same terms rather than dropped from the bound.
     with pytest.raises(FileNotFoundError, match="Unable to size the assembly job of session") as failure:
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
 
@@ -2361,9 +2288,6 @@ def test_a_trace_array_of_another_rank_is_refused(
 ) -> None:
     """Verifies that a fluorescence array carrying a rank other than regions by samples is not read as a recording
     geometry.
-
-    The rank is rejected on both sides of the two axes that make up the geometry, so an array carrying a further
-    axis is refused rather than read as its leading two extents.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -2379,6 +2303,8 @@ def test_a_trace_array_of_another_rank_is_refused(
 
     # The metadata archive is present here, so the rank the header reports is the whole basis of the refusal.
     assert _read_array_shape(array_path=flat) is None
+    # The rank is rejected on both sides of the two axes that make up the geometry, so an array carrying a further
+    # axis is refused rather than read as its leading two extents.
     volume = write_trace_array(path=directory.joinpath("volume.npy"), shape=(4, 120, 900))
     assert _read_array_shape(array_path=volume) is None
 
@@ -2400,27 +2326,6 @@ def test_the_pooled_region_bound_is_not_narrowed_to_one_recordings_own_regions(
 ) -> None:
     """Verifies that the bound stands above the regions any one of the animal's recordings detected, and that the
     headroom ceiling is what caps it once the pooled ceiling rises past that headroom.
-
-    Tracking keeps a cluster on the count of distinct recordings it spans alone, so nothing requires a surviving
-    cluster to hold a region from any particular recording and a set of equally wide recordings can yield more
-    templates than any one of them detected regions. Narrowing to one recording's own count would under-reserve such
-    an animal, and a job reserved below what it holds is killed by the scheduler and cancels every dependent
-    scheduled behind it.
-
-    The two ceilings the bound takes the smaller of are separated here. Half prevalence over four recordings of a
-    thousand regions pools four thousand over a minimum of two and allows two thousand templates, while the headroom
-    ceiling allows a thousand and a half, so the headroom term is the one charged. That is the direction a pooled-only
-    bound gets wrong, and it grows with the recording count: this fixture is the small end of the case that twenty
-    recordings of fifteen thousand regions carry to twice the memory such an animal holds.
-
-    The pooled ceiling is the tighter of the two over the odd five-recording set that
-    test_the_tracked_region_bound_is_drawn_from_the_animals_whole_recording_set carries, so that test pins the pooled
-    term and its prevalence rounding while this one pins the headroom term. Between them the smaller of the two is
-    taken in both directions.
-
-    The three figures the assertions separate land in three different gigabyte buckets rather than in one the
-    rounding absorbs, so the reported figure names the headroom ceiling as its source and excludes both a pooled-only
-    bound and a bound narrowed to one recording.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(4)]
     for session in sessions:
@@ -2435,6 +2340,10 @@ def test_the_pooled_region_bound_is_not_narrowed_to_one_recordings_own_regions(
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
 
+    # Tracking keeps a cluster on the count of distinct recordings it spans alone, so a set of equally wide
+    # recordings can yield more templates than any one of them detected regions. The bound takes the smaller of the
+    # pooled and the headroom ceilings, and the headroom ceiling is the tighter one over this even four-recording
+    # set, while the odd five-recording set of the neighboring test pins the pooled term instead.
     # The most populated recording detected a thousand regions and the headroom allows half as many again, so the
     # multi-day columns are charged fifteen hundred templates.
     assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
@@ -2457,20 +2366,6 @@ def test_a_dataset_donating_no_configuration_is_bounded_over_one_recording(
 ) -> None:
     """Verifies that a dataset whose acquisition system donates no multi-recording configuration divides its pooled
     ceiling by one recording rather than by none, so the bound answers a figure instead of dividing by nothing.
-
-    A configuration is what states the prevalence a cluster must reach, and nothing states it when a system donates
-    none, which is the state this pass documents as its own. The prevalence then reads as zero, the recording count it
-    scales reads as zero with it, and an unfloored divisor divides the pooled region count by nothing at all. One
-    recording is also the honest answer in that state: nothing requires a cluster to span more than one recording, so
-    the pooled ceiling relaxes to the whole pooled sum.
-
-    The configuration is handed in as none directly rather than provoked through a dataset, because the sole
-    registered acquisition system donates a configuration for every session type it admits into a dataset. The state
-    belongs to the donation contract rather than to any dataset this pipeline builds, and a system that admits a
-    session type while performing no cross-recording tracking for it reaches the state through its donation alone.
-
-    The thirteen hundred regions the set pools stand below the fifteen hundred the headroom ceiling allows, so the
-    pooled term is the one the bound takes and the divisor this fixture pins is the one that term carries.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(2)]
     for session, regions in zip(sessions, (1000, 300), strict=True):
@@ -2483,6 +2378,8 @@ def test_a_dataset_donating_no_configuration_is_bounded_over_one_recording(
         session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
     )
 
+    # The configuration is handed in as none directly rather than provoked through a dataset, because the sole
+    # registered acquisition system donates one for every session type it admits into a dataset.
     tracked_regions = _resolve_tracked_regions(
         dataset=dataset,
         animal="305",
@@ -2491,6 +2388,11 @@ def test_a_dataset_donating_no_configuration_is_bounded_over_one_recording(
         configuration=None,
     )
 
+    # A configuration is what states the prevalence a cluster must reach. The prevalence and the recording count it
+    # scales therefore both read as zero in that state, and an unfloored divisor would divide the pooled region count
+    # by nothing at all. One recording is also the honest answer, since nothing then requires a cluster to span more
+    # than one. The thirteen hundred regions the set pools stand below the fifteen hundred the headroom ceiling
+    # allows, so the pooled term is the one the bound takes.
     assert tracked_regions == 1300
 
 
@@ -2499,19 +2401,6 @@ def test_the_headroom_ceiling_rounds_its_fractional_template_up(
 ) -> None:
     """Verifies that the headroom ceiling rounds the fractional template an odd region count leaves it up rather than
     down, so the bound never falls below the templates the tracking can keep.
-
-    Every other fixture reaching this bound carries an even region count, and half of an even count is whole, so both
-    directions of rounding answer alike there. The odd count here separates them: a thousand and one regions at half
-    again is fifteen hundred and one and a half, which rounding up charges as fifteen hundred and two and rounding
-    down would charge as fifteen hundred and one.
-
-    The assertion is made on the bound itself rather than on the memory a job carrying it reports, because a reported
-    figure is rounded up to a whole gigabyte and one region of fluorescence stands far below that quantum, so the
-    difference between the two directions would not survive into any estimate the sizing pass reports.
-
-    The pooled ceiling stands above the headroom one over this set, so the headroom term is the one the bound takes:
-    half prevalence over two recordings keeps a cluster appearing in one of them, which leaves the two thousand and
-    two pooled regions of the set undivided and well above the headroom the widest recording allows.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(2)]
     for session in sessions:
@@ -2533,6 +2422,12 @@ def test_the_headroom_ceiling_rounds_its_fractional_template_up(
         configuration=resolve_configuration(sessions[0]),
     )
 
+    # Every other fixture reaching this bound carries an even region count, and half of an even count is whole, so
+    # both directions of rounding answer alike there. A thousand and one regions at half again is fifteen hundred and
+    # one and a half, which rounding up charges as fifteen hundred and two. The bound is asserted rather than the
+    # memory a job carrying it reports, since a whole gigabyte quantum absorbs one region of fluorescence. Half
+    # prevalence over two recordings keeps a cluster in one of them, which leaves the pooled ceiling well above the
+    # headroom the widest recording allows.
     assert tracked_regions == 1502
 
 
@@ -2541,17 +2436,6 @@ def test_a_stated_region_count_is_charged_in_place_of_the_tracked_region_bound(
 ) -> None:
     """Verifies that a caller that reasonably knows how many regions its tracking keeps states that count and is
     charged it, and that the recording set the bound is drawn from is then neither gathered nor gated.
-
-    The bound exists because the tracking has not run when the job that reads its output is planned. A caller holding
-    a figure for it from outside this pass is better informed than the bound is, so it states one, on the same terms
-    cindra's own single-recording sizing takes a planned region count in place of its detection ceiling.
-
-    The recording set is gathered for the bound alone, and the completeness gate over that set exists to keep the
-    bound from being drawn over part of it. Neither serves a stated count, so both are skipped, which the second half
-    of this test pins by refusing the very same dataset once the count is withdrawn.
-
-    The four hundred stated here and the fifteen hundred the animal's recording set bounds sit two gigabyte buckets
-    apart rather than in one the rounding absorbs, so the reported figure names the stated count as its source.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(2)]
     for session in sessions:
@@ -2567,6 +2451,9 @@ def test_a_stated_region_count_is_charged_in_place_of_the_tracked_region_bound(
 
     stated = size_dataset_jobs(dataset=dataset, jobs=jobs, planned_roi_count=400)
 
+    # The bound exists because the tracking has not run when the job that reads its output is planned, so a caller
+    # holding a figure for it from outside this pass is better informed than the bound is. cindra's own
+    # single-recording sizing takes a planned region count on the same terms.
     assert stated[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
         cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400)
     )
@@ -2597,19 +2484,7 @@ def test_a_stated_region_count_reaches_the_cross_recording_stages(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that a stated template count is handed to cindra's own sizing pass rather than spent on this
-    package's assembly model alone, so the stages that produce the templates are planned for the same count as the
-    stage that reads them.
-
-    The count a caller states is a property of the tracking the dataset will run, and the two cross-recording stages
-    are the stages that run it. cindra takes the same override for exactly that reason, and reads it in its tracked
-    extraction stage, whose traces span the templates. Its discovery stage scales with the regions each recording
-    reports rather than with the templates it produces, so the count reaches it and changes nothing there, which the
-    third assertion pins so the forwarding is not read as moving a figure it does not own.
-
-    The recordings here record their combined frame count, because cindra's extraction model multiplies the templates
-    by that count and an archive recording none collapses the whole term to zero, which would leave the stated count
-    invisible whatever it held. The four hundred stated and the bound cindra draws for itself sit two gigabyte buckets
-    apart rather than in one the rounding absorbs, so the reported figure names the stated count as its source.
+    package's assembly model alone, so the stages producing the templates are planned for the count that reads them.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(2)]
     for session in sessions:
@@ -2629,6 +2504,8 @@ def test_a_stated_region_count_reaches_the_cross_recording_stages(
     stated = size_dataset_jobs(dataset=dataset, jobs=jobs, planned_roi_count=400)
     unstated = size_dataset_jobs(dataset=dataset, jobs=jobs)
 
+    # The recordings record their combined frame count, because cindra's extraction model multiplies the templates
+    # by that count and an archive recording none would collapse the whole term to zero.
     # The extraction figure is cindra's own figure at the stated count, which is what the forwarding is for.
     assert stated[MULTIDAY_EXTRACTION_JOB_NAME, sessions[0].session_name] == cindra_multi_recording_footprint(
         dataset=dataset,
@@ -2661,16 +2538,7 @@ def test_a_recording_whose_metadata_archive_cannot_be_read_is_refused_as_unreada
     project_root: Path, session_factory: Callable[..., SessionData], damage: bytes
 ) -> None:
     """Verifies that a recording whose combined metadata archive stands on disk but cannot be read is classified as
-    carrying no readable processed output, rather than crashing the sizing pass or being reported under a remedy that
-    would not repair it.
-
-    The archive is a compressed entry store, so a half-written or overwritten one fails in the shape of whichever
-    layer first reaches the damage, and those shapes are unrelated exception types. One of them is OSError, which this
-    bound classifies as an unreadable session marker when it comes from the marker load, so an unguarded archive read
-    would name a damaged recording under a remedy that repairs session hierarchies rather than processed output.
-
-    Every damaged archive here leaves the session directory, the session marker and the trace array standing, so the
-    only thing the refusal can be reacting to is the archive itself.
+    carrying no readable processed output.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(3)]
     for session in sessions:
@@ -2698,6 +2566,9 @@ def test_a_recording_whose_metadata_archive_cannot_be_read_is_refused_as_unreada
     # Reprocessing the recording is the remedy a damaged archive needs, so it is named in that clause rather than in
     # the one that asks for a repaired session hierarchy or a staged directory.
     assert "carrying no readable processed imaging output" in reported
+    # The archive is a compressed entry store, so a half-written or overwritten one fails in the shape of whichever
+    # layer first reaches the damage, and those shapes are unrelated exception types. One of them is OSError, which
+    # this bound classifies as an unreadable session marker when it comes from the marker load.
     assert "carrying no readable session marker" not in reported
     assert "absent under the project root" not in reported
     # The entries that still resolve are left out of the named set, so the operator remedies only what is broken.
@@ -2709,11 +2580,6 @@ def test_a_recording_whose_combined_field_is_empty_names_no_geometry(
 ) -> None:
     """Verifies that a recording whose metadata archive describes an empty combined field is refused, rather than
     being measured because the archive that describes it happens to exist.
-
-    A recording is judged complete on what its archive reports rather than on the archive's presence, since a combined
-    view of no extent is not output any stage can read. cindra's own multi-recording sizing refuses such a recording
-    on those same terms, so refusing it here keeps the set this bound is drawn from equal to the set the tracking
-    stages will accept, which is the agreement the bound depends on to not under-reserve.
     """
     sessions = [session_factory(animal_id="305", experiment_name="test_experiment") for _ in range(2)]
     for session in sessions:
@@ -2726,12 +2592,15 @@ def test_a_recording_whose_combined_field_is_empty_names_no_geometry(
         session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
     )
 
-    # The archive stands and parses; it reports a combined field of no extent, which is what a combination stage that
-    # contributed no plane leaves behind.
+    # The archive stands and parses, but it reports a combined field of no extent, which is what a combination stage
+    # that contributed no plane leaves behind.
     write_combined_metadata(directory=sessions[1].processed_data.cindra_data_path, height=0, width=96)
     assert sessions[1].processed_data.cindra_data_path.joinpath("combined_metadata.npz").is_file()
     assert sessions[1].processed_data.cindra_data_path.joinpath("cell_fluorescence.npy").is_file()
 
+    # A combined view of no extent is not output any stage can read, and cindra's own multi-recording sizing refuses
+    # such a recording on the same terms. Refusing it here therefore keeps the set this bound is drawn from equal to
+    # the set the tracking stages accept.
     with pytest.raises(FileNotFoundError, match="Unable to size the assembly job of session") as failure:
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
 
@@ -2745,21 +2614,7 @@ def test_a_recording_whose_combined_field_is_empty_names_no_geometry(
 def test_an_assembly_job_carrying_an_animal_specifier_bounds_its_regions_at_one(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
-    """Verifies the defensive floor the bound falls to when its specifier resolves no recording set at all.
-
-    The forging job universe never reaches this floor. '_build_forging_universe' emits an assembly job only for a
-    session the dataset lists, so a specifier reaching the sizing pass through the pipeline always resolves a real
-    animal and a non-empty entry list. This test therefore pins defensive behavior for a caller reaching the public
-    sizing pass directly, rather than a state the pipeline produces.
-
-    The discovery stage is specified by its animal while assembly is specified by its session, so a specifier naming
-    an animal matches no session the dataset lists and pools no recordings. The bound settles at the one template an
-    empty recording set allows rather than failing the whole batch's sizing pass, and an empty set is not read as a
-    set this host could not measure, which would refuse it.
-
-    The recording is posed at a scale where the single template and the two thousand regions it detected land in
-    different gigabyte buckets, so the reported figure states which of the two the multi-day columns were charged.
-    """
+    """Verifies the defensive floor the bound falls to when its specifier resolves no recording set at all."""
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
     write_processed_recording(session=session, regions=2000, samples=100_000, dense=False)
@@ -2772,6 +2627,9 @@ def test_an_assembly_job_carrying_an_animal_specifier_bounds_its_regions_at_one(
 
     estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, "305", 1)])
 
+    # The forging job universe never reaches this floor, because it emits an assembly job only for a session the
+    # dataset lists. Discovery is specified by its animal while assembly is specified by its session, so a specifier
+    # naming an animal matches no session the dataset lists and pools no recording.
     # The animal directory resolves the recording, so the single-day columns are charged that recording's own two
     # thousand regions, while the multi-day columns are charged the single template an empty recording set allows.
     assert estimates[FORGING_JOB_NAME, "305"] == JobFootprint(
@@ -2788,7 +2646,7 @@ def test_a_dataset_job_naming_a_stage_nothing_models_is_refused(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
     """Verifies that every forging job is routed to a model of its own the same way a session's jobs are, so a name
-    reaching the end of that routing is refused rather than admitted to a batch at an allowance nobody chose.
+    reaching the end of that routing is refused.
     """
     session = session_factory(animal_id="321", session_type=SessionTypes.RUN_TRAINING)
     write_surgery_metadata(session=session)
@@ -2796,6 +2654,7 @@ def test_a_dataset_job_naming_a_stage_nothing_models_is_refused(
         project_root=project_root, name="ds_unrouted", sessions=[session], session_type=SessionTypes.RUN_TRAINING
     )
 
+    # A refused name is kept clear of the batch rather than admitted at an allowance nobody chose.
     # Matches the unwrapped opening of the message, since the console formatter wraps long lines.
     with pytest.raises(ValueError, match="Unable to size job") as failure:
         size_dataset_jobs(dataset=dataset, jobs=[("a_stage_no_pipeline_declares", session.session_name, 1)])

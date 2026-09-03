@@ -1,6 +1,6 @@
 """Contains tests for the remote batch surface: the verdict a status read resolves for every outstanding allocation,
-the cancellation that stops the allocations a batch holds, and the remediation that acts on those verdicts before the
-ledger entries are dropped.
+and the cancellation that stops the allocations a batch holds. It also covers the remediation that acts on those
+verdicts before the ledger entries are dropped.
 """
 
 from __future__ import annotations
@@ -16,19 +16,12 @@ from sollertia_forgery.orchestration import (
     STALLED_BATCH,
     NO_REMEDIATION,
     GONE_ALLOCATION,
-    HELD_ALLOCATION,
     DROP_REMEDIATION,
-    FAILED_ALLOCATION,
-    PROGRESSING_BATCH,
     RESET_REMEDIATION,
     CANCEL_REMEDIATION,
     RUNNING_ALLOCATION,
-    SETTLED_ALLOCATION,
-    FINISHED_ALLOCATION,
     STRANDED_ALLOCATION,
-    ABANDONED_ALLOCATION,
     AWAITING_CLOSURE_BATCH,
-    TrackerClaim,
     read_ledger,
     forget_batches,
 )
@@ -37,6 +30,15 @@ from sollertia_forgery.orchestration.ledger import (
     RemoteSubmission,
     record_batch,
     current_timestamp,
+)
+from sollertia_forgery.orchestration.remote import (
+    HELD_ALLOCATION,
+    FAILED_ALLOCATION,
+    PROGRESSING_BATCH,
+    SETTLED_ALLOCATION,
+    FINISHED_ALLOCATION,
+    ABANDONED_ALLOCATION,
+    TrackerClaim,
 )
 from sollertia_forgery.orchestration.closure import _BatchOutcome
 from sollertia_forgery.interfaces.remote_tools import (
@@ -231,9 +233,8 @@ def _record_batch(batch_id: str = "batch01", allocations: tuple[str, ...] = ("10
 
 
 def test_an_allocation_the_queue_holds_reports_as_running(remote: _RemoteStub) -> None:
-    """Verifies that a submission accounting has not committed yet is resolved from the queue rather than written off.
-
-    This is the reading that decides whether a batch about to start is retired underneath itself.
+    """Verifies that a submission accounting has not committed yet is resolved from the queue rather than written
+    off.
     """
     _record_batch()
     remote.statuses = {"1000": JobStatus.UNRESOLVED}
@@ -251,30 +252,24 @@ def test_an_allocation_the_queue_holds_reports_as_running(remote: _RemoteStub) -
 
 
 def test_a_blocked_allocation_settles_its_batch_however_the_queue_reads(remote: _RemoteStub) -> None:
-    """Verifies that a blocked allocation settles whether or not the queue snapshot still carries it.
-
-    The state is derived from the queue's own reason field, so every allocation carrying it was queued when
-    accounting was read. A dependency that can never be satisfied is permanent, though: the allocation never runs,
-    so it never writes to its job's tracker and nothing it holds can change again. Resolving it from the queue
-    instead would hold the batch on one read and settle it on the next, leaving a run that will never start
-    reported as progressing for as long as the queue kept it.
-    """
+    """Verifies that a blocked allocation settles whether or not the queue snapshot still carries it."""
     _record_batch(allocations=("1000", "1001"))
     remote.statuses = {"1000": JobStatus.BLOCKED, "1001": JobStatus.UNRESOLVED}
+    # The blocked state is derived from the queue's own reason field, so every allocation carrying it was queued.
     remote.queued = {"1000"}
 
     response = remote_batch_status()
 
+    # A blocked allocation never runs, so it never writes to its job's tracker and nothing it holds changes
+    # again. Resolving it from the queue would leave a run that never starts reported as progressing for as
+    # long as the queue held it.
     assert response["batches"] == []
     assert "closed on it" in response["message"]
     assert not read_ledger().batches
 
 
 def test_a_batch_neither_record_carries_an_allocation_of_reports_as_stalled(remote: _RemoteStub) -> None:
-    """Verifies that a batch both scheduler records disclaim is stalled and names the tool that remediates it.
-
-    It stays outstanding because one of its jobs is stranded, which is the entry an automatic closure may not drop.
-    """
+    """Verifies that a batch both scheduler records disclaim is stalled and names the tool that remediates it."""
     _record_batch(allocations=("1000", "1001"))
     remote.statuses = {"1000": JobStatus.UNRESOLVED, "1001": JobStatus.COMPLETED}
     remote.claims = {(_UNIT_PATH, "job1"): TrackerClaim(status="RUNNING", executor_id="slurm:1001", allocation="1001")}
@@ -285,6 +280,7 @@ def test_a_batch_neither_record_carries_an_allocation_of_reports_as_stalled(remo
     assert reported["progress"] == STALLED_BATCH
     assert reported["unresolvable_allocations"] == ["1000"]
     assert reported["verdicts"] == {ABANDONED_ALLOCATION: 1, STRANDED_ALLOCATION: 1}
+    # The batch stays outstanding because one of its jobs is stranded, the entry an automatic closure may not drop.
     assert response["stalled_batch_ids"] == ["batch01"]
     assert not response["active"]
     assert "retire_remote_batches_tool" in reported["remedy"]
@@ -311,11 +307,9 @@ def test_a_stranded_job_is_named_and_carries_the_remediation_that_releases_it(re
 
 
 def test_a_finished_job_is_never_resolved_as_stranded(remote: _RemoteStub) -> None:
-    """Verifies that a job whose tracker recorded success is left with a verdict that touches no tracker.
-
-    A second allocation the scheduler still holds keeps the batch outstanding, since a batch every entry of which
-    resolves to the plain drop closes on the read that resolves it.
-    """
+    """Verifies that a job whose tracker recorded success is left with a verdict that touches no tracker."""
+    # The second allocation the scheduler still holds keeps the batch outstanding, since a batch resolving every
+    # entry to the plain drop closes on the read that resolves it.
     _record_batch(allocations=("1000", "1001"))
     remote.statuses = {"1000": JobStatus.UNRESOLVED, "1001": JobStatus.RUNNING}
     remote.claims = {(_UNIT_PATH, "job0"): TrackerClaim(status="SUCCEEDED")}
@@ -379,17 +373,15 @@ def test_a_batch_whose_closure_failed_reports_as_awaiting_closure(remote: _Remot
 
 
 def test_a_batch_the_queue_still_carries_is_not_closed_by_the_read(remote: _RemoteStub) -> None:
-    """Verifies that the read closes exactly the batches its own resolution settles.
-
-    Accounting reports this batch's allocation as terminal while the queue still carries it, so a closure reading
-    accounting alone would drop the ledger entry of a run the same read reports as progressing.
-    """
+    """Verifies that the read closes exactly the batches its own resolution settles."""
     _record_batch()
     remote.statuses = {"1000": JobStatus.COMPLETED}
     remote.queued = {"1000"}
 
     response = remote_batch_status()
 
+    # Accounting reports this allocation as terminal while the queue still carries it, so a closure reading
+    # accounting alone would drop the ledger entry of a run the same read reports as progressing.
     assert response["outcomes"] == []
     assert [entry["batch_id"] for entry in response["batches"]] == ["batch01"]
     assert response["batches"][0]["progress"] == PROGRESSING_BATCH
@@ -509,18 +501,16 @@ def test_naming_a_batch_the_ledger_does_not_hold_is_rejected(remote: _RemoteStub
 
 
 def test_a_settled_batch_whose_job_is_stranded_is_never_closed_by_the_read(remote: _RemoteStub) -> None:
-    """Verifies that the automatic closure covers the plain drop alone, so it can never drop a claim it also reports.
-
-    The scheduler has finished with this allocation, so a closure that resolved settlement of its own would retire the
-    batch. The same read reports the job as stranded, whose remediation writes to a tracker, and only the explicit
-    remediation performs that write. Closing here would therefore drop the last record naming a claim no rerun clears.
-    """
+    """Verifies that the automatic closure covers the plain drop alone, so it can never drop a claim it also reports."""
     _record_batch()
     remote.statuses = {"1000": JobStatus.COMPLETED}
     remote.claims = {(_UNIT_PATH, "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:1000", allocation="1000")}
 
     response = remote_batch_status()
 
+    # The scheduler has finished with this allocation, so a closure resolving settlement of its own would retire
+    # the batch. The same read reports the job as stranded, whose remediation writes to a tracker, and only the
+    # explicit remediation performs that write.
     assert response["outcomes"] == []
     assert response["batches"][0]["verdicts"] == {STRANDED_ALLOCATION: 1}
     assert response["batches"][0]["stranded_allocations"] == ["1000"]
@@ -528,11 +518,7 @@ def test_a_settled_batch_whose_job_is_stranded_is_never_closed_by_the_read(remot
 
 
 def test_a_batch_whose_job_runs_outside_the_scheduler_is_neither_closed_nor_reset(remote: _RemoteStub) -> None:
-    """Verifies that a tracker claiming a process rather than an allocation is refused rather than called stranded.
-
-    Neither scheduler record answers for such an executor, so the job can be shown neither to be live nor to have
-    stopped, and resetting its tracker could clear a claim its own process is still writing to.
-    """
+    """Verifies that a tracker claiming a process rather than an allocation is refused rather than called stranded."""
     _record_batch()
     remote.statuses = {"1000": JobStatus.COMPLETED}
     remote.claims = {(_UNIT_PATH, "job0"): TrackerClaim(status="RUNNING", executor_id="pid:4821")}
@@ -541,15 +527,15 @@ def test_a_batch_whose_job_runs_outside_the_scheduler_is_neither_closed_nor_rese
 
     assert response["outcomes"] == []
     assert response["jobs"][0]["verdict"] == RUNNING_ALLOCATION
+    # Neither scheduler record answers for such an executor, so the job can be shown neither to be live nor to
+    # have stopped, and resetting its tracker could clear a claim its own process still writes.
     assert response["jobs"][0]["remediation"] == NO_REMEDIATION
     assert [batch.batch_id for batch in read_ledger().batches] == ["batch01"]
 
 
 def test_a_batch_recorded_while_the_read_ran_is_named_rather_than_resolved(remote: _RemoteStub) -> None:
-    """Verifies that a batch this read's records never covered is reported as uncovered instead of resolved from them.
-
-    The scheduler states and tracker claims are gathered before the closure, and the ledger is read again after it, so
-    resolving whatever that second read returns would answer for a batch against records taken before it existed.
+    """Verifies that a batch this read's records never covered is reported as uncovered instead of resolved from
+    them.
     """
     _record_batch()
     remote.statuses = {"1000": JobStatus.RUNNING}
@@ -559,6 +545,9 @@ def test_a_batch_recorded_while_the_read_ran_is_named_rather_than_resolved(remot
     response = remote_batch_status()
 
     assert [entry["batch_id"] for entry in response["batches"]] == ["batch01"]
+    # The scheduler states and tracker claims are gathered before the closure, and the ledger is read again after
+    # it, so resolving whatever that second read returns would answer for a batch against records taken before it
+    # existed.
     assert response["uncovered_batch_ids"] == ["latecomer"]
     assert response["summary"]["total"] == 1
     assert "Read the status again" in response["message"]
@@ -596,9 +585,6 @@ def test_cancelling_a_batch_the_ledger_does_not_hold_is_rejected(remote: _Remote
 def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStub) -> None:
     """Verifies that the connection, the cancellation, the two reads behind it, and the closure each name their own
     cause.
-
-    A cancellation that never reached the scheduler leaves work running, while a read that failed behind an accepted
-    one leaves that cancellation standing, so folding the five into one report would tell a caller neither.
     """
     _record_batch()
     remote.statuses = {"1000": JobStatus.RUNNING}
@@ -608,12 +594,15 @@ def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStu
     assert "Unable to reach the remote compute server" in remote_batch_cancel()["error"]
     remote.connection_error = None
 
+    # A cancellation that never reached the scheduler leaves the work running, so its error says nothing was cancelled.
     remote.cancel_error = RuntimeError("scancel: error: Invalid job id")
     refused = remote_batch_cancel()
     assert "Unable to cancel the allocations the named batches hold" in refused["error"]
     assert "nothing was cancelled" in refused["error"]
     remote.cancel_error = None
 
+    # A read that fails behind an accepted cancellation leaves that cancellation standing, so the three errors
+    # that follow each say the cancellation itself was issued.
     remote.tracker_error = _SNAPSHOT_FAILURE
     trackers = remote_batch_cancel()
     assert "on their own processing trackers" in trackers["error"]
@@ -633,11 +622,7 @@ def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStu
 
 
 def test_cancelling_leaves_a_batch_whose_job_its_tracker_still_claims_outstanding(remote: _RemoteStub) -> None:
-    """Verifies that a cancellation closes what the resolution drops and leaves a stranded claim for remediation.
-
-    The scheduler has released this allocation, so the batch would settle on the reading alone. Its job's tracker
-    still claims the run the cancellation stopped, which only an explicit remediation clears.
-    """
+    """Verifies that a cancellation closes what the resolution drops and leaves a stranded claim for remediation."""
     _record_batch()
     remote.statuses = {"1000": JobStatus.CANCELLED}
     remote.claims = {(_UNIT_PATH, "job0"): TrackerClaim(status="RUNNING", executor_id="slurm:1000", allocation="1000")}
@@ -646,6 +631,8 @@ def test_cancelling_leaves_a_batch_whose_job_its_tracker_still_claims_outstandin
 
     assert response["canceled"]
     assert remote.cancelled == ["1000"]
+    # The scheduler has released this allocation, so the batch would settle on the reading alone. Its job's tracker
+    # still claims the run the cancellation stopped, which only an explicit remediation clears.
     assert [batch.batch_id for batch in read_ledger().batches] == ["batch01"]
 
 
@@ -686,10 +673,10 @@ def test_remediating_a_stranded_batch_resets_snapshots_and_drops_it(remote: _Rem
     allocation = response["allocations"][0]
     assert allocation["verdict"] == STRANDED_ALLOCATION
     assert allocation["remediation"] == RESET_REMEDIATION
-    assert allocation["cancelled"] is False
-    assert allocation["tracker_reset"] is True
-    assert allocation["snapshot_recorded"] is True
-    assert allocation["entry_dropped"] is True
+    assert not allocation["cancelled"]
+    assert allocation["tracker_reset"]
+    assert allocation["snapshot_recorded"]
+    assert allocation["entry_dropped"]
 
 
 def test_remediating_leaves_a_recorded_outcome_untouched(remote: _RemoteStub) -> None:
@@ -749,18 +736,15 @@ def test_forcing_cancels_a_running_allocation_before_any_tracker_is_written(remo
     assert response["retired"]
     assert remote.actions == ["cancel", "reset", "snapshot"]
     assert response["cancelled_allocations"] == ["1000"]
-    assert response["allocations"][0]["cancelled"] is True
-    assert response["allocations"][0]["tracker_reset"] is True
+    assert response["allocations"][0]["cancelled"]
+    assert response["allocations"][0]["tracker_reset"]
     assert response["allocations"][0]["remediation"] == CANCEL_REMEDIATION
     assert read_ledger().batches == []
 
 
 def test_forcing_cancels_the_allocation_the_tracker_claims(remote: _RemoteStub) -> None:
-    """Verifies that the override cancels the allocation actually carrying the job rather than the recorded one alone.
-
-    The recorded allocation is gone and the live one is the claim, which another machine may have submitted. Naming
-    the recorded allocation alone would leave that live allocation free to write into the tracker this remediation
-    then resets.
+    """Verifies that the override cancels the allocation actually carrying the job rather than the recorded one
+    alone.
     """
     _record_batch()
     remote.statuses = {"1000": JobStatus.UNRESOLVED, "2000": JobStatus.RUNNING}
@@ -770,11 +754,14 @@ def test_forcing_cancels_the_allocation_the_tracker_claims(remote: _RemoteStub) 
 
     assert response["retired"]
     assert remote.actions == ["cancel", "reset", "snapshot"]
+    # The recorded allocation is gone and the live one is the claim, which another machine may have submitted.
+    # Naming the recorded allocation alone would leave that live allocation free to write into the tracker this
+    # remediation then resets.
     assert response["cancelled_allocations"] == ["2000"]
     assert response["reset_jobs"] == 1
-    assert response["allocations"][0]["cancelled"] is True
+    assert response["allocations"][0]["cancelled"]
     assert response["allocations"][0]["remediation"] == CANCEL_REMEDIATION
-    assert response["allocations"][0]["tracker_reset"] is True
+    assert response["allocations"][0]["tracker_reset"]
 
 
 def test_forcing_never_clears_the_tracker_of_a_job_that_recorded_a_result(remote: _RemoteStub) -> None:
@@ -788,8 +775,8 @@ def test_forcing_never_clears_the_tracker_of_a_job_that_recorded_a_result(remote
     assert response["retired"]
     assert remote.actions == ["cancel", "snapshot"]
     assert response["reset_jobs"] == 0
-    assert response["allocations"][0]["tracker_reset"] is False
-    assert response["allocations"][0]["cancelled"] is True
+    assert not response["allocations"][0]["tracker_reset"]
+    assert response["allocations"][0]["cancelled"]
     # The report names what ran rather than the sequence the flag is named for, since this tracker was left alone.
     assert response["allocations"][0]["remediation"] == DROP_REMEDIATION
 
@@ -847,7 +834,7 @@ def test_dropping_without_an_outcome_remediates_a_batch_that_cannot_be_snapshott
 
     assert response["retired"]
     assert response["outcomes"] == []
-    assert response["allocations"][0]["snapshot_recorded"] is False
+    assert not response["allocations"][0]["snapshot_recorded"]
     assert "the state table could not be regenerated" in response["snapshot_error"]
     assert read_ledger().batches == []
 
@@ -870,14 +857,12 @@ def test_one_batch_failing_to_snapshot_keeps_the_outcomes_of_the_others(remote: 
 
 
 def test_an_unreachable_server_refuses_the_remediation_until_both_waivers_are_given(remote: _RemoteStub) -> None:
-    """Verifies that an unreachable server waives nothing on its own, since it hides every record at once.
-
-    Both waivers are needed because the failure withholds two separate guarantees: the allocations cannot be shown to
-    have stopped, and what their jobs recorded cannot be snapshotted.
-    """
+    """Verifies that an unreachable server waives nothing on its own, since it hides every record at once."""
     _record_batch()
     remote.connection_error = ConnectionError("the compute server refused the connection")
 
+    # Both waivers are needed because the failure withholds two separate guarantees, since the allocations cannot
+    # be shown to have stopped and what their jobs recorded cannot be snapshotted.
     unverified = remote_batch_retire(batch_ids=["batch01"])
     assert not unverified["success"]
     assert "force=True" in unverified["error"]
@@ -891,9 +876,9 @@ def test_an_unreachable_server_refuses_the_remediation_until_both_waivers_are_gi
     retired = remote_batch_retire(batch_ids=["batch01"], force=True, drop_without_outcome=True)
     assert retired["retired"]
     assert retired["allocations"][0]["verdict"] == RUNNING_ALLOCATION
-    assert retired["allocations"][0]["cancelled"] is False
-    assert retired["allocations"][0]["tracker_reset"] is False
-    assert retired["allocations"][0]["entry_dropped"] is True
+    assert not retired["allocations"][0]["cancelled"]
+    assert not retired["allocations"][0]["tracker_reset"]
+    assert retired["allocations"][0]["entry_dropped"]
     assert read_ledger().batches == []
 
 
@@ -946,11 +931,7 @@ def test_remediating_reports_an_empty_ledger_rather_than_failing(remote: _Remote
 
 
 def test_a_job_running_outside_the_scheduler_is_refused_and_then_dropped_untouched(remote: _RemoteStub) -> None:
-    """Verifies that the refusal for an unqueryable executor is waivable and never writes to that job's tracker.
-
-    Nothing here can cancel a process the scheduler does not carry, so waiving the refusal drops the ledger entry and
-    reports the drop it actually applied rather than a cancellation and a reset that never ran.
-    """
+    """Verifies that the refusal for an unqueryable executor is waivable and never writes to that job's tracker."""
     _record_batch()
     remote.statuses = {"1000": JobStatus.COMPLETED}
     remote.claims = {(_UNIT_PATH, "job0"): TrackerClaim(status="RUNNING", executor_id="pid:4821")}
@@ -962,10 +943,12 @@ def test_a_job_running_outside_the_scheduler_is_refused_and_then_dropped_untouch
 
     forced = remote_batch_retire(batch_ids=["batch01"], force=True)
     assert forced["retired"]
+    # Nothing here can cancel a process the scheduler does not carry, so waiving the refusal drops the ledger entry
+    # and reports the drop it actually applied rather than a cancellation and a reset that never ran.
     assert forced["cancelled_allocations"] == []
     assert forced["reset_jobs"] == 0
-    assert forced["allocations"][0]["cancelled"] is False
-    assert forced["allocations"][0]["tracker_reset"] is False
+    assert not forced["allocations"][0]["cancelled"]
+    assert not forced["allocations"][0]["tracker_reset"]
     assert forced["allocations"][0]["remediation"] == DROP_REMEDIATION
     assert read_ledger().batches == []
 

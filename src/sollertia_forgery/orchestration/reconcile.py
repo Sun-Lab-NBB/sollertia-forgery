@@ -52,8 +52,8 @@ class _Reconciliation:
     itself drops the identifiers a unit does not track."""
     withheld: list[GenericPendingJob] = field(default_factory=list)
     """The jobs this run neither dispatches nor adopts, which are the ones the resolution reports as running while
-    naming no allocation a dependent could wait on, together with the jobs that depend on them. Their records are left
-    exactly as they stand."""
+    naming no allocation on which a dependent could wait, together with the jobs that depend on them. Their records
+    are left exactly as they stand."""
 
 
 def reconcile_local_jobs(jobs: Sequence[GenericPendingJob]) -> _Reconciliation:
@@ -93,20 +93,20 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
         own descriptors, which preparation filled from the host's state artifact, rather than by opening a tracker
         across the transport while the batch runs.
 
-        A job whose verdict is ``running`` is left alone, since every allocation the resolution reports that way is one
-        the scheduler still holds, one whose job a still-held allocation claims on its tracker, or one whose tracker
+        A job whose verdict is ``running`` is left alone. Every allocation the resolution reports that way is one the
+        scheduler still holds, one whose job a still-held allocation claims on its tracker, or one whose tracker
         claims to be running under an executor outside the scheduler. The first two name an allocation, so the job is
         adopted onto it and its dependents wait on that allocation rather than on a second one this run would submit.
-        The third names none, so there is nothing to adopt and nothing for a dependent to wait on: that job is withheld
-        with its dependents, because dispatching it would run a second copy over a tracker its own executor may still be
-        writing to, and that is the one verdict whose remediation is to leave everything as it stands.
+        The third names none, so there is nothing to adopt and nothing on which a dependent could wait. That job is
+        withheld with its dependents, because dispatching it would run a second copy over a tracker to which its own
+        executor may still be writing. That is the one verdict whose remediation is to leave everything as it stands.
 
         Every other verdict releases the job. ``finished``, ``failed``, and ``abandoned`` mean nothing carries it any
         longer, and ``stranded`` means its tracker claims a run no allocation is carrying, which is exactly the claim
         the dispatch's own reset clears.
 
         The scheduler is read only when a job carries an allocation to resolve. A batch whose jobs carry none resolves
-        entirely from what their trackers recorded, so a routine dispatch costs no scheduler round trip at all, and a
+        entirely from what their trackers recorded, so a routine dispatch costs no scheduler round trip at all. A
         queue that cannot be read is carried rather than raised, which leaves every claimed job adopted and disturbs
         nothing.
 
@@ -141,8 +141,8 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
             withheld.add(job.dispatch_key)
 
     # Withholding propagates, because a job whose upstream stage this run neither submits nor adopts has no allocation
-    # to wait on and would otherwise start against input nothing here is producing. The submission order is what makes
-    # one pass enough, since it places every job behind the prerequisites it holds.
+    # on which to wait and would otherwise start against input nothing here is producing. The submission order is what
+    # makes one pass enough, since it places every job behind the prerequisites it holds.
     for job in resolve_submission_order(jobs=jobs):
         if job.dispatch_key not in reconciliation.adopted and any(
             prerequisite in withheld for prerequisite in job.prerequisite_keys
@@ -190,9 +190,9 @@ def _resolve_recorded_submissions(
     """Renders each job as the submission the resolution reads, carrying the allocation the ledger recorded for it.
 
     Notes:
-        Every job is rendered, including one the ledger holds no entry for. Such a job carries no allocation, which
-        the resolution reads as a record naming nothing rather than as a record it could not resolve, and its verdict
-        then rests on its tracker and on the allocation that tracker claims.
+        Every job is rendered, including one for which the ledger holds no entry. Such a job carries no allocation,
+        which the resolution reads as a record naming nothing rather than as a record it could not resolve, and its
+        verdict then rests on its tracker and on the allocation that tracker claims.
 
         A job the ledger records under two batches takes the allocation of the batch recorded last, which is the
         submission that superseded the earlier one.
@@ -253,7 +253,7 @@ def _read_scheduler_state(
 
 
 def _resolve_adoptable_allocation(resolution: AllocationResolution) -> str:
-    """Resolves the allocation an adopted job's dependents wait on, reading it off the resolution's own states.
+    """Resolves the allocation on which an adopted job's dependents wait, reading it off the resolution's own states.
 
     Notes:
         A resolution names two allocations, the one its ledger entry recorded and the one its job's tracker claims,

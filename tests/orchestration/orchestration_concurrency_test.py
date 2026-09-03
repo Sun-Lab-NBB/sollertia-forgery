@@ -83,9 +83,12 @@ _OTHER_UNIT: Path = Path("/nonexistent/other_session")
 _PREPARED_PROJECT_ROOT: Path = Path("/nonexistent/project")
 """The project root against which the preparation tests resolve their units and where their artifacts are read."""
 
+_PIPELINE: str = ProcessingPipelines.CHECKSUM.value
+"""The pipeline every batch-document test prepares."""
+
 
 @dataclass
-class RecordingPool:
+class _RecordingPool:
     """Stands in for a process pool, recording each submitted job instead of running it."""
 
     submitted: list[PendingJob] = field(default_factory=list)
@@ -97,7 +100,7 @@ class RecordingPool:
         return Future()
 
 
-def make_pending_job(
+def _make_pending_job(
     job_id: str,
     job_name: str = "processing",
     cores: int = 1,
@@ -118,7 +121,7 @@ def make_pending_job(
     )
 
 
-def build_state(
+def _build_state(
     jobs: list[PendingJob], core_budget: int = _CORE_BUDGET, memory_budget_mb: int = _MEMORY_BUDGET_MB
 ) -> JobExecutionState[PendingJob]:
     """Builds an execution state holding the supplied jobs against explicit budgets."""
@@ -132,17 +135,149 @@ def build_state(
     )
 
 
-def run_admission_pass(state: JobExecutionState[PendingJob]) -> RecordingPool:
+def _run_admission_pass(state: JobExecutionState[PendingJob]) -> _RecordingPool:
     """Runs one admission pass against a recording pool and returns it."""
-    pool = RecordingPool()
+    pool = _RecordingPool()
     _admit_pending_jobs(state=state, pool=pool)  # type: ignore[arg-type]
     return pool
 
 
-def complete_job(state: JobExecutionState[PendingJob], job: PendingJob) -> None:
+def _complete_job(state: JobExecutionState[PendingJob], job: PendingJob) -> None:
     """Marks a running job finished and successful, as the manager would after reaping its future."""
     state.active_jobs = [active for active in state.active_jobs if active.job.dispatch_key != job.dispatch_key]
     state.succeeded_job_keys.add(job.dispatch_key)
+
+
+def _resolve_identifier(job_name: str, specifier: str = "") -> str:
+    """Returns the identifier under which the processing tracker records the named job."""
+    return ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
+
+
+def _build_plan_row(
+    unit: str,
+    job_name: str,
+    specifier: str = "",
+    *,
+    cores: int = 4,
+    memory_mb: int = 2048,
+    prerequisites: tuple[tuple[str, str], ...] = (),
+    pipeline: str = _PIPELINE,
+    unit_column: str = "session",
+) -> dict[str, Any]:
+    """Renders one row of the project plan projection, carrying a job's figures and its recorded ordering."""
+    return {
+        unit_column: unit,
+        "pipeline": pipeline,
+        "job_id": _resolve_identifier(job_name=job_name, specifier=specifier),
+        "job_name": job_name,
+        "specifier": specifier,
+        "cores": cores,
+        "memory_mb": memory_mb,
+        "prerequisite_ids": [
+            _resolve_identifier(job_name=name, specifier=upstream) for name, upstream in prerequisites
+        ],
+    }
+
+
+def _build_state_row(
+    unit: str,
+    job_name: str,
+    specifier: str = "",
+    *,
+    status: str = "SCHEDULED",
+    pipeline: str | None = _PIPELINE,
+    unit_column: str = "session",
+) -> dict[str, Any]:
+    """Renders one row of the project state projection, carrying a tracked job's recorded status."""
+    row: dict[str, Any] = {
+        unit_column: unit,
+        "job_id": _resolve_identifier(job_name=job_name, specifier=specifier),
+        "job_name": job_name,
+        "specifier": specifier,
+        "status": status,
+    }
+    if pipeline is not None:
+        row["pipeline"] = pipeline
+    return row
+
+
+def _build_descriptor(job_id: str, prerequisites: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Builds the minimal job descriptor the blocking partition reads."""
+    return {
+        "job_id": job_id,
+        "job_name": "processing",
+        "specifier": job_id,
+        "pipeline": _PIPELINE,
+        "unit_path": str(_UNIT),
+        "unit_name": _UNIT.name,
+        "prerequisite_ids": list(prerequisites),
+    }
+
+
+class _StubPreparationHost:
+    """Stands in for an execution host holding one project's tables and its units' trackers.
+
+    Args:
+        plan_rows: The rows the project's plan table holds.
+        state_rows: The rows the project's state table holds.
+
+    Attributes:
+        _plan_rows: The rows the project's plan table holds.
+        _state_rows: The rows the project's state table holds.
+        materialized: The project root, unit kind, and replan choice of every materialization requested from this host.
+    """
+
+    def __init__(self, plan_rows: list[dict[str, Any]], state_rows: list[dict[str, Any]]) -> None:
+        self._plan_rows: list[dict[str, Any]] = plan_rows
+        self._state_rows: list[dict[str, Any]] = state_rows
+        self.materialized: list[tuple[Path, str, bool]] = []
+
+    @property
+    def label(self) -> str:
+        """Returns the name under which this host is reported."""
+        return "workstation"
+
+    def materialize(
+        self,
+        project_root: Path,
+        unit_paths: Sequence[Path],  # noqa: ARG002
+        unit_kind: str,
+        *,
+        replan: bool,
+    ) -> None:
+        """Records what the batch asked to be rewritten, since this stub's tables already hold their rows.
+
+        Args:
+            project_root: The project for which the artifacts are rewritten.
+            unit_paths: The processing units for which the artifacts are rewritten.
+            unit_kind: The kind of processing unit the paths name.
+            replan: Determines whether the recorded figures are re-estimated.
+        """
+        self.materialized.append((project_root, unit_kind, replan))
+
+    def read_rows(self, path: Path) -> list[dict[str, Any]]:
+        """Answers the plan table for the project's plan artifact and the state table for every other path.
+
+        Args:
+            path: The artifact from which the rows are read.
+
+        Returns:
+            The rows that artifact holds.
+        """
+        return self._plan_rows if path == plan_artifact_path(project_root=_PREPARED_PROJECT_ROOT) else self._state_rows
+
+    @staticmethod
+    def resolve_tracker_paths(pipeline: str, unit_paths: Sequence[Path]) -> dict[str, str]:
+        """Resolves one tracker per unit, the way a host whose engine opens those files directly does.
+
+        Args:
+            pipeline: The pipeline whose tracker is located.
+            unit_paths: The unit root directories whose trackers are located.
+
+        Returns:
+            The tracker path of each unit, keyed by the unit path as a string.
+        """
+        return {str(unit_path): str(unit_path.joinpath(f"{pipeline}_tracker.yaml")) for unit_path in unit_paths}
 
 
 def test_core_allocations_come_from_the_table_and_clamp_to_the_budget() -> None:
@@ -176,48 +311,48 @@ def test_a_partial_allocation_table_stops_the_batch() -> None:
 
 def test_admission_stops_on_whichever_budget_binds_first() -> None:
     """Verifies that cores and memory are both enforced and that the scarcer one limits concurrency."""
-    core_bound = build_state(
-        jobs=[make_pending_job(job_id=f"c{index}", cores=16, memory_mb=1024) for index in range(8)],
+    core_bound = _build_state(
+        jobs=[_make_pending_job(job_id=f"c{index}", cores=16, memory_mb=1024) for index in range(8)],
         core_budget=_CORE_BUDGET,
         memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    assert len(run_admission_pass(state=core_bound).submitted) == 4
+    assert len(_run_admission_pass(state=core_bound).submitted) == 4
 
-    memory_bound = build_state(
-        jobs=[make_pending_job(job_id=f"m{index}", cores=1, memory_mb=20000) for index in range(8)],
+    memory_bound = _build_state(
+        jobs=[_make_pending_job(job_id=f"m{index}", cores=1, memory_mb=20000) for index in range(8)],
         core_budget=_CORE_BUDGET,
         memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    assert len(run_admission_pass(state=memory_bound).submitted) == 3
+    assert len(_run_admission_pass(state=memory_bound).submitted) == 3
 
 
 def test_admission_never_commits_past_either_budget() -> None:
     """Verifies that the running set stays inside both budgets for a heterogeneous queue."""
     sizes = [50000, 20000, 20000, 6000, 6000, 6000, 6000, 6000]
-    state = build_state(
-        jobs=[make_pending_job(job_id=f"j{index}", cores=4, memory_mb=size) for index, size in enumerate(sizes)],
+    state = _build_state(
+        jobs=[_make_pending_job(job_id=f"j{index}", cores=4, memory_mb=size) for index, size in enumerate(sizes)],
         core_budget=_CORE_BUDGET,
         memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    pool = run_admission_pass(state)
+    pool = _run_admission_pass(state=state)
     assert sum(job.core_weight for job in pool.submitted) <= _CORE_BUDGET
     assert sum(job.memory_mb for job in pool.submitted) <= _MEMORY_BUDGET_MB
 
 
 def test_admission_considers_the_heaviest_job_first() -> None:
     """Verifies that a large job is dispatched before lighter ones rather than waiting for them to drain."""
-    jobs = [make_pending_job(job_id=f"light{index}", memory_mb=1024) for index in range(6)]
-    jobs.append(make_pending_job(job_id="heavy", memory_mb=40000))
-    pool = run_admission_pass(state=build_state(jobs=jobs))
+    jobs = [_make_pending_job(job_id=f"light{index}", memory_mb=1024) for index in range(6)]
+    jobs.append(_make_pending_job(job_id="heavy", memory_mb=40000))
+    pool = _run_admission_pass(state=_build_state(jobs=jobs))
     assert pool.submitted[0].job_id == "heavy"
 
 
 def test_light_jobs_backfill_the_capacity_a_heavy_job_leaves_spare() -> None:
     """Verifies that a heavy job runs alongside as many light jobs as the remaining budget allows."""
-    jobs = [make_pending_job(job_id="heavy", cores=8, memory_mb=40000)]
-    jobs += [make_pending_job(job_id=f"light{index}", cores=2, memory_mb=4000) for index in range(10)]
-    pool = run_admission_pass(
-        state=build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB)
+    jobs = [_make_pending_job(job_id="heavy", cores=8, memory_mb=40000)]
+    jobs += [_make_pending_job(job_id=f"light{index}", cores=2, memory_mb=4000) for index in range(10)]
+    pool = _run_admission_pass(
+        state=_build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB)
     )
     submitted = {job.job_id for job in pool.submitted}
     assert "heavy" in submitted
@@ -227,48 +362,46 @@ def test_light_jobs_backfill_the_capacity_a_heavy_job_leaves_spare() -> None:
 
 def test_freed_capacity_is_repacked_on_the_next_pass() -> None:
     """Verifies that finishing a job immediately releases its share to the jobs still queued."""
-    jobs = [make_pending_job(job_id=f"j{index}", cores=1, memory_mb=20000) for index in range(6)]
-    state = build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB)
+    jobs = [_make_pending_job(job_id=f"j{index}", cores=1, memory_mb=20000) for index in range(6)]
+    state = _build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB)
 
-    first = run_admission_pass(state)
+    first = _run_admission_pass(state=state)
     assert len(first.submitted) == 3
     assert len(state.pending_jobs) == 3
 
-    complete_job(state=state, job=first.submitted[0])
-    second = run_admission_pass(state)
+    _complete_job(state=state, job=first.submitted[0])
+    second = _run_admission_pass(state=state)
     assert len(second.submitted) == 1, "capacity freed by a finished job was not refilled"
 
 
 def test_admission_withholds_a_job_until_its_prerequisite_succeeds() -> None:
     """Verifies that a dependent job is not dispatched while its upstream job has not yet succeeded."""
-    upstream = make_pending_job(job_id="up", job_name="binarization")
-    downstream = make_pending_job(job_id="down", prerequisites=("up",))
-    state = build_state(jobs=[upstream, downstream])
+    upstream = _make_pending_job(job_id="up", job_name="binarization")
+    downstream = _make_pending_job(job_id="down", prerequisites=("up",))
+    state = _build_state(jobs=[upstream, downstream])
 
-    pool = run_admission_pass(state)
+    pool = _run_admission_pass(state=state)
     assert [job.job_id for job in pool.submitted] == ["up"]
 
-    complete_job(state=state, job=upstream)
-    assert [job.job_id for job in run_admission_pass(state).submitted] == ["down"]
+    _complete_job(state=state, job=upstream)
+    assert [job.job_id for job in _run_admission_pass(state=state).submitted] == ["down"]
 
 
 def test_a_completed_stage_in_one_session_does_not_satisfy_another_session() -> None:
-    """Verifies that identical job identifiers in different sessions are tracked separately.
-
-    A job identifier is derived from the job name and specifier alone, so every session's binarization shares one
-    identifier. A batch spanning sessions must not treat one session's completed stage as every session's.
-    """
-    first_upstream = make_pending_job(job_id="shared", job_name="binarization", tracker_path=_TRACKER, unit_path=_UNIT)
-    second_downstream = make_pending_job(
+    """Verifies that identical job identifiers in different sessions are tracked separately."""
+    # A job identifier is derived from the job name and specifier alone, so every session's binarization shares one
+    # identifier.
+    first_upstream = _make_pending_job(job_id="shared", job_name="binarization", tracker_path=_TRACKER, unit_path=_UNIT)
+    second_downstream = _make_pending_job(
         job_id="down", prerequisites=("shared",), tracker_path=_OTHER_TRACKER, unit_path=_OTHER_UNIT
     )
-    state = build_state(jobs=[first_upstream, second_downstream])
+    state = _build_state(jobs=[first_upstream, second_downstream])
 
-    pool = run_admission_pass(state)
+    pool = _run_admission_pass(state=state)
     assert [job.job_id for job in pool.submitted] == ["shared"]
 
-    complete_job(state=state, job=first_upstream)
-    assert not run_admission_pass(state).submitted, (
+    _complete_job(state=state, job=first_upstream)
+    assert not _run_admission_pass(state=state).submitted, (
         "another session's dependent was released by an unrelated session's job"
     )
     assert [job.job_id for job in state.pending_jobs] == ["down"]
@@ -276,25 +409,25 @@ def test_a_completed_stage_in_one_session_does_not_satisfy_another_session() -> 
 
 def test_admission_blocks_a_dependent_whose_prerequisite_failed() -> None:
     """Verifies that a job whose upstream failed is moved aside rather than waiting for an outcome that cannot come."""
-    downstream = make_pending_job(job_id="down", prerequisites=("up",))
-    state = build_state(jobs=[downstream])
+    downstream = _make_pending_job(job_id="down", prerequisites=("up",))
+    state = _build_state(jobs=[downstream])
     state.failed_job_keys.add((str(_UNIT), "up"))
 
-    assert not run_admission_pass(state).submitted
+    assert not _run_admission_pass(state=state).submitted
     assert [job.job_id for job in state.blocked_jobs] == ["down"]
     assert not state.pending_jobs
 
 
 def test_forward_progress_floor_never_bypasses_the_prerequisite_check() -> None:
     """Verifies that the single-job floor does not dispatch a job whose input does not exist yet."""
-    downstream = make_pending_job(job_id="down", memory_mb=10_000_000, prerequisites=("up",))
-    assert not run_admission_pass(state=build_state(jobs=[downstream])).submitted
+    downstream = _make_pending_job(job_id="down", memory_mb=10_000_000, prerequisites=("up",))
+    assert not _run_admission_pass(state=_build_state(jobs=[downstream])).submitted
 
 
 def test_forward_progress_floor_admits_a_job_larger_than_the_budget() -> None:
     """Verifies that a job no budget can hold still runs alone rather than stalling the batch."""
-    oversized = make_pending_job(job_id="huge", cores=999, memory_mb=10_000_000)
-    assert [job.job_id for job in run_admission_pass(state=build_state(jobs=[oversized])).submitted] == ["huge"]
+    oversized = _make_pending_job(job_id="huge", cores=999, memory_mb=10_000_000)
+    assert [job.job_id for job in _run_admission_pass(state=_build_state(jobs=[oversized])).submitted] == ["huge"]
 
 
 def test_estimates_carry_the_shared_tolerance() -> None:
@@ -368,12 +501,9 @@ def test_job_options_round_trip_from_descriptor_to_worker() -> None:
 
 
 def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
-    """Verifies that the checksum estimate tracks the cores a job holds rather than the bytes it reads.
-
-    Most other estimators scale a per-byte ratio off an input file, and the rename estimator is the only other one
-    that reads none. A checksum worker streams its file in fixed chunks, so the session's size does not enter the
-    estimate and only the reader count does.
-    """
+    """Verifies that the checksum estimate tracks the cores a job holds rather than the bytes it reads."""
+    # A checksum worker streams its file in fixed chunks, so the session's size does not enter the estimate and only
+    # the reader count does.
     single = _size_checksum_job(cores=1).memory_mb
     # Reportable figures land on whole gigabytes, so the per-reader growth shows across a wide core spread rather
     # than between two adjacent core counts, where the rounding absorbs it.
@@ -387,12 +517,7 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
 
 @pytest.mark.xdist_group(name="worker_pool")
 def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that the worker initializer controls numba through its runtime setter rather than its environment.
-
-    numba reads NUMBA_NUM_THREADS once at import and compares the variable against that latched count on every
-    compilation, rejecting a disagreement once its thread pool has started. A worker imports numba before the
-    initializer runs, so pinning the variable there would fail every job that compiles a numba function.
-    """
+    """Verifies that the worker initializer controls numba through its runtime setter rather than its environment."""
     for variable in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "POLARS_MAX_THREADS"):
         monkeypatch.setenv(variable, os.environ.get(variable, ""))
     monkeypatch.delenv("NUMBA_NUM_THREADS", raising=False)
@@ -403,6 +528,9 @@ def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: 
     numba.set_num_threads(n=numba_threads)
     cv2.setNumThreads(opencv_threads)
 
+    # numba reads NUMBA_NUM_THREADS once at import and compares the variable against that latched count on every
+    # compilation, rejecting a disagreement once its thread pool has started. A worker imports numba before the
+    # initializer runs, so pinning the variable there would fail every job that compiles a numba function.
     assert "NUMBA_NUM_THREADS" not in os.environ
 
     # The other threading layers are still written here, since the lazily-initialized decoders read their variables
@@ -413,14 +541,12 @@ def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: 
 
 @pytest.mark.parametrize("pipeline", sorted(member.value for member in BATCH_PIPELINES))
 def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str) -> None:
-    """Verifies that each registered pipeline supplies every callable the unit-generic dispatch contract requires.
-
-    The batch layer reads a unit only through these callables, so this pins the set an entry must supply beyond what
-    the dataclass itself requires.
-    """
+    """Verifies that each registered pipeline supplies every callable the unit-generic dispatch contract requires."""
     dispatch = resolve_dispatch(pipeline=pipeline)
     assert dispatch is not None
 
+    # The batch layer reads a unit only through these callables, so this pins the set an entry must supply beyond
+    # what the dataclass itself requires.
     for field_name in (
         "discover",
         "worker",
@@ -446,87 +572,18 @@ def test_forging_is_a_registered_batch_pipeline() -> None:
 
 
 def test_only_assembly_carries_a_forging_concurrency_limit() -> None:
-    """Verifies that the storage-bound forging stage is capped while the compute-bound stages are budget-bound.
-
-    cindra treats its own cross-recording discovery and extraction as compute-bound and runs them at a wide core
-    allocation, so a ceiling on top of the core budget would hold them below the concurrency they gain.
-    """
+    """Verifies that the storage-bound forging stage is capped while the compute-bound stages are budget-bound."""
     limits = resolve_concurrency_limits(
         job_names={MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME}
     )
     assert set(limits) == {FORGING_JOB_NAME}
+    # cindra treats its own cross-recording discovery and extraction as compute-bound and runs them at a wide core
+    # allocation, so a ceiling on top of the core budget would hold them below the concurrency they gain.
     assert _JOB_CORE_ALLOCATIONS[MULTIDAY_DISCOVERY_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
     assert _JOB_CORE_ALLOCATIONS[MULTIDAY_EXTRACTION_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
 
 
 # Batch document assembly
-
-_PIPELINE: str = ProcessingPipelines.CHECKSUM.value
-"""The pipeline every batch-document test prepares."""
-
-
-def identifier(job_name: str, specifier: str = "") -> str:
-    """Returns the identifier under which the processing tracker records the named job."""
-    return ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
-
-
-def plan_row(
-    unit: str,
-    job_name: str,
-    specifier: str = "",
-    *,
-    cores: int = 4,
-    memory_mb: int = 2048,
-    prerequisites: tuple[tuple[str, str], ...] = (),
-    pipeline: str = _PIPELINE,
-    unit_column: str = "session",
-) -> dict[str, Any]:
-    """Renders one row of the project plan projection, carrying a job's figures and its recorded ordering."""
-    return {
-        unit_column: unit,
-        "pipeline": pipeline,
-        "job_id": identifier(job_name=job_name, specifier=specifier),
-        "job_name": job_name,
-        "specifier": specifier,
-        "cores": cores,
-        "memory_mb": memory_mb,
-        "prerequisite_ids": [identifier(job_name=name, specifier=upstream) for name, upstream in prerequisites],
-    }
-
-
-def state_row(
-    unit: str,
-    job_name: str,
-    specifier: str = "",
-    *,
-    status: str = "SCHEDULED",
-    pipeline: str | None = _PIPELINE,
-    unit_column: str = "session",
-) -> dict[str, Any]:
-    """Renders one row of the project state projection, carrying a tracked job's recorded status."""
-    row: dict[str, Any] = {
-        unit_column: unit,
-        "job_id": identifier(job_name=job_name, specifier=specifier),
-        "job_name": job_name,
-        "specifier": specifier,
-        "status": status,
-    }
-    if pipeline is not None:
-        row["pipeline"] = pipeline
-    return row
-
-
-def descriptor(job_id: str, prerequisites: tuple[str, ...] = ()) -> dict[str, Any]:
-    """Builds the minimal job descriptor the blocking partition reads."""
-    return {
-        "job_id": job_id,
-        "job_name": "processing",
-        "specifier": job_id,
-        "pipeline": _PIPELINE,
-        "unit_path": str(_UNIT),
-        "unit_name": _UNIT.name,
-        "prerequisite_ids": list(prerequisites),
-    }
 
 
 def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None:
@@ -537,15 +594,15 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         host="workstation",
         unit_column="session",
         plan_rows=[
-            plan_row(unit=unit.name, job_name="hash", specifier="a"),
-            plan_row(unit=unit.name, job_name="hash", specifier="b", cores=8, memory_mb=4096),
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="a"),
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="b", cores=8, memory_mb=4096),
             # A row of another pipeline never reaches this batch, whichever unit it names.
-            plan_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
         ],
         state_rows=[
-            state_row(unit=unit.name, job_name="hash", specifier="a", status=ProcessingStatus.SUCCEEDED.name),
-            state_row(unit=unit.name, job_name="hash", specifier="b"),
-            state_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="a", status=ProcessingStatus.SUCCEEDED.name),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="b"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
         ],
         unit_paths=[unit],
         options={"regenerate_checksum": True},
@@ -555,9 +612,9 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
     assert document.pipeline == _PIPELINE
     assert document.host == "workstation"
     assert document.options == {"regenerate_checksum": True}
-    assert [job["job_id"] for job in document.jobs] == [identifier(job_name="hash", specifier="b")]
+    assert [job["job_id"] for job in document.jobs] == [_resolve_identifier(job_name="hash", specifier="b")]
     assert document.jobs[0] == {
-        "job_id": identifier(job_name="hash", specifier="b"),
+        "job_id": _resolve_identifier(job_name="hash", specifier="b"),
         "job_name": "hash",
         "specifier": "b",
         "unit_path": str(unit),
@@ -568,7 +625,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "memory_mb": 4096,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
-        # _Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
+        # Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
         # leaving a later stage to reopen the tracker from which the state artifact was regenerated.
         "status": "SCHEDULED",
         "executor_id": "",
@@ -578,29 +635,27 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
 
 
 def test_a_job_whose_upstream_stage_already_succeeded_is_dispatched_rather_than_blocked() -> None:
-    """Verifies that a stage succeeding in an earlier run satisfies its dependents when the unit is prepared again.
-
-    That is the ordinary resume path: the succeeded stage is left out of the batch while the job waiting on it is
-    dispatched. Reading the recorded successes as empty would report every dependent blocked and stall the unit.
-    """
+    """Verifies that a stage succeeding in an earlier run satisfies its dependents when the unit is prepared again."""
     unit = Path("/nonexistent/project/305/a_session")
     document = build_batch_document(
         pipeline=_PIPELINE,
         host="workstation",
         unit_column="session",
         plan_rows=[
-            plan_row(unit=unit.name, job_name="hash", specifier="a"),
-            plan_row(unit=unit.name, job_name="hash", specifier="b", prerequisites=(("hash", "a"),)),
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="a"),
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="b", prerequisites=(("hash", "a"),)),
         ],
         state_rows=[
-            state_row(unit=unit.name, job_name="hash", specifier="a", status=ProcessingStatus.SUCCEEDED.name),
-            state_row(unit=unit.name, job_name="hash", specifier="b"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="a", status=ProcessingStatus.SUCCEEDED.name),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="b"),
         ],
         unit_paths=[unit],
         options={},
     )
 
-    assert [job["job_id"] for job in document.jobs] == [identifier(job_name="hash", specifier="b")]
+    # The ordinary resume path leaves the succeeded stage out of the batch and dispatches the job waiting on it.
+    # Reading the recorded successes as empty would report every dependent blocked and stall the unit.
+    assert [job["job_id"] for job in document.jobs] == [_resolve_identifier(job_name="hash", specifier="b")]
     assert document.blocked_jobs == []
 
 
@@ -611,8 +666,8 @@ def test_a_state_row_naming_no_pipeline_is_read_as_the_prepared_ones() -> None:
         pipeline=_PIPELINE,
         host="workstation",
         unit_column="session",
-        plan_rows=[plan_row(unit=unit.name, job_name="hash", specifier="a")],
-        state_rows=[state_row(unit=unit.name, job_name="hash", specifier="a", pipeline=None)],
+        plan_rows=[_build_plan_row(unit=unit.name, job_name="hash", specifier="a")],
+        state_rows=[_build_state_row(unit=unit.name, job_name="hash", specifier="a", pipeline=None)],
         unit_paths=[unit],
         options={},
     )
@@ -623,29 +678,27 @@ def test_a_state_row_naming_no_pipeline_is_read_as_the_prepared_ones() -> None:
 
 
 def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
-    """Verifies that a prerequisite the unit can never produce is dropped rather than left waiting on it.
-
-    The planned figures cover the whole universe of a pipeline's jobs while a tracker registers only the subset the
-    unit can actually produce, so a stage that is planned but untracked is exactly the shape that this drop targets.
-    """
+    """Verifies that a prerequisite the unit can never produce is dropped rather than left waiting on it."""
     unit = Path("/nonexistent/project/305/a_session")
+    # The planned figures cover the whole universe of a pipeline's jobs while a tracker registers only the subset the
+    # unit can actually produce, so a stage that is planned but untracked is exactly the shape that this drop targets.
     document = build_batch_document(
         pipeline=_PIPELINE,
         host="workstation",
         unit_column="session",
         plan_rows=[
-            plan_row(unit=unit.name, job_name="hash", specifier="a"),
-            plan_row(
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="a"),
+            _build_plan_row(
                 unit=unit.name,
                 job_name="hash",
                 specifier="b",
                 prerequisites=(("hash", "a"), ("hash", "never_possible")),
             ),
-            plan_row(unit=unit.name, job_name="hash", specifier="never_possible"),
+            _build_plan_row(unit=unit.name, job_name="hash", specifier="never_possible"),
         ],
         state_rows=[
-            state_row(unit=unit.name, job_name="hash", specifier="a"),
-            state_row(unit=unit.name, job_name="hash", specifier="b"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="a"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="b"),
         ],
         unit_paths=[unit],
         options={},
@@ -655,7 +708,7 @@ def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
     # batch reports as blocked rather than dispatching.
     assert document.blocked_jobs == []
     downstream = next(job for job in document.jobs if job["specifier"] == "b")
-    assert downstream["prerequisite_ids"] == [identifier(job_name="hash", specifier="a")]
+    assert downstream["prerequisite_ids"] == [_resolve_identifier(job_name="hash", specifier="a")]
 
 
 def test_a_unit_the_state_table_records_nothing_for_contributes_no_job() -> None:
@@ -666,8 +719,8 @@ def test_a_unit_the_state_table_records_nothing_for_contributes_no_job() -> None
         pipeline=_PIPELINE,
         host="workstation",
         unit_column="session",
-        plan_rows=[plan_row(unit=known.name, job_name="hash", specifier="a")],
-        state_rows=[state_row(unit=known.name, job_name="hash", specifier="a")],
+        plan_rows=[_build_plan_row(unit=known.name, job_name="hash", specifier="a")],
+        state_rows=[_build_state_row(unit=known.name, job_name="hash", specifier="a")],
         unit_paths=[known, unknown],
         options={},
     )
@@ -687,12 +740,14 @@ def test_a_unit_whose_outstanding_job_carries_no_figures_is_rejected() -> None:
         pipeline=_PIPELINE,
         host="workstation",
         unit_column="session",
-        plan_rows=[plan_row(unit=unit.name, job_name="hash", specifier="a")],
+        plan_rows=[_build_plan_row(unit=unit.name, job_name="hash", specifier="a")],
         state_rows=[
-            state_row(unit=unit.name, job_name="hash", specifier="a"),
-            state_row(unit=unit.name, job_name="hash", specifier="unplanned"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="a"),
+            _build_state_row(unit=unit.name, job_name="hash", specifier="unplanned"),
             # An unplanned job that already succeeded is tolerated, since this run would never dispatch it.
-            state_row(unit=unit.name, job_name="hash", specifier="retired", status=ProcessingStatus.SUCCEEDED.name),
+            _build_state_row(
+                unit=unit.name, job_name="hash", specifier="retired", status=ProcessingStatus.SUCCEEDED.name
+            ),
         ],
         unit_paths=[unit],
         options={},
@@ -701,8 +756,8 @@ def test_a_unit_whose_outstanding_job_carries_no_figures_is_rejected() -> None:
     assert document.jobs == []
     assert document.units[0]["error"] == (
         f"The project's plan table carries no figures for job(s) "
-        f"{[identifier(job_name='hash', specifier='unplanned')]}. Every outstanding job must be planned before it "
-        f"can be sized for a host or a scheduler."
+        f"{[_resolve_identifier(job_name='hash', specifier='unplanned')]}. Every outstanding job must be planned "
+        f"before it can be sized for a host or a scheduler."
     )
 
 
@@ -724,10 +779,10 @@ def test_rows_naming_no_unit_are_left_out_of_the_index() -> None:
 def test_blocking_propagates_along_the_chain_that_waits_on_it() -> None:
     """Verifies that a stage waiting on a blocked stage is blocked in turn, so the whole chain is set aside."""
     jobs = [
-        descriptor(job_id="root", prerequisites=("absent",)),
-        descriptor(job_id="middle", prerequisites=("root",)),
-        descriptor(job_id="leaf", prerequisites=("middle",)),
-        descriptor(job_id="independent"),
+        _build_descriptor(job_id="root", prerequisites=("absent",)),
+        _build_descriptor(job_id="middle", prerequisites=("root",)),
+        _build_descriptor(job_id="leaf", prerequisites=("middle",)),
+        _build_descriptor(job_id="independent"),
     ]
 
     dispatchable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded=set())
@@ -741,7 +796,7 @@ def test_blocking_propagates_along_the_chain_that_waits_on_it() -> None:
 
 def test_an_already_succeeded_prerequisite_satisfies_its_dependent() -> None:
     """Verifies that a prerequisite recorded as succeeded blocks nothing, even where this run never dispatches it."""
-    jobs = [descriptor(job_id="downstream", prerequisites=("upstream",))]
+    jobs = [_build_descriptor(job_id="downstream", prerequisites=("upstream",))]
 
     dispatchable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded={"upstream"})
 
@@ -752,79 +807,12 @@ def test_an_already_succeeded_prerequisite_satisfies_its_dependent() -> None:
 # Batch preparation
 
 
-class _StubPreparationHost:
-    """Stands in for an execution host holding one project's tables and its units' trackers.
-
-    Args: plan_rows: The rows the project's plan table holds. state_rows: The rows the project's state table holds.
-
-    Attributes: _plan_rows: The rows the project's plan table holds. _state_rows: The rows the project's state table
-    holds. materialized: The project root, unit kind, and replan choice of every materialization requested from this
-    host.
-    """
-
-    def __init__(self, plan_rows: list[dict[str, Any]], state_rows: list[dict[str, Any]]) -> None:
-        self._plan_rows: list[dict[str, Any]] = plan_rows
-        self._state_rows: list[dict[str, Any]] = state_rows
-        self.materialized: list[tuple[Path, str, bool]] = []
-
-    @property
-    def label(self) -> str:
-        """Returns the name under which this host is reported."""
-        return "workstation"
-
-    def materialize(
-        self,
-        project_root: Path,
-        unit_paths: Sequence[Path],  # noqa: ARG002
-        unit_kind: str,
-        *,
-        replan: bool,
-    ) -> None:
-        """Records what the batch asked to be rewritten, since this stub's tables already hold their rows.
-
-        Args:
-            project_root: The project for which the artifacts are rewritten.
-            unit_paths: The processing units for which the artifacts are rewritten.
-            unit_kind: The kind of processing unit the paths name.
-            replan: Determines whether the recorded figures are re-estimated.
-        """
-        self.materialized.append((project_root, unit_kind, replan))
-
-    def read_rows(self, path: Path) -> list[dict[str, Any]]:
-        """Answers the plan table for the project's plan artifact and the state table for every other path.
-
-        Args:
-            path: The artifact from which the rows are read.
-
-        Returns:
-            The rows that artifact holds.
-        """
-        return self._plan_rows if path == plan_artifact_path(project_root=_PREPARED_PROJECT_ROOT) else self._state_rows
-
-    @staticmethod
-    def resolve_tracker_paths(pipeline: str, unit_paths: Sequence[Path]) -> dict[str, str]:
-        """Resolves one tracker per unit, the way a host whose engine opens those files directly does.
-
-        Args:
-            pipeline: The pipeline whose tracker is located.
-            unit_paths: The unit root directories whose trackers are located.
-
-        Returns:
-            The tracker path of each unit, keyed by the unit path as a string.
-        """
-        return {str(unit_path): str(unit_path.joinpath(f"{pipeline}_tracker.yaml")) for unit_path in unit_paths}
-
-
 def test_a_prepared_batch_carries_the_tracker_location_the_host_resolved_for_each_unit() -> None:
-    """Verifies that preparation stamps each unit's own tracker location onto the descriptors it hands the engine.
-
-    The local engine opens those files directly to seed and extend its recorded outcomes, so descriptors carrying no
-    location would leave every prerequisite unsatisfied and a multi-stage batch would report its later stages blocked.
-    """
+    """Verifies that preparation stamps each unit's own tracker location onto the descriptors it hands the engine."""
     unit = _PREPARED_PROJECT_ROOT.joinpath("305", "a_session")
     host = _StubPreparationHost(
-        plan_rows=[plan_row(unit=unit.name, job_name="hash", specifier="a")],
-        state_rows=[state_row(unit=unit.name, job_name="hash", specifier="a")],
+        plan_rows=[_build_plan_row(unit=unit.name, job_name="hash", specifier="a")],
+        state_rows=[_build_state_row(unit=unit.name, job_name="hash", specifier="a")],
     )
 
     document = prepare_batch(
@@ -835,6 +823,9 @@ def test_a_prepared_batch_carries_the_tracker_location_the_host_resolved_for_eac
         replan=True,
     )
 
+    # The local engine opens those files directly to seed and extend its recorded outcomes, so descriptors carrying
+    # no location would leave every prerequisite unsatisfied and a multi-stage batch would report its later stages
+    # blocked.
     assert document.jobs[0]["tracker_path"] == str(unit.joinpath(f"{_PIPELINE}_tracker.yaml"))
     assert document.jobs[0]["options"] == {"regenerate_checksum": True}
     assert document.host == "workstation"
@@ -847,11 +838,11 @@ def test_a_prepared_batch_carries_the_tracker_location_the_host_resolved_for_eac
 
 def test_priority_weighs_a_job_by_the_cores_its_dependents_commit() -> None:
     """Verifies that ordering follows the queued work a job holds back, so a root outweighs the leaves it releases."""
-    root = make_pending_job(job_id="root", cores=2)
-    first = make_pending_job(job_id="first", cores=8, prerequisites=("root",))
-    second = make_pending_job(job_id="second", cores=4, prerequisites=("root",))
+    root = _make_pending_job(job_id="root", cores=2)
+    first = _make_pending_job(job_id="first", cores=8, prerequisites=("root",))
+    second = _make_pending_job(job_id="second", cores=4, prerequisites=("root",))
     # Reachable along both middle stages at once, so it is counted a single time.
-    leaf = make_pending_job(job_id="leaf", cores=16, prerequisites=("first", "second"))
+    leaf = _make_pending_job(job_id="leaf", cores=16, prerequisites=("first", "second"))
     jobs = {job.dispatch_key: job for job in (root, first, second, leaf)}
 
     priorities = resolve_dispatch_priorities(jobs=jobs)
@@ -863,8 +854,8 @@ def test_priority_weighs_a_job_by_the_cores_its_dependents_commit() -> None:
 
 def test_a_prerequisite_outside_the_batch_contributes_no_priority() -> None:
     """Verifies that a job the batch does not hold cannot be ordered against the ones it does, so it weighs nothing."""
-    inside = make_pending_job(job_id="inside", cores=4, prerequisites=("outside_the_batch",))
-    other_unit = make_pending_job(job_id="root", cores=4, unit_path=_OTHER_UNIT)
+    inside = _make_pending_job(job_id="inside", cores=4, prerequisites=("outside_the_batch",))
+    other_unit = _make_pending_job(job_id="root", cores=4, unit_path=_OTHER_UNIT)
     jobs = {job.dispatch_key: job for job in (inside, other_unit)}
 
     priorities = resolve_dispatch_priorities(jobs=jobs)
@@ -874,8 +865,8 @@ def test_a_prerequisite_outside_the_batch_contributes_no_priority() -> None:
 
 def test_a_cyclic_ordering_resolves_to_a_finite_priority() -> None:
     """Verifies that a malformed pipeline ordering is weighed poorly rather than recursing without end."""
-    first = make_pending_job(job_id="first", cores=3, prerequisites=("second",))
-    second = make_pending_job(job_id="second", cores=5, prerequisites=("first",))
+    first = _make_pending_job(job_id="first", cores=3, prerequisites=("second",))
+    second = _make_pending_job(job_id="second", cores=5, prerequisites=("first",))
     jobs = {job.dispatch_key: job for job in (first, second)}
 
     priorities = resolve_dispatch_priorities(jobs=jobs)
@@ -887,10 +878,10 @@ def test_a_cyclic_ordering_resolves_to_a_finite_priority() -> None:
 
 def test_submission_orders_every_job_behind_the_jobs_it_waits_on() -> None:
     """Verifies that a dependency names the upstream allocation's identifier, so upstream is submitted first."""
-    leaf = make_pending_job(job_id="leaf", prerequisites=("first", "second"))
-    first = make_pending_job(job_id="first", prerequisites=("root",))
-    second = make_pending_job(job_id="second", prerequisites=("root",))
-    root = make_pending_job(job_id="root")
+    leaf = _make_pending_job(job_id="leaf", prerequisites=("first", "second"))
+    first = _make_pending_job(job_id="first", prerequisites=("root",))
+    second = _make_pending_job(job_id="second", prerequisites=("root",))
+    root = _make_pending_job(job_id="root")
 
     ordered = resolve_submission_order(jobs=[leaf, first, second, root])
 
@@ -899,9 +890,9 @@ def test_submission_orders_every_job_behind_the_jobs_it_waits_on() -> None:
 
 def test_submission_ignores_a_prerequisite_outside_the_batch() -> None:
     """Verifies that a prerequisite the batch does not hold contributes no depth, so its dependent keeps its place."""
-    outside = make_pending_job(job_id="outside", prerequisites=("never_submitted",))
-    other_unit = make_pending_job(job_id="root", unit_path=_OTHER_UNIT)
-    dependent = make_pending_job(job_id="dependent", prerequisites=("root",))
+    outside = _make_pending_job(job_id="outside", prerequisites=("never_submitted",))
+    other_unit = _make_pending_job(job_id="root", unit_path=_OTHER_UNIT)
+    dependent = _make_pending_job(job_id="dependent", prerequisites=("root",))
 
     ordered = resolve_submission_order(jobs=[outside, other_unit, dependent])
 
@@ -911,8 +902,8 @@ def test_submission_ignores_a_prerequisite_outside_the_batch() -> None:
 
 def test_a_cyclic_ordering_resolves_to_a_finite_submission_depth() -> None:
     """Verifies that a cycle is ordered poorly rather than stalling its own submission."""
-    first = make_pending_job(job_id="first", prerequisites=("second",))
-    second = make_pending_job(job_id="second", prerequisites=("first",))
+    first = _make_pending_job(job_id="first", prerequisites=("second",))
+    second = _make_pending_job(job_id="second", prerequisites=("first",))
 
     ordered = resolve_submission_order(jobs=[first, second])
 

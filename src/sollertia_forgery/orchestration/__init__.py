@@ -1,8 +1,4 @@
-"""Provides the orchestration layer: the shared preparation path, the execution hosts, the batch job-execution engine
-and its resource estimators, the pipeline dispatch table, the job descriptors and the graph algorithms that order them,
-the job plan caches, the remote scheduler backend with its submission ledger and its allocation state resolution, the
-running-job reconciliation, the prepared-batch registry with its closure, and the unit maintenance operations.
-"""
+"""Provides the orchestration layer that plans, prepares, dispatches, and closes a batch of processing jobs."""
 
 from .graph import (
     GenericPendingJob,
@@ -32,27 +28,19 @@ from .remote import (
     STALLED_BATCH,
     NO_REMEDIATION,
     GONE_ALLOCATION,
-    HELD_ALLOCATION,
     DROP_REMEDIATION,
-    FAILED_ALLOCATION,
-    PROGRESSING_BATCH,
     RESET_REMEDIATION,
     CANCEL_REMEDIATION,
     RUNNING_ALLOCATION,
-    SETTLED_ALLOCATION,
-    FINISHED_ALLOCATION,
     STRANDED_ALLOCATION,
-    ABANDONED_ALLOCATION,
     AWAITING_CLOSURE_BATCH,
     REMOTE_JOB_WALLTIME_MINUTES,
-    TrackerClaim,
     SchedulerReading,
     AllocationResolution,
     submit_batch,
     classify_batch,
     connect_to_server,
     render_allocation,
-    render_submission,
     cancel_allocations,
     cancel_submissions,
     sync_project_state,
@@ -62,7 +50,6 @@ from .remote import (
     remote_batch_directory,
     resolve_tracker_claims,
     resolve_live_allocations,
-    resolve_slurm_allocation,
     resolve_queried_allocations,
 )
 from .batches import (
@@ -110,20 +97,15 @@ from .maintenance import (
 from .preparation import prepare_batch, resolve_project_root
 
 __all__ = [
-    "ABANDONED_ALLOCATION",
     "AWAITING_CLOSURE_BATCH",
     "BATCH_PIPELINES",
     "CANCEL_REMEDIATION",
     "DATASET_UNIT",
     "DROP_REMEDIATION",
-    "FAILED_ALLOCATION",
-    "FINISHED_ALLOCATION",
     "GONE_ALLOCATION",
-    "HELD_ALLOCATION",
     "LOCAL_HOST_LABEL",
     "NO_REMEDIATION",
     "OUTCOME_FILE_SUFFIX",
-    "PROGRESSING_BATCH",
     "PROJECT_PLAN_SCHEMA",
     "REMOTE_HOST_LABEL",
     "REMOTE_JOB_WALLTIME_MINUTES",
@@ -131,7 +113,6 @@ __all__ = [
     "RESET_REMEDIATION",
     "RUNNING_ALLOCATION",
     "SESSION_UNIT",
-    "SETTLED_ALLOCATION",
     "STALLED_BATCH",
     "STRANDED_ALLOCATION",
     "AllocationResolution",
@@ -143,7 +124,6 @@ __all__ = [
     "SchedulerReading",
     "SubmissionBatch",
     "SubmissionLedger",
-    "TrackerClaim",
     "batch_directory",
     "build_pending_job",
     "cancel_allocations",
@@ -172,7 +152,6 @@ __all__ = [
     "record_prepared_batch",
     "remote_batch_directory",
     "render_allocation",
-    "render_submission",
     "reset_stranded_jobs",
     "reset_tracked_jobs",
     "resolve_allocations",
@@ -188,7 +167,6 @@ __all__ = [
     "resolve_project_root",
     "resolve_queried_allocations",
     "resolve_session_plan",
-    "resolve_slurm_allocation",
     "resolve_tracker_claims",
     "run_batch_job",
     "submit_batch",
