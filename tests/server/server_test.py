@@ -278,7 +278,7 @@ def test_server_raises_permission_error_when_credentials_are_rejected(
     """Verifies that a rejected handshake fails immediately rather than retrying, releasing the client it opened."""
     unreachable_transport.error = unreachable_transport.authentication_exception("rejected")
 
-    with pytest.raises(PermissionError, match=r"Authentication failed when connecting to test\.server\.com"):
+    with pytest.raises(PermissionError, match=r"Unable to connect to the remote compute server test\.server\.com"):
         Server(configuration=server_configuration)
 
     assert unreachable_transport.attempts == 1
@@ -295,7 +295,7 @@ def test_server_raises_connection_error_after_exhausting_retries(
     """Verifies that an unreachable host is retried a fixed number of times before the runtime is aborted, and that
     every client the loop replaced was released.
     """
-    with pytest.raises(ConnectionError, match=r"Could not connect to test\.server\.com after 30 retries"):
+    with pytest.raises(ConnectionError, match=r"Unable to connect to the remote compute server test\.server\.com"):
         Server(configuration=server_configuration)
 
     assert unreachable_transport.attempts == 31
@@ -421,13 +421,11 @@ def test_abort_jobs_cancels_every_named_allocation(
 def test_abort_jobs_reports_a_cancellation_the_scheduler_refused(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that a cancellation the scheduler rejected is raised rather than passed over.
-
-    A caller resets a job's tracker behind this call, so a cancellation that silently failed would let the allocation
-    it named write into a tracker that was cleared underneath it.
-    """
+    """Verifies that a cancellation the scheduler rejected is raised rather than passed over."""
     stub_ssh_transport.respond(prefix="scancel ", stderr="scancel: error: Access/permission denied", return_code=1)
 
+    # A caller resets a job's tracker behind this call, so a cancellation that silently failed would let the
+    # allocation it named write into a tracker that was cleared underneath it.
     with pytest.raises(RuntimeError, match=r"Unable to cancel the named allocations"):
         connected_server.abort_jobs(slurm_job_ids=("1000",))
 
@@ -452,11 +450,7 @@ def test_get_job_statuses_without_identifiers_returns_an_empty_mapping(
 def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that step rows, unparsable rows, and unrequested rows are skipped and a stuck job reports as blocked.
-
-    An identifier the answer carries no row for keeps the seeded ``UNRESOLVED``, which is what tells 'accounting
-    returned nothing about this allocation' apart from 'accounting returned a row this stack cannot read'.
-    """
+    """Verifies that step rows, unparsable rows, and unrequested rows are skipped and a stuck job reports as blocked."""
     stub_ssh_transport.respond(
         prefix="sacct ",
         stdout="malformed-row-without-a-separator\n1000.batch|COMPLETED\n9999|COMPLETED\n1000|PENDING\n1001|COMPLETED\n",
@@ -467,6 +461,8 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
 
     statuses = connected_server.get_job_statuses(slurm_job_ids=("1000", "1001", "1002"))
 
+    # An identifier for which the answer carries no row keeps the seeded UNRESOLVED, which separates accounting
+    # returning nothing about an allocation from accounting returning a row this stack cannot read.
     assert statuses == {
         "1000": JobStatus.BLOCKED,
         "1001": JobStatus.COMPLETED,
@@ -477,18 +473,18 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
 def test_get_job_statuses_reports_a_pending_allocation_the_queue_calls_blocked(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that an allocation called pending by accounting and unsatisfiable by the queue reports as blocked.
-
-    Accounting reports a permanently blocked allocation as pending, so the queue's reason field is the only thing
-    that retires it. Every identifier of an ordinary batch is one that accounting knows, so the queue has to be read
-    for that batch rather than only for one holding an allocation that accounting cannot place.
-    """
+    """Verifies that an allocation called pending by accounting and unsatisfiable by the queue reports as blocked."""
     stub_ssh_transport.job_statuses.update({"1000": "PENDING", "1001": "RUNNING"})
     stub_ssh_transport.blocked_job_ids.add("1000")
 
     statuses = connected_server.get_job_statuses(slurm_job_ids=("1000", "1001"))
 
+    # Accounting reports a permanently blocked allocation as pending, so the queue's reason field is the only thing
+    # that retires it.
     assert statuses == {"1000": JobStatus.BLOCKED, "1001": JobStatus.RUNNING}
+
+    # Every identifier of an ordinary batch is one that accounting knows, so the queue has to be read for that batch
+    # rather than only for one holding an allocation that accounting cannot place.
     assert any(command.startswith("squeue") for command in stub_ssh_transport.commands)
 
 
@@ -507,14 +503,13 @@ def test_get_job_statuses_skips_the_queue_lookup_without_a_pending_allocation(
 def test_get_job_statuses_refuses_to_report_a_state_when_accounting_fails(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that a failed accounting query raises rather than reporting a state for every requested allocation.
-
-    Accounting that cannot answer writes nothing to standard output, which is indistinguishable from an answer holding
-    no row for anything. Answering that way would report a state nothing observed: every requested allocation would
-    read as one accounting holds no row for, which is half of the evidence that the scheduler no longer holds it.
-    """
+    """Verifies that a failed accounting query raises rather than reporting a state for every requested allocation."""
     stub_ssh_transport.respond(prefix="sacct ", stderr="sacct: error: slurmdbd is not responding", return_code=1)
 
+    # Accounting that cannot answer writes nothing to standard output, which is indistinguishable from an answer
+    # holding no row for anything. Answering that way would report a state nothing observed. Every requested
+    # allocation would then read as one for which accounting holds no row, which is half of the evidence that the
+    # scheduler no longer holds it.
     with pytest.raises(RuntimeError, match=r"slurmdbd is not responding"):
         connected_server.get_job_statuses(slurm_job_ids=("1000", "1001"))
 
@@ -560,14 +555,12 @@ def test_get_queued_job_ids_reports_an_empty_queue_as_holding_nothing(
 def test_get_queued_job_ids_refuses_to_report_an_empty_queue_when_the_command_fails(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that a failed queue query raises rather than answering that the queue holds nothing.
-
-    A failed command writes nothing to standard output, which is indistinguishable from an empty queue. Answering
-    that way would supply the other half of the evidence that the scheduler no longer holds an allocation, and every
-    outstanding allocation would then read as gone at once.
-    """
+    """Verifies that a failed queue query raises rather than answering that the queue holds nothing."""
     stub_ssh_transport.respond(prefix="squeue ", stderr="squeue: error: Invalid user id", return_code=1)
 
+    # A failed command writes nothing to standard output, which is indistinguishable from an empty queue. Answering
+    # that way would supply the other half of the evidence that the scheduler no longer holds an allocation, and
+    # every outstanding allocation would then read as gone at once.
     with pytest.raises(RuntimeError, match=r"Invalid user id"):
         connected_server.get_queued_job_ids()
 
@@ -592,12 +585,7 @@ def test_parse_job_status_normalizes_decorated_accounting_states(state: str, exp
 
 
 def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
-    """Verifies that the terminal set holds every settled state and none of the four that a job still leaves.
-
-    ``UNKNOWN`` and ``UNRESOLVED`` are both outside it. A row whose state this enumeration does not model still proves
-    that the scheduler holds the allocation, and an answer carrying no row covers a submission accounting has not
-    registered yet as well as one it has purged. Making either terminal would abandon a live allocation.
-    """
+    """Verifies that the terminal set holds every settled state and none of the four that a job still leaves."""
     settled = frozenset(
         {
             JobStatus.COMPLETED,
@@ -617,6 +605,10 @@ def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
     assert settled == TERMINAL_JOB_STATUSES
     assert JobStatus.PENDING not in TERMINAL_JOB_STATUSES
     assert JobStatus.RUNNING not in TERMINAL_JOB_STATUSES
+
+    # A row whose state this enumeration does not model still proves that the scheduler holds the allocation, and an
+    # answer carrying no row covers a submission accounting has not registered yet as well as one it has purged.
+    # Making either state terminal would abandon a live allocation.
     assert JobStatus.UNKNOWN not in TERMINAL_JOB_STATUSES
     assert JobStatus.UNRESOLVED not in TERMINAL_JOB_STATUSES
 
@@ -626,7 +618,9 @@ def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
 
 def test_pull_raises_for_an_absent_remote_path(connected_server: Server, tmp_path: Path) -> None:
     """Verifies that downloading a path that the server does not hold names the missing path."""
-    with pytest.raises(FileNotFoundError, match=re.escape("/data/sollertia/absent does not exist on the server")):
+    with pytest.raises(
+        FileNotFoundError, match=re.escape("Unable to download /data/sollertia/absent from the remote compute")
+    ):
         connected_server.pull(local_path=tmp_path.joinpath("unused"), remote_path=Path("/data/sollertia/absent"))
 
 
@@ -667,10 +661,10 @@ def test_push_raises_for_an_absent_local_path(connected_server: Server, tmp_path
 
     # The console wraps the rendered message at a width that depends on the temporary path length, so the full
     # message is compared after collapsing the wrapping whitespace.
-    with pytest.raises(FileNotFoundError, match=r"does\s+not\s+exist") as error:
+    with pytest.raises(FileNotFoundError, match=r"Unable\s+to\s+upload") as error:
         connected_server.push(local_path=missing, remote_path=Path("/data/sollertia/absent.txt"))
 
-    assert f"The local path {missing} does not exist." in " ".join(str(error.value).split())
+    assert f"Unable to upload {missing} to the remote compute server." in " ".join(str(error.value).split())
 
 
 def test_push_uploads_a_directory_tree(

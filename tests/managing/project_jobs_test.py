@@ -27,16 +27,19 @@ _SUBJECT_COLUMNS: tuple[str, ...] = ("animal", "session")
 """The columns that identify which session recorded a job row, and the keys against which the manifest joins."""
 
 
-def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
+def _write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
     """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
 
     Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
     this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
 
-    Args: _frame: The frame handed to the writer, which this stand-in never serializes. file: The open file object
-    receiving the artifact. **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args:
+        _frame: The frame handed to the writer, which this stand-in never serializes.
+        file: The open file object receiving the artifact.
+        **_keywords: The serialization options the caller passed, which this stand-in ignores.
 
-    Raises: RuntimeError: Always, standing in for a writer that dies partway through.
+    Raises:
+        RuntimeError: Always, standing in for a writer that dies partway through.
     """
     file.write(b"partial")
     message = "the artifact writer died mid-write"
@@ -121,11 +124,7 @@ def test_the_written_artifact_groups_rows_by_subject_then_pipeline(tmp_path: Pat
 
 
 def test_the_written_rows_order_every_identifier_the_way_it_is_written(tmp_path: Path) -> None:
-    """Verifies that the rows place animal 2 ahead of animal 10 and specifier 2 ahead of specifier 10.
-
-    The animal and the specifier are numbers held as text, so ordering the rows as plain text would put 10 ahead of 2
-    and leave this artifact disagreeing with the manifest against which a reader joins it.
-    """
+    """Verifies that the rows place animal 2 ahead of animal 10 and specifier 2 ahead of specifier 10."""
     rows: list[dict[str, str | None]] = [
         {"animal": "10", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "10"},
         {"animal": "2", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "10"},
@@ -134,6 +133,8 @@ def test_the_written_rows_order_every_identifier_the_way_it_is_written(tmp_path:
 
     frame = pl.read_ipc(source=write_project_jobs(project_directory=tmp_path, job_rows=rows), memory_map=True)
 
+    # The animal and the specifier are numbers held as text, so ordering the rows as plain text would put 10 ahead of
+    # 2 and leave this artifact disagreeing with the manifest against which a reader joins it.
     assert list(zip(frame.get_column("animal"), frame.get_column("specifier"), strict=True)) == [
         ("2", "2"),
         ("2", "10"),
@@ -152,21 +153,19 @@ def test_a_project_that_recorded_no_job_still_gets_its_artifact(tmp_path: Path) 
 def test_a_failed_write_leaves_the_previously_published_artifact_readable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a writer dying mid-write leaves the published artifact whole rather than truncated.
-
-    The readers memory-map the artifact without taking the manifest's lock, so only publishing by rename keeps them
-    off a file that is being rewritten.
-    """
+    """Verifies that a writer dying mid-write leaves the published artifact whole rather than truncated."""
     published = write_project_jobs(
         project_directory=tmp_path,
         job_rows=[{"animal": "305", "session": "s1", "pipeline": "video", "job_name": "motion_energy"}],
     )
 
-    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", _write_partial_then_fail)
 
     with pytest.raises(RuntimeError, match="died mid-write"):
         write_project_jobs(project_directory=tmp_path, job_rows=[])
 
+    # The readers memory-map the artifact without taking the manifest's lock, so publishing by rename keeps them off a
+    # file that is being rewritten.
     assert pl.read_ipc(source=published, memory_map=True).get_column("job_name").to_list() == ["motion_energy"]
     assert [entry.name for entry in tmp_path.iterdir() if entry.name.endswith(".tmp")] == []
 

@@ -23,10 +23,10 @@ def merge_event_streams[ScalarT: np.generic](
         the second.
 
     Args:
-        timestamps_a: The uint64 timestamp array for the first event stream.
-        values_a: The value array for the first event stream.
-        timestamps_b: The uint64 timestamp array for the second event stream.
-        values_b: The value array for the second event stream.
+        timestamps_a: The timestamps of the first event stream.
+        values_a: The values of the first event stream.
+        timestamps_b: The timestamps of the second event stream.
+        values_b: The values of the second event stream.
 
     Returns:
         The chronologically sorted timestamps and the values reordered to match them.

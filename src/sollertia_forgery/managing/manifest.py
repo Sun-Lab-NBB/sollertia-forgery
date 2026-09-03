@@ -369,7 +369,7 @@ class ProjectManifest:
 
     @property
     def data(self) -> pl.DataFrame:
-        """Returns the Polars DataFrame instance that stores the managed manifest file's data."""
+        """Returns the manifest's session rows, one per discovered session, with every column the schema declares."""
         return self._data
 
     @property
@@ -402,16 +402,15 @@ class ProjectManifest:
         )
 
     def get_session_data(self, session: str) -> pl.DataFrame:
-        """Returns a Polars DataFrame that stores detailed information about the current acquisition and processing
-        state of the specified session.
+        """Returns the manifest row recording the current acquisition and processing state of the specified session.
 
         Args:
             session: The unique identifier of the session for which to retrieve the data.
 
         Returns:
-            A Polars DataFrame containing all manifest columns for the specified session: ``animal``, ``date``,
-            ``session``, ``session_path``, ``type``, ``system``, ``notes``, ``complete``, and the per-pipeline done
-            columns ``integrity``, ``two_photon``, ``runtime``, ``microcontroller``, and ``video``.
+            Every manifest column held for the specified session, which is ``animal``, ``date``, ``session``,
+            ``session_path``, ``type``, ``system``, ``notes``, ``complete``, and the per-pipeline done columns
+            ``integrity``, ``two_photon``, ``runtime``, ``microcontroller``, and ``video``.
         """
         return self._data.filter(pl.col("session") == session)
 
@@ -422,7 +421,7 @@ class ProjectManifest:
             session: The unique identifier of the session for which to retrieve the participating animal's identifier.
 
         Returns:
-            The unique identifier of the animal that participated in the specified session.
+            The animal identifier recorded on the session's manifest row.
 
         Raises:
             ValueError: If the specified session is not found in the manifest file.
@@ -446,7 +445,7 @@ class ProjectManifest:
             session: The unique identifier of the session for which to retrieve the data acquisition system.
 
         Returns:
-            The data acquisition system used to acquire the specified session's data.
+            The acquisition system recorded on the session's manifest row.
 
         Raises:
             ValueError: If the specified session is not found in the manifest file.
@@ -512,7 +511,7 @@ class ProjectManifest:
         only affects the printed views and never the identifiers against which the other query methods resolve.
         """
         return natural_sort(frame=self._data, by=["animal", "session"]).with_columns(
-            pl.int_range(1, pl.len() + 1).over("animal").alias("session"),
+            pl.int_range(start=1, end=pl.len() + 1).over("animal").alias("session"),
             pl.col("date").dt.truncate("1s").alias("date"),
         )
 
@@ -653,20 +652,21 @@ def _assert_status_column_coverage() -> None:
     roster this function enumerates carries every declared column and names no column the manifest does not hold.
 
     Notes:
-        Runs at import, so a pipeline added to ``SESSION_PIPELINES`` without a status column here, or a status column
-        left out of a roster that must name it, fails the moment this module loads rather than partway through a
-        generation pass over a project. A column left out of the summary view, the filterable axes, or the listed
-        fields is otherwise silent, since each of those rosters reports one column fewer than the manifest holds.
+        Runs at import, so a pipeline added to ``SESSION_PIPELINES`` without a status column here fails the moment
+        this module loads. A status column left out of a roster that must name it fails the same way, rather than
+        partway through a generation pass over a project. A column left out of the summary view, the filterable axes,
+        or the listed fields is otherwise silent, since each of those rosters reports one column fewer than the
+        manifest holds.
 
         Each roster is required to carry every status column rather than to equal the set of them, since the rosters
         also name the identity and acquisition columns that no pipeline writes. The reverse containment is checked
-        against ``_PROJECT_MANIFEST_SCHEMA``, which every roster names a subset of. An entry naming a column the
+        against ``_PROJECT_MANIFEST_SCHEMA``, of which every roster names a subset. An entry naming a column the
         manifest no longer holds is otherwise silent too, since a breakdown skips an axis the frame lacks and a
         projection skips a field the row lacks, so the stale entry simply stops appearing.
 
-        A roster that names only the identity or notes columns, such as the detail fields a session listing splices
-        onto the semi-fields or the columns the notes view selects, is deliberately outside this check, since such a
-        roster carries no status column by design.
+        A roster that names only the identity or notes columns is deliberately outside this check, since it carries
+        no status column by design. The detail fields a session listing splices onto the semi-fields, and the columns
+        the notes view selects, are two such rosters.
 
     Raises:
         RuntimeError: If a per-session pipeline declares no status column, a column names a pipeline for which no

@@ -1,10 +1,5 @@
 """Provides the system-agnostic dataset forging pipeline."""
 
-from sollertia_shared_assets import (
-    DatasetData,
-    DatasetSession,
-)
-
 from .state import (
     DATASET_STATE_FILENAME,
     dataset_state_path,
@@ -30,8 +25,6 @@ __all__ = [
     "FORGING_JOB_NAME",
     "MULTIDAY_DISCOVERY_JOB_NAME",
     "MULTIDAY_EXTRACTION_JOB_NAME",
-    "DatasetData",
-    "DatasetSession",
     "dataset_state_path",
     "define_forging_dataset",
     "discover_forging_jobs",

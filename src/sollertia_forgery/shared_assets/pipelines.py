@@ -51,7 +51,8 @@ _SESSION_TRACKER_LOCATIONS: dict[ProcessingPipelines, Callable[[SessionData], Pa
     ProcessingPipelines.VIDEO: lambda session: session.processed_data.video_tracker_path,
     ProcessingPipelines.TWO_PHOTON: lambda session: session.processed_data.two_photon_tracker_path,
 }
-"""Maps each per-session pipeline to the accessor that resolves its processing tracker from a loaded session.
+"""The mapping from each per-session pipeline to the accessor that resolves its processing tracker from a loaded
+session.
 
 Notes:
     The checksum tracker sits under the acquired data, since that pipeline verifies the acquired data in place. Every

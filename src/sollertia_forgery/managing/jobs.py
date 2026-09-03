@@ -50,10 +50,9 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, str | i
     """Writes the project job artifact from the rows the manifest's walk collected.
 
     Notes:
-        Takes no lock of its own, because the manifest's writer calls this while holding the lock that serializes the
-        whole generation. That lock excludes other writers rather than readers, and the two artifacts are
-        published by two separate renames. The writer lands this one first, so a reader at worst holds job rows
-        for a session the manifest does not list yet.
+        Takes no lock of its own and runs under the lock that serializes the whole generation. That lock excludes
+        other writers rather than readers, and the two artifacts are published by two separate renames. This artifact
+        lands first, so a reader at worst holds job rows for a session the manifest does not list yet.
 
         Stored uncompressed so a reader memory-maps it rather than decoding it. Opening it then costs a page fault
         rather than a full decode of every row.

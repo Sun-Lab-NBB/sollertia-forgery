@@ -58,8 +58,8 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
         include_sessions: Determines whether the search covers the project's acquired sessions alongside its datasets.
 
     Returns:
-        A _ProjectMarkers instance holding the project's dataset directories and acquired sessions. The sessions are
-        empty when the search did not cover them.
+        The project's forged dataset directories and its acquired sessions. The sessions are empty when the search did
+        not cover them.
 
     Raises:
         FileNotFoundError: If the server holds no directory at the project path.
@@ -102,28 +102,6 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
     )
 
 
-def _discover_project_sessions(project: str, server: Server) -> tuple[DatasetSession, ...]:
-    """Discovers all sessions stored under the project's directory on the remote compute server's data root.
-
-    Notes:
-        Dataset directories carry a dataset.yaml marker and are skipped, so a dataset's session hierarchy is never
-        returned as an animal's sessions.
-
-    Args:
-        project: The name of the project for which to discover sessions.
-        server: The Server instance used to communicate with the remote compute server.
-
-    Returns:
-        A tuple of DatasetSession instances representing all discovered sessions, in natural sort order.
-
-    Raises:
-        FileNotFoundError: If the server holds no directory for the named project.
-        RuntimeError: If the server-side search reached only part of the project's tree.
-    """
-    markers = discover_project_markers(project_path=server.root.joinpath(project), server=server)
-    return markers.sessions
-
-
 def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
     """Discovers and reports all sessions stored under the project's directory on the remote compute server.
 
@@ -131,7 +109,7 @@ def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
         project: The name of the project whose data to discover.
 
     Returns:
-        A tuple of DatasetSession instances representing all discovered sessions.
+        The project's acquired sessions, in natural sort order.
     """
     console.echo(message=f"Discovering '{project}' project's sessions on the remote server...", level=LogLevel.INFO)
 
@@ -147,3 +125,25 @@ def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
         console.echo(message=f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}'.")
 
     return discovered_sessions
+
+
+def _discover_project_sessions(project: str, server: Server) -> tuple[DatasetSession, ...]:
+    """Discovers all sessions stored under the project's directory on the remote compute server's data root.
+
+    Notes:
+        Dataset directories carry a dataset.yaml marker and are skipped, so a dataset's session hierarchy is never
+        returned as an animal's sessions.
+
+    Args:
+        project: The name of the project for which to discover sessions.
+        server: The Server instance used to communicate with the remote compute server.
+
+    Returns:
+        The sessions the project's animals acquired, in natural sort order.
+
+    Raises:
+        FileNotFoundError: If the server holds no directory for the named project.
+        RuntimeError: If the server-side search reached only part of the project's tree.
+    """
+    markers = discover_project_markers(project_path=server.root.joinpath(project), server=server)
+    return markers.sessions

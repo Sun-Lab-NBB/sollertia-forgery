@@ -41,7 +41,7 @@ def reported_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return messages
 
 
-def read_job_state(session: SessionData) -> tuple[str, str | None]:
+def _read_job_state(session: SessionData) -> tuple[str, str | None]:
     """Reads the status name and error message of the session's single checksum job.
 
     Args:
@@ -64,7 +64,7 @@ def test_regeneration_establishes_the_stored_checksum(training_session: SessionD
 
     stored = training_session.raw_data.checksum_path.read_text().strip()
     assert len(stored) == 32
-    assert read_job_state(session=training_session) == ("SUCCEEDED", None)
+    assert _read_job_state(session=training_session) == ("SUCCEEDED", None)
 
 
 def test_verification_confirms_untouched_raw_data(training_session: SessionData) -> None:
@@ -78,7 +78,7 @@ def test_verification_confirms_untouched_raw_data(training_session: SessionData)
     run_checksum_processing_pipeline(session_path=session_path, workers=1)
 
     assert training_session.raw_data.checksum_path.read_text().strip() == baseline
-    assert read_job_state(session=training_session) == ("SUCCEEDED", None)
+    assert _read_job_state(session=training_session) == ("SUCCEEDED", None)
 
 
 def test_verification_condemns_raw_data_that_changed(training_session: SessionData) -> None:
@@ -90,7 +90,7 @@ def test_verification_condemns_raw_data_that_changed(training_session: SessionDa
 
     run_checksum_processing_pipeline(session_path=session_path, workers=1)
 
-    status, error_message = read_job_state(session=training_session)
+    status, error_message = _read_job_state(session=training_session)
     assert status == "FAILED"
     assert error_message is not None
     assert "Raw data integrity compromised" in error_message
@@ -134,18 +134,17 @@ def test_verification_without_a_stored_value_reports_how_to_establish_one(traini
 def test_a_write_fault_marks_the_job_failed_before_it_propagates(training_session: SessionData) -> None:
     """Verifies that a regeneration that cannot store its result records the fault on the tracker and re-raises it
     unchanged.
-
-    The stored value's location is occupied by a directory, so writing the freshly computed checksum faults inside the
-    calculation itself, which is the one place this pipeline's failure envelope has to cover.
     """
     training_session.raw_data.checksum_path.mkdir()
 
+    # Occupying the stored value's location with a directory faults the write inside the calculation itself, which is
+    # the one place this pipeline's failure envelope has to cover.
     with pytest.raises(IsADirectoryError):
         run_checksum_processing_pipeline(
             session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
         )
 
-    status, error_message = read_job_state(session=training_session)
+    status, error_message = _read_job_state(session=training_session)
     assert status == "FAILED"
     assert error_message is not None
     assert error_message.startswith("IsADirectoryError: ")
@@ -175,7 +174,11 @@ def test_a_session_with_nothing_to_checksum_is_refused_before_the_tracker_is_tou
     """Verifies that a session whose raw data never arrived makes no job possible, so the run is refused by name and the
     tracker is left exactly as it was found.
     """
-    monkeypatch.setattr(checksum_module, "_has_checksummable_data", lambda raw_data_path: False)  # noqa: ARG005
+    monkeypatch.setattr(
+        checksum_module,
+        "_has_checksummable_data",
+        lambda raw_data_path: False,  # noqa: ARG005 - the stand-in answers for every path.
+    )
 
     with pytest.raises(ValueError, match="holds no file the checksum covers"):
         run_checksum_processing_pipeline(
@@ -198,7 +201,11 @@ def test_a_session_that_lost_its_raw_data_keeps_its_recorded_verdict(
     recorded = ProcessingTracker(file_path=tracker_path).snapshot()
     assert all(state.status is ProcessingStatus.SUCCEEDED for state in recorded.values())
 
-    monkeypatch.setattr(checksum_module, "_has_checksummable_data", lambda raw_data_path: False)  # noqa: ARG005
+    monkeypatch.setattr(
+        checksum_module,
+        "_has_checksummable_data",
+        lambda raw_data_path: False,  # noqa: ARG005 - the stand-in answers for every path.
+    )
     with pytest.raises(ValueError, match="holds no file the checksum covers"):
         run_checksum_processing_pipeline(
             session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
@@ -230,13 +237,12 @@ def test_an_absent_raw_data_directory_has_nothing_to_checksum(tmp_path: Path) ->
 def test_a_file_stored_below_the_raw_data_root_is_still_covered_by_the_checksum(tmp_path: Path) -> None:
     """Verifies that acquired data lands in per-source subdirectories, so coverage is decided by the full walk the
     checksum runs.
-
-    A subdirectory is not itself a coverable file, so a raw data directory holding only empty subdirectories is as
-    unprocessable as an empty one.
     """
     raw_data = tmp_path.joinpath("raw_data")
     raw_data.joinpath("camera_frames").mkdir(parents=True)
 
+    # A subdirectory is not itself a coverable file, so a raw data directory holding only empty subdirectories is as
+    # unprocessable as an empty one.
     assert not _has_checksummable_data(raw_data_path=raw_data)
 
     raw_data.joinpath("camera_frames", "acquired.bin").write_bytes(b"data")

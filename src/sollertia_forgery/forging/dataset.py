@@ -68,7 +68,7 @@ def resolve_dataset(
             provided list holds for them.
 
     Returns:
-        The resolved DatasetData instance.
+        The dataset that now holds the requested session set.
 
     Raises:
         ValueError: If the arguments contradict each other or leave the dataset with no definition from which to build.
@@ -191,7 +191,7 @@ def _create_dataset(
             accepted as the dataset's reference type.
 
     Returns:
-        The newly created DatasetData instance.
+        The dataset hierarchy built from the provided sessions.
 
     Raises:
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
@@ -456,11 +456,11 @@ def _copy_animal_surgery_files(
 
     Surgery metadata is per-animal, so each animal receives a single copy taken from its most recent source session.
     The metadata is optional, and an animal whose latest session carries no snapshot is skipped with a warning. The
-    provided paths bound which animals are covered, so extending a dataset covers the animals it gained.
+    provided paths bound which animals are covered.
 
     Args:
         dataset_name: The name of the dataset, used for reporting.
-        dataset: The DatasetData instance to which the animals belong.
+        dataset: The dataset that holds the covered animals.
         source_session_paths: The resolved source session directory paths whose animals to cover.
 
     Raises:

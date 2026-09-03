@@ -74,6 +74,13 @@ class ForgingAssembler(Protocol):
         """Assembles the source session's data into the target dataset's ``data.feather``."""
 
 
+class MicrocontrollerParser(Protocol):
+    """Defines the call signature of the microcontroller module parsers an acquisition system donates."""
+
+    def __call__(self, event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
+        """Parses one hardware module's extracted events into the session's behavior feathers."""
+
+
 class _AssemblyGeometryResolver(Protocol):
     """Defines the call signature of the assembly-geometry resolver an acquisition system donates."""
 
@@ -86,13 +93,6 @@ class _AssemblySourceResolver(Protocol):
 
     def __call__(self, session: SessionData) -> tuple[int, ...]:
         """Reports the height at which the system's own assembler holds each source it reads for the session."""
-
-
-class MicrocontrollerParser(Protocol):
-    """Defines the call signature of the microcontroller module parsers an acquisition system donates."""
-
-    def __call__(self, event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-        """Parses one hardware module's extracted events into the session's behavior feathers."""
 
 
 class _RuntimeParser(Protocol):
@@ -128,13 +128,10 @@ class _ForgingAssemblyAsset:
     """Bundles an acquisition system's donated forging assets."""
 
     assembler: ForgingAssembler
-    """The picklable, module-level worker that assembles one session's ``data.feather``. The agnostic forging
-    pipeline invokes it once per session.
-    """
+    """The picklable, module-level worker that assembles one session's ``data.feather``."""
     column_descriptions: dict[str, str]
     """The mapping from each column name that the assembler can emit into ``data.feather`` to its human-readable
-    description. The agnostic forging pipeline bakes it into the dataset's ``data_descriptions.feather`` once, at
-    dataset-definition time.
+    description.
     """
 
 
@@ -144,12 +141,11 @@ class _CindraConfigurationAsset:
 
     resolve_single_recording: Callable[[SessionData], SingleRecordingConfiguration]
     """The resolver that returns the system's single-recording cindra configuration for the session, or raises when
-    it cannot resolve one. The agnostic two-photon pipeline calls it for the session it processes.
+    it cannot resolve one.
     """
     resolve_multi_recording: Callable[[SessionData], MultiRecordingConfiguration | None]
     """The resolver that returns the system's multi-recording cindra configuration for the session, or None when the
-    system performs no cross-recording tracking for it. The agnostic forging pipeline calls it once per animal in the
-    dataset and skips the animals for which it returns None.
+    system performs no cross-recording tracking for it.
     """
 
 
@@ -172,16 +168,14 @@ _MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict
     AcquisitionSystems.MESOSCOPE_VR: get_module_event_codes,
 }
 """Maps each acquisition system to the module-level accessor returning its ``(module_type, module_id) -> event
-codes`` mapping for every module the system parses. The agnostic microcontroller pipeline derives each controller's
-extraction filter from this mapping, so a system's event codes live next to the parsers that read them.
+codes`` mapping for every module the system parses.
 """
 
 _MICROCONTROLLER_ELIGIBILITY_REGISTRY: dict[AcquisitionSystems, Callable[[SessionData], set[tuple[int, int]]]] = {
     AcquisitionSystems.MESOSCOPE_VR: get_eligible_modules,
 }
 """Maps each acquisition system to the module-level accessor returning the hardware modules a given session
-configured for use. The agnostic microcontroller pipeline narrows each controller's extraction filter to these
-modules, so a system's eligibility rules live next to the parsers that apply them.
+configured for use.
 """
 
 _FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
@@ -191,20 +185,18 @@ _FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
     ),
 }
 """Maps each acquisition system to the ``_ForgingAssemblyAsset`` bundling its per-session assembly worker with its
-column-description mapping. Dataset definition, the cindra multi-recording stages, in-pipeline job and tracker
-preparation, the per-dataset column-description binding, and shared-asset re-export are owned by the agnostic
-``forging`` package.
+column-description mapping.
 """
 
 _ASSEMBLY_GEOMETRY_REGISTRY: dict[AcquisitionSystems, _AssemblyGeometryResolver] = {
     AcquisitionSystems.MESOSCOPE_VR: resolve_mesoscope_assembly_geometry,
 }
 """Maps each acquisition system to the module-level resolver reporting the heights at which its own assembler holds a
-session's assembled frame and each source that frame is built from. Which clock the frame is placed on, which of a
-session's clocks qualify to be it, and which sources the assembler reads at all belong to the system that assembles
-the session rather than to the pass that sizes it. The sizing pass charges its per-sample terms against the reported
-heights, so a system reporting a height its assembler never works at has its job reserved at a figure that job never
-reaches, in whichever direction the difference falls.
+session's assembled frame and each source from which that frame is built. The clock on which the frame is placed and
+which of a session's clocks qualify to be it belong to the system that assembles the session rather than to the pass
+that sizes it. The same holds for which sources the assembler reads at all. The sizing pass charges its per-sample
+terms against the reported heights. A system reporting a height at which its assembler never works therefore has its
+job reserved at a figure that job never reaches, in whichever direction the difference falls.
 """
 
 _ASSEMBLY_SOURCE_REGISTRY: dict[AcquisitionSystems, _AssemblySourceResolver] = {
@@ -216,9 +208,9 @@ each source it reads for one session.
 Notes:
     This is the narrower of the two assembly donations, and it is the one every assembly model consults. A session
     whose assembly places its frame on an imaging clock has no camera reference clock to report, so the geometry
-    donation does not describe it, while the sources it reads are the same family of per-clock arrays every assembly
-    holds. The geometry donation therefore reports its own sources through this one, which keeps a single statement
-    of what each of a system's assemblers reads.
+    donation does not describe it. The sources it reads are the same family of per-clock arrays every assembly holds.
+    The geometry donation therefore reports its own sources through this one, which keeps a single statement of what
+    each of a system's assemblers reads.
 
     Which sources an assembler reads, and how that set differs between the session types one system assembles, belong
     to the system rather than to the pass that sizes it. The sizing pass charges its per-sample term against every
@@ -242,8 +234,7 @@ _CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, _CindraConfigurationAss
     ),
 }
 """Maps each acquisition system to the ``_CindraConfigurationAsset`` bundling its single- and multi-recording
-configuration resolvers. The agnostic two-photon and forging pipelines obtain a runnable cindra configuration through
-these resolvers, so each system decides for itself how its configuration is derived.
+configuration resolvers.
 """
 
 _MULTI_RECORDING_SESSION_TYPE_REGISTRY: dict[AcquisitionSystems, frozenset[SessionTypes]] = {
@@ -253,9 +244,9 @@ _MULTI_RECORDING_SESSION_TYPE_REGISTRY: dict[AcquisitionSystems, frozenset[Sessi
 
 Notes:
     The multi-recording resolver decides the same question per session, but answering it needs a loaded session and
-    therefore the source data. Declaring the session types separately lets the forging pipeline read the answer from a
-    dataset's own recorded type. A dataset therefore keeps growing while part of its source data lives elsewhere.
-    A system that tracks nothing across recordings declares an empty set.
+    therefore the source data. Declaring the session types separately lets a caller read the answer from a dataset's
+    own recorded type. A dataset therefore keeps growing while part of its source data lives elsewhere. A system that
+    tracks nothing across recordings declares an empty set.
 """
 
 _RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, _RuntimeParser]] = {
@@ -270,19 +261,16 @@ _TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, _TwoPhotonDataLocator] = {
     AcquisitionSystems.MESOSCOPE_VR: locate_two_photon_data,
 }
 """Maps each acquisition system to the module-level locator that resolves the loaded session's raw two-photon
-(calcium-imaging) directory, which the agnostic two-photon worker hands to the cindra single-recording pipeline as
-its input. Every system donates a locator, and a system that produces no two-photon data donates one returning the
-path it would use.
+(calcium-imaging) directory. Every system donates a locator, and a system that produces no two-photon data donates one
+returning the path it would use.
 """
 
 _POSE_PREDICTION_REGISTRY: dict[AcquisitionSystems, _PosePredictionLocator] = {
     AcquisitionSystems.MESOSCOPE_VR: locate_mesoscope_pose_predictions,
 }
 """Maps each acquisition system to the module-level locator that resolves the externally-produced pose-prediction file
-its video-tracking stage reads. The naming of that file belongs to the system that produces it. Job discovery
-consults this locator to decide whether a session supports a tracking job, and the sizing pass consults it to read the
-prediction table's row and column counts, from which the job's working set is charged. A system that performs no video
-tracking donates a locator returning None.
+its video-tracking stage reads. The naming of that file belongs to the system that produces it. A system that performs
+no video tracking donates a locator returning None.
 """
 
 _VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, _VideoTracker] = {
@@ -290,8 +278,8 @@ _VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, _VideoTracker] = {
 }
 """Maps each acquisition system to the module-level function that performs all of that system's video tracking. The
 function locates its own externally-produced DeepLabCut ``.h5`` predictions, parses the bodyparts it targets, and
-writes its outputs into the session's processed video-data directory. The agnostic video pipeline runs it once per
-session, and a system donates a no-op function when it performs no video tracking.
+writes its outputs into the session's processed video-data directory. A system donates a no-op function when it performs
+no video tracking.
 """
 
 
@@ -299,8 +287,7 @@ def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Forging
     """Resolves the per-session forging data-assembly worker registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the dataset being forged, for example the value carried by
-            ``DatasetData.acquisition_system``.
+        system: The acquisition system that recorded the dataset being forged.
 
     Returns:
         The registered assembly worker.
@@ -317,8 +304,7 @@ def resolve_forging_admission_pipelines(
     """Resolves the per-session-type pipeline requirements a session must satisfy to join the system's datasets.
 
     Args:
-        system: The acquisition system that recorded the session, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session.
 
     Returns:
         The mapping from session type to the pipelines that must report every job as succeeded. A session type absent
@@ -334,13 +320,11 @@ def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dic
     """Resolves the dataset column-description mapping registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the dataset being forged, for example the value carried by
-            ``DatasetData.acquisition_system``.
+        system: The acquisition system that recorded the dataset being forged.
 
     Returns:
         The mapping from each column name that the system's assembly worker can emit into ``data.feather`` to its
-        human-readable description. The agnostic forging pipeline bakes it into the dataset's
-        ``data_descriptions.feather`` at dataset-definition time.
+        human-readable description.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -352,13 +336,12 @@ def resolve_assembly_geometry_resolver(system: str | AcquisitionSystems) -> _Ass
     """Resolves the assembly-geometry resolver registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the dataset being forged, for example the value carried by
-            ``DatasetData.acquisition_system``.
+        system: The acquisition system that recorded the dataset being forged.
 
     Returns:
-        The registered resolver, which reports the samples the reference clock its system's assembler settles on
-        holds and the samples each source that assembler reads holds, and refuses a session for which that assembler
-        would settle on no reference clock at all.
+        The registered resolver. It reports the samples held by the reference clock on which its system's assembler
+        settles, together with the samples held by each source that assembler reads. It refuses a session for which
+        that assembler would settle on no reference clock at all.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -370,12 +353,11 @@ def resolve_assembly_source_resolver(system: str | AcquisitionSystems) -> _Assem
     """Resolves the assembly-source resolver registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the dataset being forged, for example the value carried by
-            ``DatasetData.acquisition_system``.
+        system: The acquisition system that recorded the dataset being forged.
 
     Returns:
-        The registered resolver, which reports the samples each source the system's assembler reads for one session
-        holds on that source's own clock, routed by the session's own type.
+        The registered resolver, which reports the samples held by each source the system's assembler reads for one
+        session, counted on that source's own clock and routed by the session's own type.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -389,12 +371,10 @@ def resolve_single_recording_configuration_resolver(
     """Resolves the single-recording cindra configuration resolver registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
-        The registered resolver. The agnostic two-photon pipeline calls it with the session it processes to obtain a
-        runnable single-recording configuration.
+        The registered resolver, which returns the system's single-recording cindra configuration for one session.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -408,12 +388,11 @@ def resolve_multi_recording_configuration_resolver(
     """Resolves the multi-recording cindra configuration resolver registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the dataset being forged, for example the value carried by
-            ``DatasetData.acquisition_system``.
+        system: The acquisition system that recorded the dataset being forged.
 
     Returns:
-        The registered resolver. The agnostic forging pipeline calls it once per animal in the dataset to obtain a
-        runnable multi-recording configuration, and skips the animals for which it returns None.
+        The registered resolver, which returns None when the system performs no cross-recording tracking for the
+        session.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -430,8 +409,7 @@ def resolve_multi_recording_session_types(system: str | AcquisitionSystems) -> f
         from the dataset's own recorded session type rather than from its animals' source data.
 
     Args:
-        system: The acquisition system that recorded the dataset being forged, for example the value carried by
-            ``DatasetData.acquisition_system``.
+        system: The acquisition system that recorded the dataset being forged.
 
     Returns:
         The session types whose animals the system registers against each other, which is empty for a system that
@@ -447,13 +425,11 @@ def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dic
     """Resolves the microcontroller module event codes registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
-        A mapping from each ``(module_type, module_id)`` pair that the system parses to the tuple of event codes its
-        parser reads. The agnostic microcontroller pipeline builds every controller's extraction filter from this
-        mapping.
+        A mapping from each ``(module_type, module_id)`` pair that the system parses to the event codes its parser
+        reads.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -468,13 +444,11 @@ def resolve_eligible_microcontroller_modules(
     """Resolves the microcontroller modules the target session configured for use.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
         session: The loaded session whose hardware state determines module eligibility.
 
     Returns:
-        The ``(module_type, module_id)`` pairs the session configured for use. The agnostic microcontroller pipeline
-        narrows every controller's extraction filter to these modules.
+        The ``(module_type, module_id)`` pairs the session configured for use.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -486,12 +460,10 @@ def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tu
     """Resolves the microcontroller module parsers registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
-        A mapping from each ``(module_type, module_id)`` pair that the system parses to its parser. The agnostic
-        microcontroller pipeline treats this mapping as the set of parseable modules for the session.
+        A mapping from each ``(module_type, module_id)`` pair that the system parses to its parser.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -508,13 +480,11 @@ def resolve_runtime_binding(system: str | AcquisitionSystems) -> tuple[str, _Run
     """Resolves the runtime source id and parser registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
         A ``(source_id, parser)`` tuple. The source id locates the system's runtime DataLogger archive, and the parser
-        interprets the decoded runtime messages into the system's behavior feathers. The agnostic runtime pipeline uses
-        the source id to find the archive and dispatches the parser once the archive is decoded.
+        interprets the decoded runtime messages into the system's behavior feathers.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -526,12 +496,10 @@ def resolve_two_photon_data_locator(system: str | AcquisitionSystems) -> _TwoPho
     """Resolves the raw two-photon imaging directory locator registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
-        The registered locator. The agnostic two-photon pipeline invokes it with the loaded session to obtain that
-        session's raw two-photon imaging directory (cindra's input).
+        The registered locator, which resolves the session's raw two-photon imaging directory.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -543,8 +511,7 @@ def resolve_pose_prediction_locator(system: str | AcquisitionSystems) -> _PosePr
     """Resolves the pose-prediction locator registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
         The registered locator, which returns the path to the session's pose-prediction file, or None when the session
@@ -560,12 +527,11 @@ def resolve_video_tracking(system: str | AcquisitionSystems) -> _VideoTracker:
     """Resolves the video-tracking function registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the session being processed, for example the value carried by
-            ``SessionData.acquisition_system``.
+        system: The acquisition system that recorded the session being processed.
 
     Returns:
-        The registered tracking function. The agnostic video pipeline runs it once per session, expecting it to
-        perform all of that system's video tracking and to no-op when no DeepLabCut predictions are present.
+        The registered tracking function, which performs all of that system's video tracking and no-ops when no
+        DeepLabCut predictions are present.
 
     Raises:
         ValueError: If the acquisition system is unknown.
@@ -660,8 +626,9 @@ def _assert_registry_coverage() -> None:
             )
             console.error(message=message, error=RuntimeError)
 
-    # A system tracks across recordings only the session types it records, so a declaration naming a type outside the
-    # shared assets library's own is a typo or a stale entry rather than a type about which this library knows more.
+    # A system tracks across recordings only the session types it records. A declaration naming a type outside the
+    # shared assets library's own is therefore a typo or a stale entry rather than a type about which this library knows
+    # more.
     for target_system, tracked_types in sorted(
         _MULTI_RECORDING_SESSION_TYPE_REGISTRY.items(), key=lambda item: item[0].name
     ):
@@ -675,8 +642,8 @@ def _assert_registry_coverage() -> None:
             )
             console.error(message=message, error=RuntimeError)
 
-    # The session types a system records are the shared assets library's to declare, so an admission entry naming a
-    # type outside that declaration is a typo or a stale entry rather than a type about which this library knows
+    # The session types a system records are the shared assets library's to declare. An admission entry naming a type
+    # outside that declaration is therefore a typo or a stale entry rather than a type about which this library knows
     # more. A type that the system records and that this registry omits is not an error, since a session type may
     # deliberately join no dataset.
     for target_system, requirements in sorted(_FORGING_ADMISSION_REGISTRY.items(), key=lambda item: item[0].name):

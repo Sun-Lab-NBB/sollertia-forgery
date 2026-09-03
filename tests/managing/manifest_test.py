@@ -91,7 +91,7 @@ def numbered_animal_manifest(project_root: Path, session_factory: Callable[..., 
     return ProjectManifest(manifest_file=project_manifest_path(project_directory=project_root))
 
 
-def read_manifest(project_root: Path) -> pl.DataFrame:
+def _read_manifest(project_root: Path) -> pl.DataFrame:
     """Reads the manifest artifact of one project into a frame.
 
     Args:
@@ -103,7 +103,7 @@ def read_manifest(project_root: Path) -> pl.DataFrame:
     return pl.read_ipc(source=project_manifest_path(project_directory=project_root), memory_map=True)
 
 
-def printed_animals(printed: str) -> list[str]:
+def _printed_animals(printed: str) -> list[str]:
     """Reads the animal identifier of each data row out of a printed manifest view, in the order it was printed.
 
     Args:
@@ -117,23 +117,7 @@ def printed_animals(printed: str) -> list[str]:
     return [row.split("┆")[0].strip("│ ") for row in rows[1:]]
 
 
-def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
-    """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
-
-    Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
-    this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
-
-    Args: _frame: The frame handed to the writer, which this stand-in never serializes. file: The open file object
-    receiving the artifact. **_keywords: The serialization options the caller passed, which this stand-in ignores.
-
-    Raises: RuntimeError: Always, standing in for a writer that dies partway through.
-    """
-    file.write(b"partial")
-    message = "the artifact writer died mid-write"
-    raise RuntimeError(message)
-
-
-def write_second_partial_then_fail(calls: list[int]) -> Any:
+def _write_second_partial_then_fail(calls: list[int]) -> Any:
     """Builds a frame-writer stand-in that serializes normally until the manifest write, which it fails partway.
 
     Generation publishes the job artifact before the manifest, so failing the first call would abort before the
@@ -175,7 +159,7 @@ def test_generation_records_one_row_per_session_with_its_pipeline_state(
 
     generate_project_manifest(project_directory=project_root)
 
-    frame = read_manifest(project_root=project_root)
+    frame = _read_manifest(project_root=project_root)
     assert dict(frame.schema) == _PROJECT_MANIFEST_SCHEMA
     # The rows are ordered by animal, so the experiment animal precedes the training animal.
     assert frame.get_column("animal").to_list() == ["305", "321"]
@@ -198,11 +182,7 @@ def test_a_pipeline_holding_a_failed_or_a_running_job_is_not_recorded_as_finishe
     mark_session_processed: Callable[[SessionData], None],
     write_tracker: Callable[..., ProcessingTracker],
 ) -> None:
-    """Verifies that a pipeline column reports 1 only when every one of that pipeline's jobs succeeded.
-
-    A crashed pipeline and a pipeline still running both leave work to be done, so recording either as finished would
-    read as a session that needs no re-running.
-    """
+    """Verifies that a pipeline column reports 1 only when every one of that pipeline's jobs succeeded."""
     mark_session_processed(experiment_session)
     failed_job = (f"{ProcessingPipelines.VIDEO.value}_stage", "")
     running_job = (f"{ProcessingPipelines.RUNTIME.value}_stage", "")
@@ -219,9 +199,11 @@ def test_a_pipeline_holding_a_failed_or_a_running_job_is_not_recorded_as_finishe
 
     generate_project_manifest(project_directory=project_root)
 
-    frame = read_manifest(project_root=project_root)
+    frame = _read_manifest(project_root=project_root)
     row = frame.filter(pl.col("session") == experiment_session.session_name).to_dicts()[0]
 
+    # A crashed pipeline and a pipeline still running both leave work to be done, so recording either as finished
+    # would read as a session that needs no re-running.
     assert row[_PIPELINE_STATUS_COLUMNS[ProcessingPipelines.VIDEO]] == 0
     assert row[_PIPELINE_STATUS_COLUMNS[ProcessingPipelines.RUNTIME]] == 0
     untouched_pipelines = (
@@ -237,7 +219,7 @@ def test_the_recorded_date_is_the_session_name_read_as_utc(project_root: Path, t
     generate_project_manifest(project_directory=project_root)
 
     components = [int(part) for part in training_session.session_name.split("-")]
-    recorded = read_manifest(project_root=project_root).get_column("date").to_list()[0]
+    recorded = _read_manifest(project_root=project_root).get_column("date").to_list()[0]
 
     assert recorded == datetime(*components, tzinfo=UTC)
 
@@ -324,7 +306,9 @@ def test_a_session_type_without_a_descriptor_names_the_supported_types(
     training_session: SessionData,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verifies that a session type outside the descriptor registry cannot be snapshotted, so the run names what is."""
+    """Verifies that a session type outside the descriptor registry cannot be snapshotted, so the run names the
+    supported types.
+    """
     monkeypatch.delitem(DESCRIPTOR_REGISTRY, SessionTypes.RUN_TRAINING)
 
     with pytest.raises(ValueError, match="An unsupported session type 'run training' was"):
@@ -335,10 +319,8 @@ def test_a_non_numeric_animal_identifier_is_recorded_as_the_marker_carries_it(
     project_root: Path,
     training_session: SessionData,
 ) -> None:
-    """Verifies that the manifest records the animal identifier as text, matching every other artifact that carries one.
-
-    The marker holds the identifier as free text, so a project whose animal directories are not plain numbers is
-    snapshotted rather than refused at a conversion the schema no longer needs.
+    """Verifies that the manifest records the animal identifier as text, matching every other artifact that carries
+    one.
     """
     marker_path = training_session.raw_data_path.joinpath("session_data.yaml")
     recorded = marker_path.read_text()
@@ -349,6 +331,9 @@ def test_a_non_numeric_animal_identifier_is_recorded_as_the_marker_carries_it(
     generate_project_manifest(project_directory=project_root)
 
     frame = pl.read_ipc(source=project_manifest_path(project_directory=project_root))
+
+    # The marker holds the identifier as free text, so a project whose animal directories are not plain numbers is
+    # snapshotted rather than refused at a conversion the schema no longer needs.
     assert "305-repeat" in frame.get_column("animal").to_list()
 
 
@@ -357,11 +342,7 @@ def test_a_session_emptied_after_discovery_is_left_out_of_the_manifest(
     experiment_session: SessionData,
     training_session: SessionData,
 ) -> None:
-    """Verifies that the walk re-reads each session, so one whose acquired data went away contributes no row.
-
-    Discovery materializes the session list before the manifest lock is taken. Holding that lock from the test parks the
-    run between the two, which is the only window in which a session can lose its raw data mid-generation.
-    """
+    """Verifies that the walk re-reads each session, so one whose acquired data went away contributes no row."""
     manifest_path = project_manifest_path(project_directory=project_root)
     outer_lock = FileLock(str(manifest_path) + ".lock")
     tracker_path = project_root.joinpath(ProcessingTrackers.MANIFEST)
@@ -374,6 +355,8 @@ def test_a_session_emptied_after_discovery_is_left_out_of_the_manifest(
         except BaseException as exception:
             failures.append(exception)
 
+    # Discovery materializes the session list before the manifest lock is taken. Holding that lock from the test
+    # parks the run between the two, which is the only window in which a session can lose its raw data mid-generation.
     outer_lock.acquire()
     worker = threading.Thread(target=_generate)
     worker.start()
@@ -390,7 +373,9 @@ def test_a_session_emptied_after_discovery_is_left_out_of_the_manifest(
     worker.join(timeout=_LOCK_POLL_TIMEOUT_S)
 
     assert not failures
-    assert read_manifest(project_root=project_root).get_column("session").to_list() == [experiment_session.session_name]
+    assert _read_manifest(project_root=project_root).get_column("session").to_list() == [
+        experiment_session.session_name
+    ]
 
 
 def test_a_failed_write_leaves_the_previously_published_manifest_readable(
@@ -400,22 +385,21 @@ def test_a_failed_write_leaves_the_previously_published_manifest_readable(
 ) -> None:
     """Verifies that the manifest is published by rename, so a writer that dies mid-write leaves the mapped file
     untouched.
-
-    Rewriting the destination in place truncates it first, which would leave every reader that memory-maps the manifest
-    without taking its lock facing an unreadable file. The job artifact is published first, so the stand-in lets that
-    write through and dies on the manifest's own publication.
     """
-    published = read_manifest(project_root=project_root).get_column("session").to_list()
+    published = _read_manifest(project_root=project_root).get_column("session").to_list()
 
     calls: list[int] = []
-    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_second_partial_then_fail(calls=calls))
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", _write_second_partial_then_fail(calls=calls))
 
     with pytest.raises(RuntimeError, match="died mid-write"):
         generate_project_manifest(project_directory=project_root)
 
     # Two writes were attempted, so the failure landed on the manifest rather than on the job artifact before it.
     assert len(calls) == 2
-    assert read_manifest(project_root=project_root).get_column("session").to_list() == published
+
+    # Rewriting the destination in place truncates it first, which would leave every reader that memory-maps the
+    # manifest without taking its lock facing an unreadable file.
+    assert _read_manifest(project_root=project_root).get_column("session").to_list() == published
     assert [entry.name for entry in project_root.iterdir() if entry.name.endswith(".tmp")] == []
 
 
@@ -466,10 +450,10 @@ def test_a_roster_that_drops_a_status_column_names_the_roster_and_the_column(
 def test_a_roster_naming_a_column_the_manifest_lacks_names_the_roster_and_the_entry(
     roster_name: str, widened_roster: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that the import-time check names the roster holding an entry the manifest schema does not declare, so a
-    renamed or retired column fails loudly rather than dropping out of every breakdown and listing that skips what the
-    frame does not carry. The schema itself is left out of the parametrization, since it is the authority the other
-    rosters are checked against.
+    """Verifies that the import-time check names the roster holding an entry the manifest schema does not declare. A
+    renamed or retired column therefore fails loudly rather than dropping out of every breakdown and listing that skips
+    what the frame does not carry. The schema itself is left out of the parametrization, since it is the authority
+    against which the other rosters are checked.
     """
     monkeypatch.setattr(f"sollertia_forgery.managing.manifest.{roster_name}", widened_roster)
 
@@ -494,11 +478,9 @@ def test_the_reader_exposes_its_frame_and_its_animals(manifest: ProjectManifest)
 def test_the_animal_roster_is_ordered_the_way_the_identifiers_are_written(
     numbered_animal_manifest: ProjectManifest,
 ) -> None:
-    """Verifies that animal identifiers are numbers held as text, so the roster reports animal 2 before animal 10.
-
-    Ordering them as plain text puts 10 first, which disagrees with the order in which the same identifiers are read
-    and written everywhere else.
-    """
+    """Verifies that animal identifiers are numbers held as text, so the roster reports animal 2 before animal 10."""
+    # Ordering them as plain text puts 10 first, which disagrees with the order in which the same identifiers are
+    # read and written everywhere else.
     assert numbered_animal_manifest.animals == ("2", "10")
 
 
@@ -656,7 +638,7 @@ def test_the_summary_view_prints_the_animals_in_natural_order(
     """
     numbered_animal_manifest.print_summary()
 
-    assert printed_animals(printed=reported_messages[0]) == ["2", "10"]
+    assert _printed_animals(printed=reported_messages[0]) == ["2", "10"]
 
 
 def test_the_notes_view_reports_the_experimenter_text(manifest: ProjectManifest, reported_messages: list[str]) -> None:

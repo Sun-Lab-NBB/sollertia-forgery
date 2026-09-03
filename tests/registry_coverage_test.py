@@ -75,8 +75,7 @@ def test_every_acquisition_system_donates_an_eligibility_accessor():
 
 def test_the_guarded_names_are_every_registry_the_module_declares():
     # The tuple above is what parametrizes the guard test below, so a registry added to the module and left out of it
-    # is a registry nothing checks. Deriving the expectation from the module itself is what closes that gap: the
-    # pose-prediction registry sat unguarded here for exactly as long as nothing tied the two together.
+    # is a registry nothing checks. Deriving the expectation from the module itself is what closes that gap.
     declared = {name for name in vars(registries_module) if name.endswith("_REGISTRY")}
 
     assert declared == set(_DONOR_REGISTRY_NAMES)

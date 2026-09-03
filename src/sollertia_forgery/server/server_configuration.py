@@ -38,8 +38,7 @@ class ServerConfiguration(YamlConfig):
     (raw and processed). All server-side data operations resolve their paths relative to this root."""
     environment: str = ""
     """The name of the shared conda environment, on the remote compute server, in which sollertia-forgery and all of
-    its processing dependencies are installed. Every remote compute job activates this single environment before
-    invoking the ``slf`` CLI, so all processing and forging pipelines share one environment."""
+    its processing dependencies are installed."""
 
 
 def create_server_configuration_file(
@@ -72,11 +71,10 @@ def create_server_configuration_file(
 
 
 def get_server_configuration() -> ServerConfiguration:
-    """Resolves and returns the Sollertia platform compute server's configuration data as a ServerConfiguration
-    instance.
+    """Resolves and validates the Sollertia platform compute server's configuration data.
 
     Returns:
-        The loaded and validated server configuration data, stored in a ServerConfiguration instance.
+        The access credentials, data root, and environment name recorded for the remote compute server.
 
     Raises:
         FileNotFoundError: If the 'server_configuration.yaml' file does not exist in the local Sollertia platform
@@ -121,9 +119,8 @@ def get_server_configuration() -> ServerConfiguration:
 def get_server_configuration_path() -> Path:
     """Returns the path to the ``server_configuration.yaml`` file under the Sollertia platform working directory.
 
-    Returns:
-        The path to the configuration file under the Sollertia platform working directory, resolved without reading
-        the file.
+    Notes:
+        The path is composed rather than read, so it resolves for a working directory that holds no such file yet.
     """
     return get_working_directory().joinpath(CONFIGURATION_DIRECTORY, _SERVER_CONFIGURATION_FILENAME)
 
@@ -134,9 +131,6 @@ def remote_state_path() -> Path:
     Notes:
         One directory holds both halves of what a remote run leaves behind, namely the state artifacts pulled from
         the server and this host's own record of what it submitted.
-
-    Returns:
-        The path to the remote state directory under the Sollertia platform working directory.
     """
     return get_working_directory().joinpath(_REMOTE_STATE_DIRECTORY)
 
@@ -150,8 +144,5 @@ def remote_state_directory(project: str) -> Path:
 
     Args:
         project: The name of the project whose remote state is mirrored.
-
-    Returns:
-        The path to the project's mirror directory under the Sollertia platform working directory.
     """
     return remote_state_path().joinpath(project)

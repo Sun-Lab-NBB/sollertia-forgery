@@ -38,23 +38,26 @@ _SECOND_SESSION: str = "2026-01-03-03-04-05-000006"
 """The session of the second animal, which carries an assembly job alone."""
 
 
-def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
+def _write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
     """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
 
     Publishing through a temporary file hands the writer an open handle rather than a destination path, so this
     stand-in leaves its partial bytes in the temporary that the publication discards rather than in the destination.
 
-    Args: _frame: The frame passed to the writer, which this stand-in never serializes. file: The open file object that
-    receives the artifact. **_keywords: The serialization options passed by the caller, which this stand-in ignores.
+    Args:
+        _frame: The frame passed to the writer, which this stand-in never serializes.
+        file: The open file object that receives the artifact.
+        **_keywords: The serialization options passed by the caller, which this stand-in ignores.
 
-    Raises: RuntimeError: Always, standing in for a writer that dies partway through.
+    Raises:
+        RuntimeError: Always, standing in for a writer that dies partway through.
     """
     file.write(b"partial")
     message = "the artifact writer died mid-write"
     raise RuntimeError(message)
 
 
-def build_dataset(dataset_root: Path, first_animal: str, second_animal: str) -> SimpleNamespace:
+def _build_dataset(dataset_root: Path, first_animal: str, second_animal: str) -> SimpleNamespace:
     """Builds a stand-in dataset whose root and session list drive the state artifact.
 
     Args:
@@ -79,7 +82,7 @@ def build_dataset(dataset_root: Path, first_animal: str, second_animal: str) -> 
 @pytest.fixture
 def dataset(tmp_path: Path) -> SimpleNamespace:
     """Builds a stand-in dataset whose root and session list drive the state artifact."""
-    return build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="305", second_animal="321")
+    return _build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="305", second_animal="321")
 
 
 def _align_tracker(dataset: SimpleNamespace, jobs: list[tuple[str, str]]) -> ProcessingTracker:
@@ -133,19 +136,17 @@ def test_an_empty_dataset_writes_an_artifact_carrying_the_declared_schema(datase
 def test_a_failed_write_leaves_the_previously_published_state_readable(
     dataset: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a writer dying mid-write leaves the published artifact whole rather than truncated.
-
-    The remote backend reads this artifact from a server path without taking the writer's lock, so only publishing
-    by rename keeps it off a file that is being rewritten.
-    """
+    """Verifies that a writer dying mid-write leaves the published artifact whole rather than truncated."""
     _align_tracker(dataset=dataset, jobs=[(FORGING_JOB_NAME, _FIRST_SESSION)])
     published = generate_dataset_state(dataset=dataset)
 
-    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", _write_partial_then_fail)
 
     with pytest.raises(RuntimeError, match="died mid-write"):
         generate_dataset_state(dataset=dataset)
 
+    # The remote backend reads this artifact from a server path without taking the writer's lock, so publishing by
+    # rename keeps the reader off a file that is being rewritten.
     assert pl.read_ipc(source=published, memory_map=True).get_column("job_name").to_list() == [FORGING_JOB_NAME]
     assert [entry.name for entry in published.parent.iterdir() if entry.name.endswith(".tmp")] == []
 
@@ -232,11 +233,8 @@ def test_a_job_name_without_a_scope_stops_the_serialization(dataset: SimpleNames
 
 def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespace) -> None:
     """Verifies that the stored table carries exactly the declared columns and dtypes, and that a failed row carries
-    every field the tracker recorded for it, while a running row and a scheduled row carry the identifier, the scope,
-    and the timestamps their state implies.
-
-    A consumer reads this artifact by schema and addresses a job it finds here by the identifier the row publishes, so a
-    column that carries the wrong field ships a snapshot that names jobs no tracker holds.
+    every field the tracker recorded for it. A running row and a scheduled row carry the identifier, the scope, and the
+    timestamps their state implies.
     """
     tracker = _align_tracker(
         dataset=dataset,
@@ -290,15 +288,13 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
 
 
 def test_the_written_artifact_orders_its_animals_the_way_a_reader_reads_them(tmp_path: Path) -> None:
-    """Verifies that the published rows are ordered naturally, so animal 9 precedes animal 10 rather than following it.
-
-    Animal identifiers are numbers held as text, and every other listing produced by this stack reads them in numeric
-    order, so ordering the snapshot as plain text would disagree with all of them.
-    """
-    numbered = build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="10", second_animal="9")
+    """Verifies that the published rows order naturally, so animal 9 precedes animal 10 rather than following it."""
+    numbered = _build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="10", second_animal="9")
     _align_tracker(dataset=numbered, jobs=[(FORGING_JOB_NAME, _FIRST_SESSION), (FORGING_JOB_NAME, _SECOND_SESSION)])
 
     frame = pl.read_ipc(source=generate_dataset_state(dataset=numbered), memory_map=True)
 
+    # Animal identifiers are numbers held as text, and every other listing this stack produces reads them in numeric
+    # order, so ordering the snapshot as plain text would disagree with all of them.
     assert frame["animal"].to_list() == ["9", "10"]
     assert frame["session"].to_list() == [_SECOND_SESSION, _FIRST_SESSION]

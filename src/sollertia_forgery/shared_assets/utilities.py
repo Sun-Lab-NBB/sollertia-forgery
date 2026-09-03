@@ -13,17 +13,16 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _NATURAL_RANK_PREFIX: str = "__natural_rank_"
-"""The prefix of the temporary rank columns a natural sort adds and drops. Prefixed so a column of the sorted frame
-cannot collide with one."""
+"""The prefix of the temporary rank columns a natural sort adds and drops. The prefix keeps a rank column distinct
+from every column the sorted frame already carries.
+"""
 
 _DELAY_TIMER: PrecisionTimer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
 """The shared timer ``delay_terminal`` uses to delay the runtime's execution."""
 
 
 def delay_terminal() -> None:
-    """Delays the runtime execution for 100 milliseconds using the shared ``_DELAY_TIMER``, so consecutive terminal
-    printouts stay visually separated.
-    """
+    """Delays the runtime execution for 100 milliseconds, so consecutive terminal printouts stay visually separated."""
     _DELAY_TIMER.delay(delay=100, allow_sleep=True, block=False)
 
 
@@ -78,9 +77,9 @@ def count_feather_rows(feather_path: Path) -> int:
     """Counts the rows one feather holds, reading the file's own metadata rather than its values.
 
     Notes:
-        A feather's IPC footer states the rows every record batch it carries holds, so a length query projects no
-        column at all and answers from that footer. The read therefore costs the same on a feather of any height,
-        which is what lets a sizing pass measure a session's sources without loading one of them.
+        A feather's IPC footer states the rows held by every record batch the file carries, so a length query
+        projects no column at all and answers from that footer. The read therefore costs the same on a feather of any
+        height.
 
     Args:
         feather_path: The path to the feather whose height is read.

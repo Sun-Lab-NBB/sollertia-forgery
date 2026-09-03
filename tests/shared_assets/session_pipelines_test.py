@@ -85,10 +85,8 @@ def test_non_session_pipeline_resolution_raises(pipeline: ProcessingPipelines) -
 
 
 def test_every_session_pipeline_declares_a_manifest_status_column() -> None:
-    """Verifies that the manifest declares one status column per per-session pipeline and no others.
-
-    The manifest module asserts this at import, so this test pins the invariant that assertion protects.
-    """
+    """Verifies that the manifest declares one status column per per-session pipeline and no others."""
+    # The manifest module asserts this at import, so this test pins the invariant that assertion protects.
     assert set(_PIPELINE_STATUS_COLUMNS) == set(SESSION_PIPELINES)
 
 
