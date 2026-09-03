@@ -140,6 +140,9 @@ def _make_session(tmp_path: Path, **hardware_overrides: object) -> SimpleNamespa
         raw_data=SimpleNamespace(behavior_data_path=raw_behavior, hardware_state_path=hardware_state_path),
         processed_data=SimpleNamespace(
             microcontroller_data_path=tmp_path / "processed_data" / "microcontroller_data",
+            microcontroller_tracker_path=(
+                tmp_path / "processed_data" / "microcontroller_data" / ProcessingTrackers.MICROCONTROLLER
+            ),
         ),
     )
 
@@ -409,9 +412,9 @@ def test_resolve_two_photon_data_locator_invalid_system_raises() -> None:
 
 def test_locate_two_photon_data_resolves_mesoscope_data_directory(tmp_path: Path) -> None:
     """Verifies that locate_two_photon_data resolves the session's mesoscope_data directory."""
-    # The Mesoscope-VR locator places the raw two-photon imaging data in the 'mesoscope_data' directory under the
-    # session's raw-data root.
-    session = SimpleNamespace(raw_data_path=tmp_path)
+    # The Mesoscope-VR locator reads the 'mesoscope_data' directory resolved by the session's system-specific raw
+    # data sub-dataclass.
+    session = SimpleNamespace(system_raw_data=SimpleNamespace(mesoscope_data_path=tmp_path / "mesoscope_data"))
     assert locate_two_photon_data(session=session) == tmp_path / "mesoscope_data"
 
 

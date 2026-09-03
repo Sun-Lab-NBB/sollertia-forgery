@@ -151,7 +151,7 @@ _UNREADABLE_OUTPUT_ERRORS: tuple[type[Exception], ...] = (OSError, EOFError, Loo
 Notes:
     The archive is a compressed entry store, so a truncated, emptied, or overwritten one fails in the shape of
     whichever layer first reaches the damage: the file layer, the archive layer, or the entry lookup that expects the
-    field the geometry is read from. The four are unrelated types and none of them shares a base narrower than
+    field the geometry is read from. The five are unrelated types and none of them shares a base narrower than
     Exception, so the set is named here rather than approximated by one branch of it.
 
     Every one of them means the same thing to the sizing pass, which is that the recording carries no readable

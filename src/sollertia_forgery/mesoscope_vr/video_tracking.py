@@ -79,6 +79,11 @@ _COORDINATES: tuple[str, str, str] = ("x", "y", "likelihood")
 """The three DLC per-bodypart coordinate channels, in the order each bodypart's columns are read into its per-frame
 ``(x, y, likelihood)`` array."""
 
+_MINIMUM_COLUMN_LEVELS: int = 2
+"""The number of column-index levels a prediction frame must carry to be read as DeepLabCut output. The reader keys
+each column by its trailing (bodypart, coordinate) pair, so a frame whose columns hold fewer levels than that pair is
+not a DeepLabCut prediction frame."""
+
 type _MetricArray = NDArray[np.float64] | NDArray[np.bool_]
 """The per-frame array types the output columns take: floating-point geometry and the boolean state flags."""
 
@@ -267,7 +272,7 @@ def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str,
         ValueError: If the file does not hold a DeepLabCut prediction frame, or a requested bodypart is missing.
     """
     predictions = pd.read_hdf(path_or_buf=h5_path)
-    if not isinstance(predictions, pd.DataFrame):
+    if not isinstance(predictions, pd.DataFrame) or predictions.columns.nlevels < _MINIMUM_COLUMN_LEVELS:
         message = (
             f"Unable to read pupil tracking from '{h5_path.name}'. The file does not contain a DeepLabCut prediction "
             f"frame."

@@ -8,7 +8,9 @@ from .checksum import (
     run_checksum_processing_pipeline,
 )
 from .manifest import (
+    MANIFEST_AXES,
     MANIFEST_JOB_NAME,
+    MANIFEST_SEMI_FIELDS,
     ProjectManifest,
     project_manifest_path,
     generate_project_manifest,
@@ -16,7 +18,9 @@ from .manifest import (
 
 __all__ = [
     "CHECKSUM_JOB_NAME",
+    "MANIFEST_AXES",
     "MANIFEST_JOB_NAME",
+    "MANIFEST_SEMI_FIELDS",
     "ProjectManifest",
     "checksum_job_prerequisites",
     "discover_checksum_jobs",

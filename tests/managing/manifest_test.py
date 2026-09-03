@@ -18,7 +18,9 @@ from sollertia_shared_assets import DESCRIPTOR_REGISTRY, SessionTypes, Processin
 from ataraxis_data_structures import ProcessingTracker
 
 from sollertia_forgery.managing import (
+    MANIFEST_AXES,
     MANIFEST_JOB_NAME,
+    MANIFEST_SEMI_FIELDS,
     ProjectManifest,
     project_jobs_path,
     project_manifest_path,
@@ -26,8 +28,10 @@ from sollertia_forgery.managing import (
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines, resolve_session_tracker_path
 from sollertia_forgery.managing.manifest import (
+    _MANIFEST_ROW_COLUMNS,
     _PIPELINE_STATUS_COLUMNS,
     _PROJECT_MANIFEST_SCHEMA,
+    _MANIFEST_SUMMARY_COLUMNS,
     _assert_status_column_coverage,
 )
 
@@ -422,6 +426,54 @@ def test_every_session_pipeline_declares_a_status_column(monkeypatch: pytest.Mon
     monkeypatch.delitem(_PIPELINE_STATUS_COLUMNS, ProcessingPipelines.VIDEO)
 
     with pytest.raises(RuntimeError, match=r"the sets differ by \['video'\]"):
+        _assert_status_column_coverage()
+
+
+@pytest.mark.parametrize(
+    ("roster_name", "narrowed_roster"),
+    [
+        (
+            "_PROJECT_MANIFEST_SCHEMA",
+            {column: dtype for column, dtype in _PROJECT_MANIFEST_SCHEMA.items() if column != "video"},
+        ),
+        ("_MANIFEST_ROW_COLUMNS", tuple(column for column in _MANIFEST_ROW_COLUMNS if column != "video")),
+        ("_MANIFEST_SUMMARY_COLUMNS", tuple(column for column in _MANIFEST_SUMMARY_COLUMNS if column != "video")),
+        ("MANIFEST_AXES", tuple(column for column in MANIFEST_AXES if column != "video")),
+        ("MANIFEST_SEMI_FIELDS", tuple(column for column in MANIFEST_SEMI_FIELDS if column != "video")),
+    ],
+)
+def test_a_roster_that_drops_a_status_column_names_the_roster_and_the_column(
+    roster_name: str, narrowed_roster: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that the import-time check names the roster missing a status column, so a column added to the manifest
+    without reaching every roster that lists it fails loudly rather than going unreported.
+    """
+    monkeypatch.setattr(f"sollertia_forgery.managing.manifest.{roster_name}", narrowed_roster)
+
+    with pytest.raises(RuntimeError, match=rf"{roster_name}[\s\S]*\['video'\]"):
+        _assert_status_column_coverage()
+
+
+@pytest.mark.parametrize(
+    ("roster_name", "widened_roster"),
+    [
+        ("_MANIFEST_ROW_COLUMNS", (*_MANIFEST_ROW_COLUMNS, "retired_column")),
+        ("_MANIFEST_SUMMARY_COLUMNS", (*_MANIFEST_SUMMARY_COLUMNS, "retired_column")),
+        ("MANIFEST_AXES", (*MANIFEST_AXES, "retired_column")),
+        ("MANIFEST_SEMI_FIELDS", (*MANIFEST_SEMI_FIELDS, "retired_column")),
+    ],
+)
+def test_a_roster_naming_a_column_the_manifest_lacks_names_the_roster_and_the_entry(
+    roster_name: str, widened_roster: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that the import-time check names the roster holding an entry the manifest schema does not declare, so a
+    renamed or retired column fails loudly rather than dropping out of every breakdown and listing that skips what the
+    frame does not carry. The schema itself is left out of the parametrization, since it is the authority the other
+    rosters are checked against.
+    """
+    monkeypatch.setattr(f"sollertia_forgery.managing.manifest.{roster_name}", widened_roster)
+
+    with pytest.raises(RuntimeError, match=rf"{roster_name}[\s\S]*\['retired_column'\]"):
         _assert_status_column_coverage()
 
 

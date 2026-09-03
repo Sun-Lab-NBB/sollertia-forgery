@@ -116,7 +116,10 @@ def _make_session(tmp_path: Path, cameras: dict[int, str]) -> SimpleNamespace:
         session_name="test_session",
         acquisition_system="mesoscope",
         raw_data=SimpleNamespace(behavior_data_path=behavior_path, camera_data_path=camera_path),
-        processed_data=SimpleNamespace(video_data_path=tmp_path.joinpath("processed_data", "video_data")),
+        processed_data=SimpleNamespace(
+            video_data_path=tmp_path.joinpath("processed_data", "video_data"),
+            video_tracker_path=tmp_path.joinpath("processed_data", "video_data", ProcessingTrackers.VIDEO),
+        ),
     )
 
 

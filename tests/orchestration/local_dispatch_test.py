@@ -9,6 +9,7 @@ from time import sleep
 from typing import TYPE_CHECKING, Any, Self
 from pathlib import Path
 from collections import deque
+from dataclasses import replace
 from concurrent.futures import Future
 
 import cv2
@@ -49,9 +50,13 @@ from sollertia_forgery.orchestration.local import (
 )
 import sollertia_forgery.orchestration.dispatch as dispatch_module
 from sollertia_forgery.orchestration.dispatch import (
+    DATASET_UNIT,
+    SESSION_UNIT,
     resolve_dispatch,
     resolve_job_cores,
+    resolve_unit_kind,
     resolve_job_command,
+    resolve_unit_dispatches,
 )
 
 if TYPE_CHECKING:
@@ -1067,6 +1072,29 @@ def test_the_forging_pipeline_loads_the_dataset_its_jobs_operate_on(project: Pro
     assert dispatch.output_path(loaded) == dataset.dataset_data_path.parent
 
 
+def test_every_dispatch_entry_declares_the_unit_its_jobs_operate_on() -> None:
+    """Verifies that the unit a pipeline processes is a property of its entry, so a second dataset pipeline is scoped
+    correctly without being named at any of the sites that resolve a unit.
+    """
+    assert [dispatch.pipeline.value for dispatch in resolve_unit_dispatches(unit_kind=DATASET_UNIT)] == ["forging"]
+    assert [dispatch.pipeline.value for dispatch in resolve_unit_dispatches(unit_kind=SESSION_UNIT)] == [
+        "checksum",
+        "runtime",
+        "microcontroller",
+        "video",
+        "two_photon",
+    ]
+    assert resolve_unit_kind(pipeline="forging") == DATASET_UNIT
+    assert resolve_unit_kind(pipeline="video") == SESSION_UNIT
+
+
+def test_a_pipeline_outside_the_dispatch_table_is_scoped_to_a_session() -> None:
+    """Verifies that a batch naming a pipeline the table does not carry still resolves a project root, since this
+    library lays out the artifacts of an unrecognized pipeline per session.
+    """
+    assert resolve_unit_kind(pipeline="unregistered_pipeline") == SESSION_UNIT
+
+
 def test_the_dispatch_table_is_held_to_the_pipelines_the_batch_tools_advertise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1076,4 +1104,18 @@ def test_the_dispatch_table_is_held_to_the_pipelines_the_batch_tools_advertise(
     monkeypatch.setattr(dispatch_module, "_pipeline_dispatch", dict)
 
     with pytest.raises(RuntimeError, match="Unable to validate the pipeline dispatch table"):
+        dispatch_module._assert_dispatch_coverage()
+
+
+def test_the_dispatch_table_is_held_to_the_unit_kinds_its_callers_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that an entry declaring a unit nothing resolves fails at registration rather than planning against a
+    project root that sits at the wrong depth.
+    """
+    forging = resolve_dispatch(pipeline="forging")
+    assert forging is not None
+    table = dict(dispatch_module._pipeline_dispatch())
+    table[forging.pipeline] = replace(forging, unit_kind="project")
+    monkeypatch.setattr(dispatch_module, "_pipeline_dispatch", lambda: table)
+
+    with pytest.raises(RuntimeError, match="must declare one of"):
         dispatch_module._assert_dispatch_coverage()

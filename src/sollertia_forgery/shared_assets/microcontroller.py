@@ -19,8 +19,8 @@ def merge_event_streams[ScalarT: np.generic](
     """Merges two chronologically-sorted event streams into a single timestamp-sorted stream.
 
     Notes:
-        Uses NumPy's stable sort (``kind="stable"``), which NumPy maps to a linear-time radix sort for the uint64
-        timestamp keys.
+        Uses NumPy's stable sort (``kind="stable"``), so events sharing a timestamp keep the first stream ahead of
+        the second.
 
     Args:
         timestamps_a: The uint64 timestamp array for the first event stream.

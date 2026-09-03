@@ -846,25 +846,19 @@ def _execute_remote_job(
     )
 
     console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
-    tracker.start_job(job_id=job_id)
-    if not feather_path.is_file():
-        console.echo(
-            message=(
-                f"No extracted data was found for module '{specifier}'. Completing its parse job with no output. "
-                f"Ensure the controller's extraction job has run first."
-            ),
-            level=LogLevel.WARNING,
-        )
-        tracker.complete_job(job_id=job_id)
-        return
-    try:
+    with tracker.run_job(job_id=job_id):
+        if not feather_path.is_file():
+            console.echo(
+                message=(
+                    f"No extracted data was found for module '{specifier}'. Completing its parse job with no output. "
+                    f"Ensure the controller's extraction job has run first."
+                ),
+                level=LogLevel.WARNING,
+            )
+            return
         _run_parse(
             feather_path=feather_path, module_parser=module_parser, output_directory=parse_output, session=session
         )
-        tracker.complete_job(job_id=job_id)
-    except Exception as exception:
-        tracker.fail_job(job_id=job_id, error_message=str(exception))
-        raise
 
 
 def _run_parse(

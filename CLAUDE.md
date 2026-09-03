@@ -85,12 +85,16 @@ The library exposes an MCP server through the `slf mcp` command. `interfaces/ent
 `-t/--transport`, defaulting to `stdio` and also accepting `sse` and `streamable-http` for a network client, and
 disables the console on the `stdio` path, because the pipelines echo progress to the same stream that carries the
 JSON-RPC messages. `interfaces/mcp_server.py` runs the server, and its import discovers every `*_tools.py` module under
-`src/sollertia_forgery/interfaces/`, each of which registers its tools purely as an import side effect.
+`src/sollertia_forgery/interfaces/`, each of which registers the tools it declares purely as an import side effect.
 
 **When adding an MCP tool**, place it in the `*_tools.py` module that owns its domain and decorate it with `@mcp.tool()`
 from `.mcp_instance`. Return through the `ok_response` and `error_response` helpers in `.responses`, and give the tool a
 `Returns` section that names the response keys in prose. Add a new tool module to the `[tool.coverage.run] omit` list in
-`pyproject.toml`, because tool modules reach infrastructure that only a live MCP session supplies.
+`pyproject.toml`, because tool modules reach infrastructure that only a live MCP session supplies. The batch tools that
+read, cancel, and remediate what the scheduler ran keep their implementations in `interfaces/remote_tools.py`, which
+registers no tool of its own, so an `slf server` command and the tool beside it answer a caller from one function, and
+`get_processing_status_tool` and `retire_remote_batches_tool` resolve every allocation through the one state table in
+`orchestration/remote.py` rather than each deciding for itself.
 
 ## Downstream library integration
 
@@ -169,6 +173,12 @@ one SLURM allocation per job. Each job holds a `ProcessingStatus` on the tracker
 `SUCCEEDED`, or `FAILED`. A rerun therefore resolves only the work still outstanding. The run reports a job as blocked
 rather than dispatched when it can neither queue that job's upstream stage nor confirm that the stage already succeeded.
 
+A remote allocation outlives this process, so `orchestration/remote.py` resolves each recorded one against scheduler
+accounting, the scheduler queue, and the job's own tracker into a `scheduler_state`, a `verdict`, and the `remediation`
+that verdict prescribes, with `_VERDICT_REMEDIATIONS` as the single state table both the status read and the
+remediation apply. Only the `stranded` verdict writes a tracker, because a tracker still claiming a purged allocation
+is the one record no rerun can clear.
+
 The public surface of the distribution is the `slf` CLI and the MCP server that CLI starts, so the top-level
 `__init__.py` re-exports no library symbol and its `__all__` is empty. Adding a name to a public listing is a deliberate
 API change rather than a convenience.
@@ -211,8 +221,13 @@ the prerequisite mapping, and give it both a `_JOB_CORE_ALLOCATIONS` entry and a
 type missing either one is a hard error rather than a job admitted at a default size.
 
 **When adding a processing pipeline**, add its `ProcessingPipelines` member and tracker entry in
-`shared_assets/pipelines.py`, its category package, and both its `BATCH_PIPELINES` membership and its
-`PipelineDispatch` entry, which `_assert_dispatch_coverage` holds in step. Then add its CLI and MCP surfaces.
+`shared_assets/pipelines.py`, its category package, and both its `BATCH_PIPELINES` membership and its `PipelineDispatch`
+entry, which `_assert_dispatch_coverage` holds in step. Give a per-session pipeline its manifest status column in
+`_PIPELINE_STATUS_COLUMNS`, and name that column in the five rosters beside it in `managing/manifest.py`:
+`_PROJECT_MANIFEST_SCHEMA`, `_MANIFEST_ROW_COLUMNS`, `_MANIFEST_SUMMARY_COLUMNS`, and the public `MANIFEST_AXES` and
+`MANIFEST_SEMI_FIELDS` that `interfaces/management_tools.py` imports. `_assert_status_column_coverage` checks all of it
+at import, raising when the declared columns and `SESSION_PIPELINES` differ either way, when a roster omits a status
+column, and when a roster names a column the schema does not declare. Then add its CLI and MCP surfaces.
 
 ### Code standards
 
@@ -220,7 +235,9 @@ type missing either one is a hard error rather than a job admitted at a default 
   prerequisite callables the orchestration layer binds. A name reaches that list only when a package outside the
   defining one imports it, and a symbol that no other module reaches at all carries the underscore.
 - A stage backed by a library `execute_job` binding reuses the job-name constant that library exports rather than a
-  local string, so the tracker identifiers stay aligned with the library's own.
+  local string, so the tracker identifiers stay aligned with the library's own. The forging pipeline is the one
+  exception. Its tracker interleaves cindra's cross-recording stages with the assembly stage this library owns and
+  records all of them under local names, and `_MULTIDAY_JOB_NAMES` is the one table where the two vocabularies meet.
 - The test suite covers 100% of the measured statements. Interface modules are excluded per module through the
   `[tool.coverage.run] omit` list rather than through a directory glob.
 - A test that spawns a process pool or mutates process-wide state carries `@pytest.mark.xdist_group`, because the suite

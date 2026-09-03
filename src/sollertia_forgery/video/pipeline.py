@@ -168,8 +168,10 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=FileNotFoundError)
 
-        # Caps the worker threading layers before the extraction binding starts its own pool, since in remote mode
-        # the binding owns the pool and would otherwise spawn each worker with the machine's full thread budget.
+        # Caps the worker threading layers around the single job this identifier selects. The extraction binding and
+        # the motion-energy job each enter this same cap around the pool they create, so this outer context is the
+        # one that reaches a pool the system's donated tracking function opens, which its registry contract does not
+        # require it to pin.
         with limit_worker_threads():
             _dispatch_job(
                 job_name=job_name,

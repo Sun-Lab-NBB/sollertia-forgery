@@ -13,7 +13,9 @@ from sollertia_shared_assets import ProcessingTrackers
 from ataraxis_data_structures import TrackerStatus, ProcessingTracker
 
 from ..managing import (
+    MANIFEST_AXES,
     MANIFEST_JOB_NAME,
+    MANIFEST_SEMI_FIELDS,
     ProjectManifest,
     project_jobs_path,
     project_manifest_path,
@@ -42,37 +44,6 @@ from .host_resolution import (
     resolve_readable_project,
     unsupported_host_message,
 )
-
-_MANIFEST_AXES: tuple[str, ...] = (
-    "animal",
-    "type",
-    "system",
-    "complete",
-    "integrity",
-    "runtime",
-    "microcontroller",
-    "video",
-    "two_photon",
-)
-"""The manifest columns by which a caller may filter sessions, and the axes its breakdown counts. The five pipeline
-columns each hold a 0 or a 1, so their breakdown reports how many sessions have finished that pipeline."""
-
-_MANIFEST_SEMI_FIELDS: tuple[str, ...] = (
-    "animal",
-    "session",
-    "session_path",
-    "date",
-    "type",
-    "system",
-    "complete",
-    "integrity",
-    "runtime",
-    "microcontroller",
-    "video",
-    "two_photon",
-)
-"""The session fields a semi-detail listing carries, which is the session's identity and whether each of its
-pipelines finished."""
 
 _MANIFEST_DETAIL_FIELDS: tuple[str, ...] = ("notes",)
 """The session field detail adds, which is the free-text experimenter notes."""
@@ -209,7 +180,7 @@ def read_project_manifest_tool(
         project_path=str(directory),
         manifest_path=str(manifest_path),
         total_sessions=frame.height,
-        breakdown=frame_breakdown(frame=frame, axes=_MANIFEST_AXES),
+        breakdown=frame_breakdown(frame=frame, axes=MANIFEST_AXES),
     )
 
     selectors: dict[str, Any] = {"animal": animal, "type": session_type, "system": system}
@@ -226,7 +197,7 @@ def read_project_manifest_tool(
             return rejection
         matched = matched.filter(pl.col(column).cast(pl.String) == str(value))
 
-    fields = (*_MANIFEST_SEMI_FIELDS, *_MANIFEST_DETAIL_FIELDS) if detailed else _MANIFEST_SEMI_FIELDS
+    fields = (*MANIFEST_SEMI_FIELDS, *_MANIFEST_DETAIL_FIELDS) if detailed else MANIFEST_SEMI_FIELDS
     window = resolve_page(
         total=matched.height,
         limit=resolve_detail_limit(limit=limit, detailed=detailed),

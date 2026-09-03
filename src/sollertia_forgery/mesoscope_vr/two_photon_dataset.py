@@ -40,9 +40,10 @@ _FRAME_VARIANT_METADATA_FILENAME: str = "frame_variant_metadata.npz"
 raw mesoscope_data directory."""
 
 _SCANIMAGE_FRAME_NUMBER_KEY: str = "frameNumberAcquisition"
-"""The key name of the per-frame ScanImage frame counter inside the frame_variant_metadata archive. The counter
-increases with acquisition time within one acquisition and restarts at one for each further acquisition a session
-records."""
+"""The key name of the per-frame ScanImage frame counter inside the frame_variant_metadata archive. Raw ScanImage
+increases the counter with acquisition time within one acquisition and restarts it at one for each further
+acquisition, but preprocessing renumbers it into a session-global one-based sequence before writing the archive, so
+only an archive written by older preprocessing still carries the restarts."""
 
 _SCANIMAGE_FRAME_TIMESTAMP_KEY: str = "frameTimestamps_sec"
 """The key name of the per-frame ScanImage clock timestamps (seconds) inside the frame_variant_metadata archive."""
@@ -463,11 +464,13 @@ def _align_pulses_to_scanimage(
         )
         console.error(message=message, error=ValueError)
 
-    # ScanImage writes its per-frame metadata in TIFF-page-concatenation order, which interleaves frames across
-    # stack files. Sorting restores chronological order before the timestamps can be matched against TTL rising
-    # edges. The frame counter restarts at one for each further acquisition, so it orders frames within an
-    # acquisition and the acquisition number orders the acquisitions against each other. NPZ archives do not support
-    # memory mapping, so the context manager is used to keep the archive open only long enough to copy the arrays.
+    # Preprocessing natsorts the stacks and concatenates their per-frame metadata in ascending starting-frame order,
+    # so an archive it writes already carries the chronological order the match against TTL rising edges needs, and
+    # its renumbered frame counter already ascends across the whole session. Sorting stays because an archive written
+    # by older preprocessing keeps the raw ScanImage counter, which restarts at one for each further acquisition, so
+    # there the acquisition number orders the acquisitions against each other and the frame counter orders the frames
+    # within one. NPZ archives do not support memory mapping, so the context manager is used to keep the archive open
+    # only long enough to copy the arrays.
     with np.load(file=metadata_path) as metadata:
         frame_numbers = np.asarray(metadata[_SCANIMAGE_FRAME_NUMBER_KEY])
         frame_seconds = np.asarray(metadata[_SCANIMAGE_FRAME_TIMESTAMP_KEY])

@@ -15,9 +15,15 @@ from sollertia_shared_assets import iterate_sessions
 from ataraxis_data_structures import YamlConfig, ProcessingStatus, ProcessingTracker, atomic_write
 
 from ..forging import discover_project_datasets
-from .dispatch import resolve_dispatch, resolve_job_cores
+from .dispatch import (
+    DATASET_UNIT,
+    SESSION_UNIT,
+    resolve_dispatch,
+    resolve_job_cores,
+    resolve_unit_dispatches,
+)
 from .footprints import resolve_model_version
-from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines, natural_sort
+from ..shared_assets import SESSION_PIPELINES, natural_sort
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,12 +48,6 @@ account of what went wrong."""
 
 _LOCK_TIMEOUT_SECONDS: float = 20.0
 """The period a writer waits for a plan file's lock before giving up, matching the project manifest's writer."""
-
-SESSION_UNIT: str = "session"
-"""The unit label of a plan describing the jobs of one acquisition session."""
-
-DATASET_UNIT: str = "dataset"
-"""The unit label of a plan describing the jobs of one forged dataset."""
 
 PROJECT_PLAN_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
     "unit_kind": pl.String,
@@ -218,31 +218,32 @@ def resolve_session_plan(
 def resolve_dataset_plan(
     dataset_path: Path, *, regenerate_plan: bool = False, display_progress: bool = False
 ) -> _JobPlan:
-    """Plans every forging job of one dataset, estimating only the jobs the cache does not already hold.
+    """Plans every dataset-scoped job of one dataset, estimating only the jobs the cache does not already hold.
 
     Notes:
         A dataset's figures follow from the single-day outputs its jobs consume, and admission requires a session to
         carry those outputs already, so a dataset is plannable as soon as its hierarchy is defined.
 
+        Every pipeline whose dispatch entry declares the dataset unit is planned, so a pipeline added over datasets
+        reaches this pass by declaring that kind rather than by being named here.
+
     Args:
         dataset_path: The path to the dataset's root directory to plan.
         regenerate_plan: Determines whether to re-estimate the jobs the cache already holds. A cache stamped with
             another model version is re-estimated whatever this asks.
-        display_progress: Determines whether to report the reason when the forging pipeline resolves no jobs.
+        display_progress: Determines whether to report the pipelines that resolved no jobs for this dataset and why.
 
     Returns:
-        The dataset's plan, holding an entry for every forging job it resolves.
+        The dataset's plan, holding an entry for every job its pipelines resolve.
 
     Raises:
-        ValueError: If the forging pipeline resolves no job for this dataset, since a dataset with no plannable job
-            names no path to a plan file.
+        ValueError: If no pipeline resolves any job for this dataset, since a dataset with no plannable job names no
+            path to a plan file.
         TimeoutError: If a pipeline's processing tracker lock or the plan file's own lock cannot be acquired within
             the timeout period.
     """
-    dispatch = resolve_dispatch(pipeline=ProcessingPipelines.FORGING)
-    dispatches = [] if dispatch is None else [dispatch]
     return _resolve_unit_plan(
-        dispatches=dispatches,
+        dispatches=list(resolve_unit_dispatches(unit_kind=DATASET_UNIT)),
         unit_path=dataset_path,
         unit_kind=DATASET_UNIT,
         regenerate_plan=regenerate_plan,

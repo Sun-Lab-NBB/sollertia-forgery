@@ -31,6 +31,7 @@ from sollertia_forgery.forging import (
     run_forging_pipeline,
     discover_forging_jobs,
     define_forging_dataset,
+    forging_cross_recording_paths,
 )
 from sollertia_forgery.shared_assets import multi_recording_dataset_name
 import sollertia_forgery.forging.pipeline as pipeline_module
@@ -599,6 +600,38 @@ def test_discover_forging_jobs_reports_the_whole_universe_as_possible(experiment
         (MULTIDAY_DISCOVERY_JOB_NAME, "321"),
         (MULTIDAY_EXTRACTION_JOB_NAME, names[2]),
         *((FORGING_JOB_NAME, name) for name in names),
+    ]
+
+
+def test_forging_cross_recording_paths_names_each_source_sessions_directory_for_this_dataset(
+    experiment_project: ForgingProject,
+) -> None:
+    """Verifies that the locator answers with the directory cindra writes for the name the pipeline configured, so a
+    cleanup reaches the output the cross-recording stages left in every source session.
+    """
+    dataset = _define_whole_project(experiment_project=experiment_project)
+    plan = _load_multiday_plan(dataset=dataset)
+
+    paths = forging_cross_recording_paths(dataset=dataset)
+
+    assert len(paths) == len(experiment_project.sessions)
+    for path, session in zip(paths, experiment_project.sessions, strict=True):
+        configured = MultiRecordingConfiguration.from_yaml(file_path=plan[str(session.animal_id)][0])
+        assert path.parent.parent == session.processed_data.cindra_data_path
+        assert path.name == configured.recording_io.dataset_name.lower()
+
+
+def test_forging_cross_recording_paths_passes_over_a_source_session_that_no_longer_resolves(
+    experiment_project: ForgingProject,
+) -> None:
+    """Verifies that a dataset outliving one of its source sessions still names the output the others hold."""
+    dataset = _define_whole_project(experiment_project=experiment_project)
+    shutil.rmtree(experiment_project.sessions[0].raw_data_path.parent)
+
+    paths = forging_cross_recording_paths(dataset=dataset)
+
+    assert [path.parent.parent for path in paths] == [
+        session.processed_data.cindra_data_path for session in experiment_project.sessions[1:]
     ]
 
 

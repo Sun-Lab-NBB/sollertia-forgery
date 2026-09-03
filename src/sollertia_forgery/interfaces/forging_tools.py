@@ -103,7 +103,10 @@ def define_forging_dataset_tool(
     Returns:
         A response dict with the ``dataset_name``, the ``dataset_path`` at which the hierarchy was built, the
         ``tracker_path`` recording its jobs, the ``session_count`` and ``animal_count`` the dataset now holds, and the
-        ``animals`` it covers. Returns an error when the resolution policy rejects the request.
+        ``animals`` it covers. A ``remote`` definition instead carries the ``dataset_name``, the ``host``, the
+        ``dataset_path``, and a ``message`` naming the tools that report what the hierarchy now holds, since the
+        server-side hierarchy cannot be loaded from this machine. Returns an error when the resolution policy rejects
+        the request.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))

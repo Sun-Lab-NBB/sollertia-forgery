@@ -15,6 +15,7 @@ from cindra import (
     MULTI_RECORDING_CONFIGURATION_FILENAME,
     MultiRecordingJobNames,
     prime_dataset,
+    resolve_dataset_path,
     execute_multi_recording_job,
     resolve_multi_recording_jobs,
     resolve_multi_recording_prerequisites,
@@ -424,6 +425,50 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     multiday_plan = _load_multiday_plan(dataset=dataset)
     universe = _build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
     return dataset, universe, list(universe)
+
+
+def forging_cross_recording_paths(dataset: DatasetData) -> tuple[Path, ...]:
+    """Resolves the cross-recording output one dataset holds inside each of the source sessions it names.
+
+    Notes:
+        The cross-recording stages write each session's aligned fluorescence into that session's own cindra output
+        rather than into the dataset, so the dataset owns a directory inside every source session it names. That
+        output describes the registration this dataset performed and nothing else, so it goes wherever the dataset
+        goes.
+
+        The directory is named for this dataset alone, through the same qualified name the pipeline configures and
+        through cindra's own layout resolver. A session belonging to several datasets therefore keeps the sibling
+        directory each of the others owns, alongside its single-recording output.
+
+        A session whose marker cannot be read is passed over, since a source session that no longer resolves holds no
+        directory this dataset can name.
+
+    Args:
+        dataset: The loaded dataset whose cross-recording output to locate.
+
+    Returns:
+        The cross-recording output directory this dataset owns in each source session that resolves, in the order the
+        dataset holds its sessions.
+    """
+    project_root = dataset.dataset_data_path.parents[1]
+    paths: list[Path] = []
+    for entry in dataset.sessions:
+        try:
+            session = SessionData.load(session_path=project_root.joinpath(entry.animal, entry.session))
+        except Exception as exception:
+            console.echo(
+                message=f"Unable to locate the source session '{entry.session}' of dataset '{dataset.name}'. "
+                f"{exception}",
+                level=LogLevel.WARNING,
+            )
+            continue
+        paths.append(
+            resolve_dataset_path(
+                output_root=session.processed_data_path,
+                dataset_name=multi_recording_dataset_name(animal_id=entry.animal, dataset_name=dataset.name),
+            )
+        )
+    return tuple(paths)
 
 
 def _materialize_multiday_plan(

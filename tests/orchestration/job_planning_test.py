@@ -183,6 +183,7 @@ def make_dispatch(
     unit: SimpleNamespace,
     universe: list[tuple[str, str]],
     memory_mb: int = 1000,
+    unit_kind: str = SESSION_UNIT,
     *,
     fails: bool = False,
 ) -> PipelineDispatch[Any]:
@@ -203,6 +204,7 @@ def make_dispatch(
 
     return PipelineDispatch[Any](
         pipeline=pipeline,
+        unit_kind=unit_kind,
         load=lambda _path: unit,
         discover=discover,
         worker=lambda _job: None,
@@ -553,7 +555,13 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
         unit_path=project.joinpath("ds_a"),
         unit_kind=DATASET_UNIT,
         dispatches=[
-            make_dispatch(pipeline=ProcessingPipelines.FORGING, unit=dataset, universe=_RUNTIME_JOBS, memory_mb=6400)
+            make_dispatch(
+                pipeline=ProcessingPipelines.FORGING,
+                unit=dataset,
+                universe=_RUNTIME_JOBS,
+                memory_mb=6400,
+                unit_kind=DATASET_UNIT,
+            )
         ],
     )
 
@@ -942,6 +950,33 @@ def test_planning_a_defined_dataset_records_its_forging_jobs(project_root: Path,
     assert _JobPlan.from_yaml(file_path=_dataset_plan_path(dataset=dataset)).entry_map() == plan.entry_map()
 
 
+def test_planning_a_dataset_covers_every_pipeline_scoped_to_a_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that the pass drives every pipeline declaring the dataset unit, so a second dataset pipeline is planned
+    without being named here.
+    """
+    dataset_path = tmp_path.joinpath("Project", "ds_a")
+    dataset = make_dataset(root=dataset_path)
+    dispatches = (
+        make_dispatch(
+            pipeline=ProcessingPipelines.FORGING, unit=dataset, universe=_RUNTIME_JOBS, unit_kind=DATASET_UNIT
+        ),
+        make_dispatch(
+            pipeline=ProcessingPipelines.CHECKSUM, unit=dataset, universe=_CHECKSUM_JOBS, unit_kind=DATASET_UNIT
+        ),
+    )
+    monkeypatch.setattr(planning_module, "resolve_unit_dispatches", lambda unit_kind: dispatches)  # noqa: ARG005
+
+    plan = resolve_dataset_plan(dataset_path=dataset_path)
+
+    assert plan.unit_kind == DATASET_UNIT
+    assert {entry.pipeline for entry in plan.entries} == {
+        ProcessingPipelines.FORGING.value,
+        ProcessingPipelines.CHECKSUM.value,
+    }
+
+
 def test_a_dataset_whose_session_carries_no_processed_output_is_refused(
     project_root: Path, training_session: SessionData
 ) -> None:
@@ -973,7 +1008,13 @@ def test_the_projection_reports_the_units_that_carry_no_plan(tmp_path: Path, mon
         unit_path=project.joinpath("ds_planned"),
         unit_kind=DATASET_UNIT,
         dispatches=[
-            make_dispatch(pipeline=ProcessingPipelines.FORGING, unit=planned, universe=_RUNTIME_JOBS, memory_mb=6400)
+            make_dispatch(
+                pipeline=ProcessingPipelines.FORGING,
+                unit=planned,
+                universe=_RUNTIME_JOBS,
+                memory_mb=6400,
+                unit_kind=DATASET_UNIT,
+            )
         ],
     )
 

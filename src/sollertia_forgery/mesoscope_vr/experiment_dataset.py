@@ -11,7 +11,6 @@ import polars as pl
 from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import (
     SessionData,
-    RawDataFiles,
     ProcessingTrackers,
     MesoscopeExperimentConfiguration,
 )
@@ -93,7 +92,7 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
     # Loads the experiment configuration once so the runtime assembly resolves its state and trial mappings without
     # re-reading the same YAML.
     experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
-        file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
+        file_path=session.raw_data.experiment_configuration_path
     )
 
     # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock to which the other

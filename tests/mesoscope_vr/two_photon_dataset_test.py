@@ -383,8 +383,9 @@ def test_scanimage_fallback_preserves_epoch_scale_pulse_timestamps(layout: _Layo
 def test_scanimage_fallback_orders_the_frames_of_each_acquisition_after_the_previous_one(layout: _Layout) -> None:
     """Verifies a session recording two acquisitions matches each acquisition's frames to its own pulses.
 
-    The ScanImage frame counter restarts at one for every further acquisition, so ordering the archive by that counter
-    alone interleaves the acquisitions and hands the matcher timestamps that no longer ascend.
+    An archive written by older preprocessing restarts the frame counter at one for every further acquisition, so
+    ordering such an archive by that counter alone interleaves the acquisitions and hands the matcher timestamps that
+    no longer ascend.
     """
     pulses = [
         (5_000_000, _OUT_OF_WINDOW_DURATION_US),

@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 import pytest
+from sollertia_shared_assets import SessionTypes
 
 from sollertia_forgery.mesoscope_vr.forging import assemble_mesoscope_session
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
+from sollertia_forgery.mesoscope_vr.assembly_sources import resolve_mesoscope_assembly_sources
 from sollertia_forgery.mesoscope_vr.training_dataset import (
     assemble_training_dataset,
     resolve_mesoscope_assembly_geometry,
@@ -19,6 +21,7 @@ from sollertia_forgery.mesoscope_vr.training_dataset import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Callable
 
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
@@ -353,3 +356,28 @@ def test_resolve_mesoscope_assembly_geometry_refuses_a_session_without_a_referen
 
     with pytest.raises(FileNotFoundError, match="no camera clock"):
         resolve_mesoscope_assembly_geometry(session=training_session)
+
+
+def test_resolve_mesoscope_assembly_sources_refuses_an_uncovered_session_type(
+    session_factory: Callable[..., SessionData],
+) -> None:
+    """Verifies a session type no Mesoscope-VR assembler covers is refused, and that the refusal names the types that
+    are covered, since no assembly of an uncovered type exists whose sources could be reported.
+    """
+    window_checking_session = session_factory(session_type=SessionTypes.WINDOW_CHECKING)
+
+    with pytest.raises(ValueError, match="not a supported forging session type"):
+        resolve_mesoscope_assembly_sources(session=window_checking_session)
+
+
+def test_resolve_mesoscope_assembly_geometry_refuses_an_uncovered_session_type(
+    session_factory: Callable[..., SessionData],
+) -> None:
+    """Verifies the refusal reaches the geometry resolver, which reports it once the reference clock resolves, so a
+    job sizing an uncovered session fails rather than being charged a training session's sources.
+    """
+    window_checking_session = session_factory(session_type=SessionTypes.WINDOW_CHECKING)
+    _write_camera_clocks(session=window_checking_session)
+
+    with pytest.raises(ValueError, match="not a supported forging session type"):
+        resolve_mesoscope_assembly_geometry(session=window_checking_session)

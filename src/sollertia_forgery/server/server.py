@@ -56,7 +56,7 @@ class _CommandResult:
 class JobStatus(StrEnum):
     """Defines the set of status codes this library resolves for managed jobs.
 
-    These are the states SLURM reports, plus the ``BLOCKED`` and ``UNKNOWN`` states resolved locally.
+    These are the states SLURM reports, plus the ``BLOCKED``, ``UNKNOWN``, and ``UNRESOLVED`` states resolved locally.
     """
 
     PENDING = "PENDING"
@@ -87,7 +87,13 @@ class JobStatus(StrEnum):
     """The job is queued behind a dependency that can no longer be satisfied, so it will never run. Resolved from the
     queue's reason field rather than from accounting, which still reports such a job as pending."""
     UNKNOWN = "UNKNOWN"
-    """The job status could not be determined."""
+    """Accounting returned a row for the allocation whose state string this enumeration does not model, which covers
+    every live state beyond PENDING and RUNNING, such as SUSPENDED, CONFIGURING, or COMPLETING. A row exists, so the
+    scheduler still holds the allocation and this state is never terminal."""
+    UNRESOLVED = "UNRESOLVED"
+    """Accounting was queried successfully and returned no row for the allocation, which covers a submission it has not
+    registered yet as well as one it has purged. Nothing observable separates those two, so this state is never
+    terminal and a batch an allocation holds it on is retired by an explicit caller rather than on a timer."""
 
 
 TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
@@ -108,8 +114,11 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
 """The statuses a job never leaves. Reaching one tells a caller that a polled submission has settled.
 
 Notes:
-    ``UNKNOWN`` is absent, since accounting reports it for a submission it has not yet registered as well as for one
-    it can no longer resolve.
+    ``UNKNOWN`` and ``UNRESOLVED`` are both absent. A row this enumeration cannot parse still proves that the
+    scheduler holds the allocation, and a successful query that returned no row for it covers a submission accounting
+    has yet to register as well as one it has purged. Nothing observable separates those two, so an allocation that
+    stays unresolvable never settles its batch on its own. The remote status read classifies such a batch as stalled
+    and names the allocations, and the caller retires it explicitly.
 """
 
 
@@ -285,6 +294,9 @@ class Server:
 
         Args:
             slurm_job_id: The SLURM-assigned job ID to abort.
+
+        Raises:
+            RuntimeError: If the accounting query that reads the allocation's state fails.
         """
         if self.get_job_status(slurm_job_id=slurm_job_id) in (JobStatus.PENDING, JobStatus.RUNNING):
             self.execute_command(command=f"scancel {slurm_job_id}")
@@ -292,12 +304,29 @@ class Server:
     def abort_jobs(self, slurm_job_ids: Sequence[str]) -> None:
         """Aborts every named allocation that is still queued or running on the server.
 
+        Notes:
+            The scheduler answers a cancellation naming an allocation it has already finished with as a success, so
+            naming a settled allocation is not a failure here. A non-zero exit therefore reports that the cancellation
+            did not reach the scheduler at all, and it is raised the way every other command in this class raises,
+            because a caller that resets a job's tracker behind this call depends on the cancellation having been
+            issued.
+
         Args:
             slurm_job_ids: The SLURM-assigned job IDs to abort.
+
+        Raises:
+            RuntimeError: If the cancellation fails.
         """
         if not slurm_job_ids:
             return
-        self.execute_command(command=f"scancel {' '.join(shlex.quote(str(job)) for job in slurm_job_ids)}")
+        command = f"scancel {' '.join(shlex.quote(str(job)) for job in slurm_job_ids)}"
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to cancel the named allocations on the remote compute server with '{command}'. "
+                f"{result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
 
     def get_job_status(self, slurm_job_id: str) -> JobStatus:
         """Queries the managed server's SLURM manager for the runtime status of the job with the specified
@@ -314,6 +343,9 @@ class Server:
 
         Returns:
             The current status of the job as a JobStatus enumeration value.
+
+        Raises:
+            RuntimeError: If the accounting query fails.
         """
         return self.get_job_statuses(slurm_job_ids=(slurm_job_id,))[slurm_job_id]
 
@@ -326,21 +358,36 @@ class Server:
             A pending allocation whose dependency can no longer be satisfied is reported as blocked. Accounting still
             calls that job pending, so the queue's reason field is the only source of that distinction.
 
+            A query that fails reports no state at all rather than a state per identifier. Accounting that cannot
+            answer writes nothing to standard output, which is indistinguishable from an answer that holds no row for
+            any of the requested allocations, so reporting that answer would write off every live allocation at once.
+
         Args:
             slurm_job_ids: The SLURM-assigned job IDs to query.
 
         Returns:
-            A dictionary mapping every requested job ID to its status. An allocation unknown to accounting reports
-            as ``UNKNOWN``.
+            A dictionary mapping every requested job ID to its status. An allocation for which the successful query
+            returned no row reports as ``UNRESOLVED``.
+
+        Raises:
+            RuntimeError: If the accounting query fails.
         """
         requested = [str(job_id) for job_id in slurm_job_ids]
         if not requested:
             return {}
 
-        statuses: dict[str, JobStatus] = dict.fromkeys(requested, JobStatus.UNKNOWN)
-        result = self.execute_command(
-            command=f"sacct -j {','.join(requested)} --format=JobID,State --noheader --parsable2"
-        )
+        # An identifier the answer holds no row for keeps this seed, so 'no row' stays distinguishable from a row
+        # whose state this stack does not model.
+        statuses: dict[str, JobStatus] = dict.fromkeys(requested, JobStatus.UNRESOLVED)
+        command = f"sacct -j {','.join(requested)} --format=JobID,State --noheader --parsable2"
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to read the state of the requested allocations from the remote compute server with "
+                f"'{command}'. {result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
+
         for line in result.stdout.splitlines():
             fields = line.split("|")
             if len(fields) < _EXPECTED_FIELD_COUNT:
@@ -376,6 +423,38 @@ class Server:
             for fields in rows
             if len(fields) >= _EXPECTED_FIELD_COUNT and fields[1].strip() == _BLOCKED_QUEUE_REASON
         }
+
+    def get_queued_job_ids(self) -> set[str]:
+        """Returns the identifiers of every allocation of this user that the scheduler's queue currently holds.
+
+        Notes:
+            The queue records what the scheduler holds right now, while accounting records what it has committed. The
+            controller queues an allocation before slurmdbd commits a row for it, so accounting alone cannot tell a
+            freshly queued allocation from a purged one. Reading the queue is what separates those two.
+
+            Queries the user's whole queue, since naming an allocation that the queue no longer holds makes the
+            command report an error for it.
+
+            A user holding nothing answers with an empty set, which is the truthful reading of an empty queue. A
+            command that fails raises instead, because a failure writes nothing to standard output and answering that
+            as an empty queue would report every outstanding allocation as one the scheduler no longer holds.
+
+        Returns:
+            The SLURM-assigned job IDs the queue holds.
+
+        Raises:
+            RuntimeError: If the queue query fails.
+        """
+        command = f'squeue -h -u {shlex.quote(self.user)} -o "%i"'
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to read the allocations the remote compute server's queue holds with '{command}'. "
+                f"{result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
+
+        return {identifier for line in result.stdout.splitlines() if (identifier := line.strip())}
 
     def pull(self, local_path: Path, remote_path: Path) -> None:
         """Downloads a file or directory from the remote server to the local machine.
@@ -659,16 +738,6 @@ class Server:
         before invoking the ``slf`` CLI.
         """
         return self._configuration.environment
-
-    @property
-    def cindra_configurations_directory(self) -> Path:
-        """Returns the absolute path to the cindra configuration directory under the server's data root."""
-        return self.root.joinpath("cindra_configurations")
-
-    @property
-    def dlc_projects_directory(self) -> Path:
-        """Returns the absolute path to the DeepLabCut project directory under the server's data root."""
-        return self.root.joinpath("deeplabcut_projects")
 
     def _pull_directory(self, local_path: Path, remote_path: Path) -> None:
         """Recursively downloads a directory from the remote server.

@@ -28,7 +28,7 @@ from cindra import (
     SingleRecordingConfiguration,
 )
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SurgeryData, SessionTypes, MesoscopeDirectories
+from sollertia_shared_assets import SurgeryData, SessionTypes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,7 +96,7 @@ def locate_two_photon_data(session: SessionData) -> Path:
     Returns:
         The path to the session's ``mesoscope_data`` directory under its raw-data root.
     """
-    return session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
+    return session.system_raw_data.mesoscope_data_path
 
 
 def resolve_single_recording_configuration(session: SessionData) -> SingleRecordingConfiguration:

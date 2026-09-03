@@ -28,9 +28,10 @@ its acquisition system from the session instead of taking one from the caller. T
 the cores and memory used by every job, and dispatches the resulting batches onto this machine's process pool or onto a
 SLURM compute server.
 
-The documented path to using the library runs through AI agents. Every operation is exposed as a Model Context Protocol
-tool, and the Claude Code skills described in [AI-Assisted Development](#ai-assisted-development) orchestrate those
-tools. The `slf` CLI serves the same operations to a human operator and to the job scripts the compute server runs.
+The documented path to using the library runs through AI agents. Every operation except `slf mcp`, which starts the MCP
+server itself, and `slf omp`, which links the macOS OpenMP runtime, is exposed as a Model Context Protocol tool, and the
+Claude Code skills described in [AI-Assisted Development](#ai-assisted-development) orchestrate those tools. The `slf`
+CLI serves the same operations to a human operator and to the job scripts the compute server runs.
 
 ___
 
@@ -40,7 +41,7 @@ ___
 - Processes camera, microcontroller, acquisition-runtime, and two-photon imaging data for supported acquisition systems.
 - Forges the processed sessions of a project into analysis-ready multi-session datasets.
 - Sizes every job from the data it reads and dispatches it onto a local process pool or onto a SLURM scheduler.
-- Exposes every planning, processing, forging, orchestration, management, and server operation through an MCP server.
+- Exposes every operation but the `slf mcp` launcher and the `slf omp` macOS OpenMP setup through an MCP server.
 - Apache 2.0 License.
 
 ___
@@ -168,7 +169,10 @@ ordered stages, and each stage contributes one or more independently schedulable
 The `microcontroller_data_extraction`, `camera_timestamp_extraction`, and two-photon stages are owned by this library's
 upstream dependencies. This library resolves the inputs for those stages, calls their job bindings in-process, and
 reuses each library's own exported job-name constant, so the identifiers recorded by a tracker stay aligned with the
-library that produced the work. The remaining stages are implemented here.
+library that produced the work. The forging pipeline's `multiday_discovery` and `multiday_extraction` stages are
+likewise owned by cindra and dispatched in-process, but the forging tracker records them under this library's own job
+names, because it interleaves them with the per-session assembly stage this library owns. Every other stage is
+implemented here.
 
 A stage resolves its own job universe from the acquisition data. The video pipeline reads the camera manifest, so it
 declares one timestamp job and one motion-energy job per registered camera regardless of which archives happen to be on
@@ -214,7 +218,8 @@ of the data:
 
 ### Processed Data Structure
 
-The acquisition side owns a session's `raw_data` directory, and this library writes only under `processed_data`:
+The acquisition side owns a session's `raw_data` directory, and every session pipeline except `checksum` writes only
+under `processed_data`:
 
 ```text
 Session/
@@ -305,6 +310,8 @@ takes a system selector:
 | `server configure`        | Creates the server configuration file in the working directory's configuration subdirectory |
 | `server print`            | Displays the remote server's SLURM queue status or job data as a formatted table            |
 | `server discover`         | Discovers and prints the sessions stored under the project's directory on the server        |
+| `server batches`          | Reports the batches outstanding on the server's scheduler and resolves every allocation     |
+| `server retire-batch`     | Remediates the named batches and drops them from this machine's submission ledger           |
 | `mcp`                     | Starts the agentic Model Context Protocol server using the requested transport              |
 | `omp`                     | Links the OpenMP runtime Numba loads on macOS into a directory the loader searches          |
 
@@ -360,9 +367,36 @@ Because the scheduler owns the run once it accepts the jobs, every accepted allo
 ledger at `<working directory>/remote_state/submission_ledger.yaml`, guarded by a file lock, as is every other shared
 artifact this library keeps. The ledger keeps concurrent batches queryable, keeps a batch findable after this process
 exits, and preserves the record of the accepted allocations when the scheduler rejects a later job of the same batch. A
-batch leaves the ledger once every allocation it holds has reached a terminal state and its closure has snapshotted what
-its jobs recorded. A batch that the query did not fully observe stays outstanding, and so does a batch whose closure
-failed.
+batch leaves the ledger once every one of its allocations resolves to the plain `drop` remediation and its closure has
+snapshotted what its jobs recorded. That rule is derived from the same resolution the read publishes, so nothing closes
+that the read reports as still held. A batch holding an allocation the resolution answers for any other way stays
+outstanding for an explicit remediation, and so does a batch whose closure failed.
+
+Every status read also resolves each outstanding allocation against three records, which are the scheduler's accounting,
+the scheduler's queue, and the processing tracker of the job the allocation carries. The allocation is `held` when the
+queue carries it or accounting reports a state it has yet to leave, `settled` when accounting reports a state it never
+leaves and the queue does not carry it, and `gone` only when accounting returns no row for it and the queue does not
+carry it either. A missing row is not evidence of a purge, because accounting answers the same way for a submission it
+has not registered yet, and nothing observable separates the two. So `gone` licenses no claim that the allocation ever
+ran or that a later query answers alike. What it does license is narrower: this reading did not observe the allocation
+settle, so the batch holding it never settles on its own, and only an explicit remediation releases it.
+
+That state and the job's own tracker together carry the allocation's verdict. `running` means the scheduler still holds
+the allocation or the one the job's tracker claims, or that tracker names an executor outside the scheduler, which
+neither record can answer for. Nothing is done to a `running` allocation. `finished` and `failed` mean the job recorded
+an outcome, which its tracker keeps. `abandoned` means nothing claims the job, so it is already runnable. `stranded`
+means the job's tracker still claims to be running while no allocation is, whether it names a scheduler allocation the
+records no longer hold or names no executor at all, which is the one case whose remediation writes to a tracker: that
+job is returned to `SCHEDULED`, because the claim is what no rerun can otherwise clear. Each batch carries a verdict of
+its own beside them, `progressing` while any of its allocations resolves `running`, `stalled` when none does and at
+least one is `gone`, and `awaiting_closure` otherwise, which is the state of a batch holding an entry the automatic
+closure may not drop or one whose closure failed.
+
+`slf server batches` and `get_processing_status_tool` with `host='remote'` report every one of those values and name
+the remedy, and `slf server retire-batch` and `retire_remote_batches_tool` carry it out, resetting each stranded job
+and snapshotting what the batch's jobs recorded before dropping the ledger entry. Remediating refuses a batch holding
+an allocation that resolves as `running`, and refuses a drop whose snapshot failed, until the caller waives each
+guarantee with its own flag.
 
 The run reports a job as blocked rather than submitted when it can neither queue that job's upstream stage nor confirm
 that the stage already succeeded. A local batch treats the same job the same way.
@@ -376,13 +410,18 @@ server.
 Every pipeline records its progress on a per-unit tracker, so an interrupted run resumes rather than restarts. What to
 run depends on what the interruption left behind:
 
-| Situation                                              | Recovery                                                                                                          |
-|--------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| A batch is still running and is no longer wanted       | `cancel_processing_tool` stops the local batch or the outstanding allocations                                     |
-| Jobs report `FAILED` after a fixable cause             | `slf reset` or `reset_processing_jobs_tool` returns them to `SCHEDULED`                                           |
-| A pipeline's output is suspect and must be rebuilt     | `slf clean` or `clean_processing_output_tool` removes the output and the tracker                                  |
-| A run was interrupted, leaving jobs stuck in `RUNNING` | A local batch clears every job's record before it dispatches, and a remote batch adopts an allocation still alive |
-| A remote batch settled while this host was offline     | The next status read closes the settled batch and retires it from the ledger                                      |
+| Situation                                              | Recovery                                                                                                                                                                               |
+|--------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A batch is still running and is no longer wanted       | `cancel_processing_tool` stops the local batch or the outstanding allocations                                                                                                          |
+| Jobs report `FAILED` after a fixable cause             | `slf reset` or `reset_processing_jobs_tool` returns them to `SCHEDULED`                                                                                                                |
+| A pipeline's output is suspect and must be rebuilt     | `slf clean` or `clean_processing_output_tool` removes the output and the tracker                                                                                                       |
+| A run was interrupted, leaving jobs stuck in `RUNNING` | A local batch clears every job's record before it dispatches, and a remote batch adopts the allocation the scheduler still holds for the job                                           |
+| A remote job's tracker claims a non-scheduler executor | Neither record answers for that executor, so nothing adopts or resets the job. `slf reset` or `reset_processing_jobs_tool` clears the claim, and the next status read closes its batch |
+| A remote batch settled while this host was offline     | The next status read closes the settled batch and retires it from the ledger                                                                                                           |
+| A remote batch is reported as `stalled`                | `slf server retire-batch -b <id>` or `retire_remote_batches_tool` resolves it, remediates it, and drops its ledger entry                                                               |
+| A remote job is reported as `stranded`                 | The same command returns that job to `SCHEDULED` on its own tracker, which is what lets a later batch run it again                                                                     |
+| Remediation refuses because an allocation is `running` | Wait for it, or cancel it with `cancel_processing_tool`, then remediate again. `--force` cancels each one first instead                                                                |
+| Remediation refuses because its snapshot failed        | Restore access to the server and remediate again, or pass `--drop-without-outcome` to drop the entries regardless                                                                      |
 
 ***Note,*** `slf clean` removes processed output. The checksum pipeline verifies the acquired data in place and owns no
 output directory, so cleaning that pipeline removes its tracker alone. Cleaning discards work, and
@@ -413,11 +452,12 @@ own MCP server, so this server leaves those tools to them. `assets:working-direc
 Every tool names a filesystem path by what that path holds, and the same name means the same thing in every tool. A
 `session_path` names one session's root directory, a `dataset_path` names one forged dataset's root, and a
 `project_path` names a project root under the data root. Most tools take a `host`, which is `local` for the data on this
-machine and `remote` for the data on the compute server. Seven tools take none. `execute_jobs_tool` takes none because a
+machine and `remote` for the data on the compute server. Eight tools take none. `execute_jobs_tool` takes none because a
 batch runs where it was prepared, `forget_prepared_batches_tool` and `read_resource_model_tool` answer for this machine
-alone, the two server-configuration tools are always local, and `discover_remote_project_tool` and
-`read_scheduler_jobs_tool` always address the compute server. On `list_prepared_batches_tool` the `host` is a filter
-rather than a target, and omitting it lists the batches prepared against either host.
+alone, the two server-configuration tools are always local, and `discover_remote_project_tool`,
+`read_scheduler_jobs_tool`, and `retire_remote_batches_tool` always address the compute server. On
+`list_prepared_batches_tool` the `host` is a filter rather than a target, and omitting it lists the batches prepared
+against either host.
 
 #### Starting the Server
 
@@ -432,7 +472,7 @@ The `-t/--transport` option selects the transport. The default `stdio` serves a 
 
 #### Available Tools
 
-The server registers twenty-six tools across six modules.
+The server registers twenty-seven tools across six modules.
 
 The dataset tools compose forged datasets and report their forging job state:
 
@@ -468,8 +508,9 @@ The processing tools resolve, dispatch, and recover a batch:
 | `prepare_batch_tool`           | Resolves a pipeline's dispatchable jobs for one or more units, on this machine or on the compute server |
 | `inspect_job_resources_tool`   | Reports the cores and memory a pipeline's outstanding jobs will need, running none of them              |
 | `execute_jobs_tool`            | Dispatches prepared batches onto this machine's process pool or onto the server's scheduler             |
-| `get_processing_status_tool`   | Reports the live status of the active batch, in three widening stages                                   |
+| `get_processing_status_tool`   | Reports the live status of the active batch, resolving each remote allocation to one verdict            |
 | `cancel_processing_tool`       | Cancels the active local batch, or the outstanding allocations of the remote batches                    |
+| `retire_remote_batches_tool`   | Applies each allocation's resolved remediation, then drops the named batches from the submission ledger |
 | `reset_processing_jobs_tool`   | Resets tracked jobs to SCHEDULED across one or more units, so a later execute reruns only them          |
 | `clean_processing_output_tool` | Removes a pipeline's output and processing tracker for one or more units                                |
 
@@ -641,8 +682,10 @@ or dataset they open, so a fully wired system reaches every command already expo
 
 **Step 4: Cover the new package**
 
-Add the system's `automodule` block to `docs/source/api.rst`, add its tests under `tests/`, and add the new names to the
-donor registry list the registry-coverage test checks. The suite gates on 100% statement and branch coverage.
+Add the system's `automodule` block to `docs/source/api.rst`, add its tests under `tests/`, and add the system to the
+per-system assertions in `tests/registry_coverage_test.py`, which name each registered system explicitly. That file's
+donor registry list names the registries themselves rather than the systems, so a new system adds no entry to it. The
+suite gates on 100% statement and branch coverage.
 
 **Step 5: Update the sibling libraries**
 
@@ -663,10 +706,13 @@ A session type is owned by sollertia-shared-assets and reaches this library thro
    rather than an omission.
 3. Route the type in the system's forging assembler and write the branch that assembles its data. An unrouted type
    raises when the forging pipeline reaches it.
-4. Add the type to the system's multi-recording session types when the system tracks its animals across recordings, and
+4. Route the type in the system's assembly-source resolver, which reports the height at which the assembler holds each
+   source it reads. A type that resolver does not cover is refused during the sizing pass, so the type's assembly job is
+   never planned.
+5. Add the type to the system's multi-recording session types when the system tracks its animals across recordings, and
    widen the system's own multi-recording configuration resolver to match. The import check validates the declared types
    against the upstream pairing alone, so it never catches a resolver that still declines the new type.
-5. Give every new dataset column both its column member and its description entry. The system's metadata module raises
+6. Give every new dataset column both its column member and its description entry. The system's metadata module raises
    at import when a column carries no description, because a dataset publishes that mapping alongside its data.
 
 ### Adding a New Processing Stage
@@ -696,14 +742,21 @@ donation.
    sollertia-shared-assets, because a per-session pipeline records beside the output it produces.
 2. Add the `ProcessingPipelines` member and, for a per-session pipeline, its tracker location. The session pipeline
    listing derives from that mapping, so the two never disagree about the pipelines a session carries.
-3. Create the category package. Its `__init__.py` exports the pipeline entry point, every stage job name, and the job
+3. Give a per-session pipeline its project manifest column. The pipeline-to-column mapping is checked at import against
+   the session pipeline listing, so a pipeline that declares no column fails the moment the manifest module loads, and a
+   pipeline that processes no single session declares none. Five further rosters name the manifest's columns, which are
+   the artifact schema, the row accumulator the generation pass fills, the column list the printed summary selects, and
+   the breakdown axes and listing fields the manifest MCP tool reads. That same import check holds all five rosters to
+   the declared status columns and to the schema, so a roster missing the new column fails, and so does one still naming
+   a column the schema no longer declares.
+4. Create the category package. Its `__init__.py` exports the pipeline entry point, every stage job name, and the job
    discovery and prerequisite callables the orchestration layer binds.
-4. Add the pipeline to the batch pipeline set and give it a dispatch entry that supplies its unit loader, job discovery,
+5. Add the pipeline to the batch pipeline set and give it a dispatch entry that supplies its unit loader, job discovery,
    batch worker, prerequisites, tracker path, output path, unit name, sizing pass, remote command renderer, and any
    priming hook. An import-time check fails on either half alone.
-5. Declare the core allocation and the sizing model of every job type the pipeline resolves, following [Adding a New
+6. Declare the core allocation and the sizing model of every job type the pipeline resolves, following [Adding a New
    Processing Stage](#adding-a-new-processing-stage).
-6. Add the pipeline's CLI surface, which is a `slf process` subcommand for a per-session processing pipeline of that
+7. Add the pipeline's CLI surface, which is a `slf process` subcommand for a per-session processing pipeline of that
    shape and a root-level command otherwise, and its MCP surface. Then add the pipeline to the admission policy of every
    system whose sessions complete it before forging.
 

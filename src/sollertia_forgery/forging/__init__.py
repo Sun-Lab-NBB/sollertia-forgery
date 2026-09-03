@@ -21,6 +21,7 @@ from .pipeline import (
     discover_forging_jobs,
     define_forging_dataset,
     forging_job_prerequisites,
+    forging_cross_recording_paths,
 )
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "define_forging_dataset",
     "discover_forging_jobs",
     "discover_project_datasets",
+    "forging_cross_recording_paths",
     "forging_job_prerequisites",
     "forging_tracker_path",
     "generate_dataset_state",

@@ -230,8 +230,6 @@ def test_server_connects_and_exposes_the_configured_locations(
     assert connected_server.user == "tester"
     assert connected_server.environment == "slf_server"
     assert connected_server.root == Path("/data/sollertia")
-    assert connected_server.cindra_configurations_directory == Path("/data/sollertia/cindra_configurations")
-    assert connected_server.dlc_projects_directory == Path("/data/sollertia/deeplabcut_projects")
 
 
 def test_server_close_is_idempotent(connected_server: Server, stub_ssh_transport: StubSSHTransport) -> None:
@@ -419,6 +417,20 @@ def test_abort_jobs_cancels_every_named_allocation(
     assert stub_ssh_transport.commands == ["scancel 1000 '10 01'"]
 
 
+def test_abort_jobs_reports_a_cancellation_the_scheduler_refused(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a cancellation the scheduler rejected is raised rather than passed over.
+
+    A caller resets a job's tracker behind this call, so a cancellation that silently failed would let the allocation
+    it named write into a tracker that was cleared underneath it.
+    """
+    stub_ssh_transport.respond(prefix="scancel ", stderr="scancel: error: Access/permission denied", return_code=1)
+
+    with pytest.raises(RuntimeError, match=r"Unable to cancel the named allocations"):
+        connected_server.abort_jobs(slurm_job_ids=("1000",))
+
+
 def test_abort_jobs_without_identifiers_issues_no_invocation(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
@@ -439,7 +451,11 @@ def test_get_job_statuses_without_identifiers_returns_an_empty_mapping(
 def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that step rows, unparsable rows, and unrequested rows are skipped and a stuck job reports as blocked."""
+    """Verifies that step rows, unparsable rows, and unrequested rows are skipped and a stuck job reports as blocked.
+
+    An identifier the answer carries no row for keeps the seeded ``UNRESOLVED``, which is what tells 'accounting
+    returned nothing about this allocation' apart from 'accounting returned a row this stack cannot read'.
+    """
     stub_ssh_transport.respond(
         prefix="sacct ",
         stdout="malformed-row-without-a-separator\n1000.batch|COMPLETED\n9999|COMPLETED\n1000|PENDING\n1001|COMPLETED\n",
@@ -453,7 +469,7 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
     assert statuses == {
         "1000": JobStatus.BLOCKED,
         "1001": JobStatus.COMPLETED,
-        "1002": JobStatus.UNKNOWN,
+        "1002": JobStatus.UNRESOLVED,
     }
 
 
@@ -487,6 +503,21 @@ def test_get_job_statuses_skips_the_queue_lookup_without_a_pending_allocation(
     assert not any(command.startswith("squeue") for command in stub_ssh_transport.commands)
 
 
+def test_get_job_statuses_refuses_to_report_a_state_when_accounting_fails(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a failed accounting query raises rather than reporting a state for every requested allocation.
+
+    Accounting that cannot answer writes nothing to standard output, which is indistinguishable from an answer holding
+    no row for anything. Answering that way would report a state nothing observed: every requested allocation would
+    read as one accounting holds no row for, which is half of the evidence that the scheduler no longer holds it.
+    """
+    stub_ssh_transport.respond(prefix="sacct ", stderr="sacct: error: slurmdbd is not responding", return_code=1)
+
+    with pytest.raises(RuntimeError, match=r"slurmdbd is not responding"):
+        connected_server.get_job_statuses(slurm_job_ids=("1000", "1001"))
+
+
 def test_get_job_status_reports_one_allocation(connected_server: Server, stub_ssh_transport: StubSSHTransport) -> None:
     """Verifies that the single-allocation query names only the requested identifier."""
     stub_ssh_transport.job_statuses["1000"] = "TIMEOUT"
@@ -506,6 +537,38 @@ def test_get_blocked_job_ids_keeps_only_permanently_blocked_rows(
 
     assert connected_server.get_blocked_job_ids() == {"1000", "1002"}
     assert stub_ssh_transport.commands == ['squeue -h -u tester -o "%i|%r"']
+
+
+def test_get_queued_job_ids_reads_every_allocation_the_queue_holds(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that the queue read returns this user's whole queue and skips the blank lines an empty row leaves."""
+    stub_ssh_transport.respond(prefix="squeue ", stdout="1000\n  1001  \n\n1002\n")
+
+    assert connected_server.get_queued_job_ids() == {"1000", "1001", "1002"}
+    assert stub_ssh_transport.commands == ['squeue -h -u tester -o "%i"']
+
+
+def test_get_queued_job_ids_reports_an_empty_queue_as_holding_nothing(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a user whose queue holds nothing reads as holding nothing rather than as an error."""
+    assert connected_server.get_queued_job_ids() == set()
+
+
+def test_get_queued_job_ids_refuses_to_report_an_empty_queue_when_the_command_fails(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a failed queue query raises rather than answering that the queue holds nothing.
+
+    A failed command writes nothing to standard output, which is indistinguishable from an empty queue. Answering
+    that way would supply the other half of the evidence that the scheduler no longer holds an allocation, and every
+    outstanding allocation would then read as gone at once.
+    """
+    stub_ssh_transport.respond(prefix="squeue ", stderr="squeue: error: Invalid user id", return_code=1)
+
+    with pytest.raises(RuntimeError, match=r"Invalid user id"):
+        connected_server.get_queued_job_ids()
 
 
 @pytest.mark.parametrize(
@@ -528,7 +591,12 @@ def test_parse_job_status_normalizes_decorated_accounting_states(state: str, exp
 
 
 def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
-    """Verifies that the terminal set holds every settled state and neither of the two that a job still leaves."""
+    """Verifies that the terminal set holds every settled state and none of the four that a job still leaves.
+
+    ``UNKNOWN`` and ``UNRESOLVED`` are both outside it. A row whose state this enumeration does not model still proves
+    that the scheduler holds the allocation, and an answer carrying no row covers a submission accounting has not
+    registered yet as well as one it has purged. Making either terminal would abandon a live allocation.
+    """
     settled = frozenset(
         {
             JobStatus.COMPLETED,
@@ -549,6 +617,7 @@ def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
     assert JobStatus.PENDING not in TERMINAL_JOB_STATUSES
     assert JobStatus.RUNNING not in TERMINAL_JOB_STATUSES
     assert JobStatus.UNKNOWN not in TERMINAL_JOB_STATUSES
+    assert JobStatus.UNRESOLVED not in TERMINAL_JOB_STATUSES
 
 
 # File transfer

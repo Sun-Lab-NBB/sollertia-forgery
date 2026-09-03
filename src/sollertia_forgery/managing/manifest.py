@@ -36,6 +36,37 @@ if TYPE_CHECKING:
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
+MANIFEST_AXES: tuple[str, ...] = (
+    "animal",
+    "type",
+    "system",
+    "complete",
+    "integrity",
+    "runtime",
+    "microcontroller",
+    "video",
+    "two_photon",
+)
+"""The manifest columns by which a caller may filter sessions, and the axes its breakdown counts. The five pipeline
+columns each hold a 0 or a 1, so their breakdown reports how many sessions have finished that pipeline."""
+
+MANIFEST_SEMI_FIELDS: tuple[str, ...] = (
+    "animal",
+    "session",
+    "session_path",
+    "date",
+    "type",
+    "system",
+    "complete",
+    "integrity",
+    "runtime",
+    "microcontroller",
+    "video",
+    "two_photon",
+)
+"""The session fields a semi-detail listing carries, which is the session's identity and whether each of its
+pipelines finished."""
+
 _PIPELINE_STATUS_COLUMNS: dict[ProcessingPipelines, str] = {
     ProcessingPipelines.CHECKSUM: "integrity",
     ProcessingPipelines.RUNTIME: "runtime",
@@ -78,6 +109,58 @@ Notes:
     The ``complete`` column and the five pipeline columns each hold a 0 or a 1, so a reader applies one done or
     not-done convention across all six.
 """
+
+_MANIFEST_ROW_COLUMNS: tuple[str, ...] = (
+    "animal",
+    "session",
+    # The session's location relative to the project root, as '<animal_id>/<session_name>'. Stored relative rather than
+    # absolute so a manifest generated on one machine resolves against any data root. An orchestrator therefore maps a
+    # manifest row back to a directory to process.
+    "session_path",
+    # Session acquisition time as a timezone-aware UTC datetime, matching the UTC session name.
+    "date",
+    # The session type, a SessionTypes enumeration value.
+    "type",
+    # The acquisition system that recorded the session, an AcquisitionSystems enumeration value.
+    "system",
+    "notes",
+    # Determines whether the session's data is complete and ready for unsupervised processing.
+    "complete",
+    # Determines whether the checksum (data-integrity) pipeline finished for this session, stored as 1 when every job
+    # succeeded and 0 otherwise. Which jobs failed, and why, are read from the project job artifact.
+    "integrity",
+    # Determines whether the two-photon (cindra) processing pipeline finished for this session.
+    "two_photon",
+    # Determines whether the runtime processing pipeline finished for this session.
+    "runtime",
+    # Determines whether the microcontroller processing pipeline finished for this session.
+    "microcontroller",
+    # Determines whether the video (timestamp, tracking, motion energy) pipeline finished for this session.
+    "video",
+)
+"""The columns the generation pass accumulates, one value per session, before framing the accumulator under the
+manifest schema.
+
+Notes:
+    Named separately from the schema, since the accumulator holds the values a column collects while the schema also
+    declares the type each column stores.
+"""
+
+_MANIFEST_SUMMARY_COLUMNS: tuple[str, ...] = (
+    "animal",
+    "session",
+    "date",
+    "type",
+    "system",
+    "complete",
+    "integrity",
+    "two_photon",
+    "runtime",
+    "microcontroller",
+    "video",
+)
+"""The columns the summary view prints, which are every manifest column except the wide session path and experimenter
+notes fields that would push the per-session processing state off one terminal line."""
 
 
 def project_manifest_path(project_directory: Path) -> Path:
@@ -150,37 +233,9 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
 
     lock = FileLock(str(manifest_lock))
     with lock.acquire(timeout=20.0):
-        tracker.start_job(job_id=job_id)
-        try:
+        with tracker.run_job(job_id=job_id):
             manifest: dict[str, list[str | datetime | bool | int | None]] = {
-                "animal": [],
-                "session": [],
-                # The session's location relative to the project root, as '<animal_id>/<session_name>'. Stored
-                # relative rather than absolute so a manifest generated on one machine resolves against any data
-                # root. An orchestrator therefore maps a manifest row back to a directory to process.
-                "session_path": [],
-                # Session acquisition time as a timezone-aware UTC datetime, matching the UTC session name.
-                "date": [],
-                # The session type, a SessionTypes enumeration value.
-                "type": [],
-                # The acquisition system that recorded the session, an AcquisitionSystems enumeration value.
-                "system": [],
-                "notes": [],
-                # Determines whether the session's data is complete and ready for unsupervised processing.
-                "complete": [],
-                # Determines whether the checksum (data-integrity) pipeline finished for this session, stored
-                # as 1 when every job succeeded and 0 otherwise. Which jobs failed, and why, are read from the
-                # project job artifact.
-                "integrity": [],
-                # Determines whether the two-photon (cindra) processing pipeline finished for this session.
-                "two_photon": [],
-                # Determines whether the runtime processing pipeline finished for this session.
-                "runtime": [],
-                # Determines whether the microcontroller processing pipeline finished for this session.
-                "microcontroller": [],
-                # Determines whether the video (timestamp, tracking, motion energy) pipeline finished for this
-                # session.
-                "video": [],
+                column: [] for column in _MANIFEST_ROW_COLUMNS
             }
 
             for session_data in sessions:
@@ -218,18 +273,11 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
             with atomic_write(file_path=manifest_path, binary=True) as file:
                 sorted_manifest.write_ipc(file=file, compression="uncompressed")
 
-            tracker.complete_job(job_id=job_id)
-
-            if display_progress:
-                console.echo(
-                    message=f"Project '{project_directory.stem}' manifest: Generated.",
-                    level=LogLevel.SUCCESS,
-                )
-
-        except Exception as exception:
-            # Records the manifest job as failed before re-raising so the tracker reflects the aborted run.
-            tracker.fail_job(job_id=job_id, error_message=str(exception))
-            raise
+        if display_progress:
+            console.echo(
+                message=f"Project '{project_directory.stem}' manifest: Generated.",
+                level=LogLevel.SUCCESS,
+            )
 
 
 class ProjectManifest:
@@ -276,22 +324,8 @@ class ProjectManifest:
             animal: The unique identifier of the animal for which to display the data. If provided, this method only
                 displays the data for that animal. Otherwise, it displays the data for all animals.
         """
-        summary_columns = [
-            "animal",
-            "session",
-            "date",
-            "type",
-            "system",
-            "complete",
-            "integrity",
-            "two_photon",
-            "runtime",
-            "microcontroller",
-            "video",
-        ]
-
         # The stored pipeline columns are already the 0/1 indicator this view wants, so nothing needs reducing.
-        data_frame = self._display_frame().select(summary_columns)
+        data_frame = self._display_frame().select(_MANIFEST_SUMMARY_COLUMNS)
 
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == animal)
@@ -614,15 +648,29 @@ def _read_pipeline_state(
 
 
 def _assert_status_column_coverage() -> None:
-    """Verifies that every pipeline whose tracker a session carries declares a manifest status column.
+    """Verifies that every pipeline whose tracker a session carries declares a manifest status column, and that each
+    roster this function enumerates carries every declared column and names no column the manifest does not hold.
 
     Notes:
-        Runs at import, so a pipeline added to ``SESSION_PIPELINES`` without a status column here fails the moment
-        this module loads rather than partway through a generation pass over a project.
+        Runs at import, so a pipeline added to ``SESSION_PIPELINES`` without a status column here, or a status column
+        left out of a roster that must name it, fails the moment this module loads rather than partway through a
+        generation pass over a project. A column left out of the summary view, the filterable axes, or the listed
+        fields is otherwise silent, since each of those rosters reports one column fewer than the manifest holds.
+
+        Each roster is required to carry every status column rather than to equal the set of them, since the rosters
+        also name the identity and acquisition columns that no pipeline writes. The reverse containment is checked
+        against ``_PROJECT_MANIFEST_SCHEMA``, which every roster names a subset of. An entry naming a column the
+        manifest no longer holds is otherwise silent too, since a breakdown skips an axis the frame lacks and a
+        projection skips a field the row lacks, so the stale entry simply stops appearing.
+
+        A roster that names only the identity or notes columns, such as the detail fields a session listing splices
+        onto the semi-fields or the columns the notes view selects, is deliberately outside this check, since such a
+        roster carries no status column by design.
 
     Raises:
-        RuntimeError: If a per-session pipeline declares no status column, or a column names a pipeline for which
-            no session carries a tracker.
+        RuntimeError: If a per-session pipeline declares no status column, a column names a pipeline for which no
+            session carries a tracker, a roster omits a declared status column, or a roster names a column absent
+            from the manifest schema.
     """
     declared = frozenset(_PIPELINE_STATUS_COLUMNS)
     carried = frozenset(SESSION_PIPELINES)
@@ -633,6 +681,34 @@ def _assert_status_column_coverage() -> None:
             f"{sorted(member.value for member in declared ^ carried)}."
         )
         console.error(message=message, error=RuntimeError)
+
+    status_columns = frozenset(_PIPELINE_STATUS_COLUMNS.values())
+    schema_columns = frozenset(_PROJECT_MANIFEST_SCHEMA)
+    rosters: dict[str, tuple[str, ...]] = {
+        "_PROJECT_MANIFEST_SCHEMA": tuple(_PROJECT_MANIFEST_SCHEMA),
+        "_MANIFEST_ROW_COLUMNS": _MANIFEST_ROW_COLUMNS,
+        "_MANIFEST_SUMMARY_COLUMNS": _MANIFEST_SUMMARY_COLUMNS,
+        "MANIFEST_AXES": MANIFEST_AXES,
+        "MANIFEST_SEMI_FIELDS": MANIFEST_SEMI_FIELDS,
+    }
+    for roster_name, roster in rosters.items():
+        missing = status_columns - frozenset(roster)
+        if missing:
+            message = (
+                f"Unable to validate the manifest's pipeline status columns. Every status column declared in "
+                f"_PIPELINE_STATUS_COLUMNS must be named by every roster that lists the manifest's columns, but "
+                f"{roster_name} omits {sorted(missing)}."
+            )
+            console.error(message=message, error=RuntimeError)
+
+        unknown = frozenset(roster) - schema_columns
+        if unknown:
+            message = (
+                f"Unable to validate the manifest's column rosters. Every roster that lists the manifest's columns "
+                f"must name only the columns declared in _PROJECT_MANIFEST_SCHEMA, but {roster_name} names "
+                f"{sorted(unknown)}, which the manifest does not hold."
+            )
+            console.error(message=message, error=RuntimeError)
 
 
 _assert_status_column_coverage()

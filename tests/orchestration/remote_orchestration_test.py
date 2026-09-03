@@ -25,11 +25,12 @@ from sollertia_forgery.orchestration import (
     resolve_batches,
     connect_to_server,
     project_plan_path,
-    query_submissions,
     render_submission,
     cancel_submissions,
     sync_project_state,
+    read_scheduler_records,
     remote_batch_directory,
+    resolve_queried_allocations,
 )
 from sollertia_forgery.server.server import _parse_job_status
 from sollertia_forgery.orchestration.graph import (
@@ -43,10 +44,11 @@ from sollertia_forgery.orchestration.hosts import environment_command
 from sollertia_forgery.orchestration.ledger import (
     SubmissionBatch,
     RemoteSubmission,
+    _ledger_lock,
     _ledger_path,
+    _save_ledger,
     record_batch,
     forget_batches,
-    _retire_settled_batches,
 )
 from sollertia_forgery.orchestration.remote import _prepare_remote_batch
 from sollertia_forgery.orchestration.dispatch import resolve_job_command
@@ -689,6 +691,57 @@ def test_re_submitting_a_batch_keeps_the_allocations_its_first_attempt_queued() 
     ]
 
 
+def test_an_entry_committed_while_a_batch_submits_survives_its_record() -> None:
+    """Verifies that the entries a re-submission carries forward are read under the same lock that writes them.
+
+    Another writer can commit against the same batch while this one is submitting, changing an entry this submission
+    does not re-submit. Computing the carried entries from a read taken before the lock would write that commit back
+    out of the record, dropping an allocation the ledger is the only record of.
+    """
+    record_batch(
+        batch=build_batch(
+            batch_id="batch01",
+            submissions=[
+                build_submission(slurm_job_id="900", job_id="rename"),
+                build_submission(slurm_job_id="901", job_id="energy"),
+            ],
+        )
+    )
+    acquire = _ledger_lock
+
+    def _commit_a_concurrent_entry_then_acquire():
+        # Stands in for a writer that committed its own record just before this one was handed the lock.
+        held = acquire()
+        committed = read_ledger()
+        committed.batches = [
+            build_batch(
+                batch_id="batch01",
+                submissions=[
+                    build_submission(slurm_job_id="902", job_id="rename"),
+                    build_submission(slurm_job_id="901", job_id="energy"),
+                ],
+            )
+        ]
+        _save_ledger(ledger=committed)
+        return held
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("sollertia_forgery.orchestration.ledger._ledger_lock", _commit_a_concurrent_entry_then_acquire)
+        submit_batch(
+            server=StubServer(),
+            jobs=[build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")],
+            batch_id="batch01",
+        )
+
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    # The concurrently committed allocation of the job this submission did not cover is the one that is carried.
+    assert [(entry.job_id, entry.slurm_job_id) for entry in recorded.submissions] == [
+        ("rename", "902"),
+        ("energy", "1000"),
+    ]
+
+
 def test_recording_a_batch_preserves_the_batches_already_in_the_ledger() -> None:
     """Verifies that concurrent runs are both queryable, which is the whole reason the record is durable."""
     record_batch(batch=build_batch(batch_id="batch01", submissions=[build_submission(slurm_job_id="1000")]))
@@ -710,72 +763,6 @@ def test_re_recording_a_batch_replaces_its_earlier_record() -> None:
     ledger = read_ledger()
     assert [recorded.batch_id for recorded in ledger.batches] == ["batch01"]
     assert [entry.slurm_job_id for entry in ledger.batches[0].submissions] == ["1000", "1001"]
-
-
-def test_a_batch_is_retired_once_every_allocation_reaches_a_terminal_state() -> None:
-    """Verifies that the ledger names outstanding allocations alone, so a finished batch has nothing left to answer."""
-    record_batch(
-        batch=build_batch(
-            batch_id="batch01",
-            submissions=[build_submission(slurm_job_id="1000"), build_submission(slurm_job_id="1001")],
-        )
-    )
-
-    retired = _retire_settled_batches(statuses={"1000": JobStatus.COMPLETED, "1001": JobStatus.FAILED})
-
-    assert retired == ["batch01"]
-    assert read_ledger().batches == []
-
-
-def test_a_partly_finished_batch_is_retained() -> None:
-    """Verifies that a batch is retired as a whole, so one finished allocation never drops the ones still running beside
-    it.
-    """
-    record_batch(
-        batch=build_batch(
-            batch_id="batch01",
-            submissions=[build_submission(slurm_job_id="1000"), build_submission(slurm_job_id="1001")],
-        )
-    )
-
-    retired = _retire_settled_batches(statuses={"1000": JobStatus.COMPLETED, "1001": JobStatus.RUNNING})
-
-    assert retired == []
-    assert read_ledger().resolve_batch(batch_id="batch01") is not None
-
-
-def test_an_allocation_the_query_did_not_cover_keeps_its_batch() -> None:
-    """Verifies that a partial query never retires a batch it did not fully observe, so an unqueried job is not assumed
-    finished.
-    """
-    record_batch(
-        batch=build_batch(
-            batch_id="batch01",
-            submissions=[build_submission(slurm_job_id="1000"), build_submission(slurm_job_id="1001")],
-        )
-    )
-
-    retired = _retire_settled_batches(statuses={"1000": JobStatus.COMPLETED})
-
-    assert retired == []
-    assert read_ledger().resolve_batch(batch_id="batch01") is not None
-
-
-def test_a_blocked_allocation_retires_its_batch() -> None:
-    """Verifies that a dependency that can never be satisfied is terminal, so it must not hold a batch open forever."""
-    record_batch(batch=build_batch(batch_id="batch01", submissions=[build_submission(slurm_job_id="1000")]))
-
-    assert _retire_settled_batches(statuses={"1000": JobStatus.BLOCKED}) == ["batch01"]
-
-
-def test_retirement_leaves_the_batches_that_are_still_running() -> None:
-    """Verifies that concurrent runs are independent, so retiring one batch never disturbs another."""
-    record_batch(batch=build_batch(batch_id="done", submissions=[build_submission(slurm_job_id="1")]))
-    record_batch(batch=build_batch(batch_id="running", submissions=[build_submission(slurm_job_id="2")]))
-
-    _retire_settled_batches(statuses={"1": JobStatus.COMPLETED, "2": JobStatus.RUNNING})
-
-    assert [recorded.batch_id for recorded in read_ledger().batches] == ["running"]
 
 
 def test_naming_no_batch_resolves_every_outstanding_batch() -> None:
@@ -1129,17 +1116,37 @@ def test_a_submission_writes_each_job_script_into_the_batch_directory_it_created
 def test_the_scheduler_reports_the_state_of_every_submitted_allocation(
     connected_server: Server, stub_ssh_transport: Any
 ) -> None:
-    """Verifies that observing a state and acting on it are separate, so a query reports what the scheduler holds and
-    retires none.
+    """Verifies that observing a state and acting on it are separate, so a read reports both scheduler records and
+    retires nothing.
     """
     stub_ssh_transport.job_statuses = {"1000": "RUNNING", "1001": "COMPLETED"}
+    stub_ssh_transport.queued_job_ids = {"1000"}
+    submissions = [build_submission(slurm_job_id="1000"), build_submission(slurm_job_id="1001")]
 
-    statuses = query_submissions(
-        server=connected_server,
-        submissions=[build_submission(slurm_job_id="1000"), build_submission(slurm_job_id="1001")],
+    reading = read_scheduler_records(
+        server=connected_server, allocations=resolve_queried_allocations(submissions=submissions, claims={})
     )
 
-    assert statuses == {"1000": JobStatus.RUNNING, "1001": JobStatus.COMPLETED}
+    assert reading.statuses == {"1000": JobStatus.RUNNING, "1001": JobStatus.COMPLETED}
+    assert reading.queued == frozenset({"1000"})
+
+
+def test_the_scheduler_read_reports_an_unreported_allocation_as_unresolved(
+    connected_server: Server, stub_ssh_transport: Any
+) -> None:
+    """Verifies that an allocation accounting holds no row for reports as unresolved on every read.
+
+    A dependent allocation of a submitted graph sits queued behind its prerequisites, and accounting registers a
+    submission only after the scheduler accepts it, so an unreported answer says nothing about whether the allocation
+    is alive. The read therefore reports what accounting said and never rewrites it into a settled state.
+    """
+    record_batch(batch=build_batch(batch_id="batch01", submissions=[build_submission(slurm_job_id="1000")]))
+    stub_ssh_transport.job_statuses = {}
+
+    reading = read_scheduler_records(server=connected_server, allocations=["1000"])
+
+    assert reading.statuses == {"1000": JobStatus.UNRESOLVED}
+    assert read_ledger().resolve_batch(batch_id="batch01") is not None, "a status read retired an outstanding batch"
 
 
 def test_cancelling_a_batch_names_every_allocation_it_holds(connected_server: Server, stub_ssh_transport: Any) -> None:

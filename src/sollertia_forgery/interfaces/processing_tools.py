@@ -26,7 +26,7 @@ from .responses import (
     resolve_detail_limit,
 )
 from .mcp_instance import mcp
-from .remote_tools import remote_batch_cancel, remote_batch_status
+from .remote_tools import remote_batch_cancel, remote_batch_retire, remote_batch_status
 from ..orchestration import (
     RESERVED_CORES,
     BATCH_PIPELINES,
@@ -44,9 +44,9 @@ from ..orchestration import (
     build_pending_job,
     connect_to_server,
     current_timestamp,
-    query_submissions,
     read_batch_outcome,
     resolve_batch_host,
+    resolve_allocations,
     reconcile_local_jobs,
     close_settled_batches,
     group_jobs_by_tracker,
@@ -54,10 +54,13 @@ from ..orchestration import (
     read_prepared_batches,
     reconcile_remote_jobs,
     record_prepared_batch,
+    read_scheduler_records,
     remote_batch_directory,
     resolve_host_memory_mb,
+    resolve_tracker_claims,
     resolve_core_allocations,
     resolve_concurrency_limits,
+    resolve_queried_allocations,
     resolve_concurrency_reservations,
 )
 from .host_resolution import (
@@ -67,6 +70,7 @@ from .host_resolution import (
 )
 
 if TYPE_CHECKING:
+    from ..server import Server
     from ..orchestration import ExecutionHost, GenericPendingJob
 
 _CLOSED_BATCH_MESSAGE: str = (
@@ -127,6 +131,33 @@ _RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "unit_path", "op
 _STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in ProcessingStatus)
 """The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the values
 by which a caller filters the listing, and the keys under which a tracker summary counts."""
+
+_UNREACHABLE_SERVER: str = (
+    "Unable to reach the remote compute server, so nothing was submitted and every prepared batch stays as it was."
+)
+"""The cause reported when the connection itself cannot be opened. It is named apart from every step behind it because
+it is repaired on the network rather than on either machine."""
+
+_RECONCILIATION_FAILURE: str = (
+    "Unable to resolve which of this batch's jobs an allocation already runs, so nothing was submitted. Submitting "
+    "without that resolution could run a second allocation over a job another one is still carrying."
+)
+"""The cause reported when the reconciliation cannot read the ledger or the scheduler's accounting. The submission is
+refused rather than attempted, since the resolution is what keeps one job from being run twice."""
+
+_RESET_FAILURE: str = (
+    "Unable to clear the recorded state of the jobs this batch dispatches on the remote compute server, so nothing "
+    "was submitted."
+)
+"""The cause reported when the host refuses the reset that precedes a submission. A job dispatched over an uncleared
+record would report the previous run's outcome for the window before it starts."""
+
+_SUBMISSION_FAILURE: str = (
+    "Unable to submit the remote batch to the compute server's scheduler. Every allocation the scheduler accepted "
+    "before the rejection is recorded on the submission ledger, so re-running this batch submits what it left."
+)
+"""The cause reported when the scheduler rejects a submission. The allocations it already accepted stay queued and
+recorded, which is why the message names the rerun rather than describing the batch as unsubmitted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,12 +279,13 @@ def inspect_job_resources_tool(
             parameters they would use.
 
     Returns:
-        A response dict with a ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``,
-        and ``summed_memory_mb``. Carries a ``breakdown`` per job type and a ``units`` list naming each session and how
-        many jobs it resolved. Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and
-        ``next_start_row`` whenever a filter is named or the listing is requested. For ``local`` it also carries this
-        machine's ``total_memory_mb`` and the batch-available ``total_cores`` left after the reserved system cores.
-        Both are absent for ``remote``, where the scheduler holds the budgets and the caller names what a job requests.
+        A response dict with the ``pipeline`` inspected, the ``host`` that holds the data, ``total_units``, and a
+        ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``, and ``summed_memory_mb``.
+        Carries a ``breakdown`` per job type and a ``units`` list naming each session and how many jobs it resolved.
+        Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a
+        filter is named or the listing is requested. For ``local`` it also carries this machine's ``total_memory_mb``
+        and the batch-available ``total_cores`` left after the reserved system cores. Both are absent for ``remote``,
+        where the scheduler holds the budgets and the caller names what a job requests.
     """
     prepared = _prepare_batch_response(
         pipeline=pipeline, session_paths=session_paths, options=options, host=host, replan=False, record=False
@@ -312,10 +344,13 @@ def execute_jobs_tool(
     prepared against different hosts are rejected rather than mixed.
 
     Before anything is dispatched, every job that the trackers already record as running is reconciled. Locally that
-    record describes a pool that died, so the job is rerun. Remotely the submission ledger and the tracker's executor
-    identifier are consulted, and a job whose allocation is still live is adopted rather than submitted twice, with its
-    dependents wired to wait on the allocation already running it. Every job that is dispatched has its recorded state
-    cleared first, so a status read stays honest across the window before it starts.
+    record describes a pool that died, so the job is rerun. Remotely each job is resolved through the same three
+    records ``get_processing_status_tool`` resolves it against, and the ``verdict`` decides: a job that resolves as
+    running is left alone, adopted onto the allocation already running it with its dependents wired to wait on that
+    allocation, and every other verdict releases the job to this run. A job that resolves as running while naming no
+    allocation, which is one whose tracker claims an executor outside the scheduler, is withheld along with its
+    dependents rather than run a second time, and reported under ``withheld_jobs``. Every job that is dispatched has
+    its recorded state cleared first, so a status read stays honest across the window before it starts.
 
     Locally one pool serves every pipeline, so several batches may be dispatched together and the engine packs them
     against one pair of budgets. Remotely the scheduler sequences the dependency graph, so nothing has to stay running
@@ -335,12 +370,15 @@ def execute_jobs_tool(
         batch holds, and any ``adopted_jobs`` it left to an allocation already running them. A local dispatch adds the
         resolved ``core_budget``, ``memory_budget_mb``, ``pool_size``, and a ``job_allocations`` entry per job type. A
         remote dispatch adds the ``batch_id`` under which its scripts and logs are filed, the ``batch_ids`` the
-        submission covered, ``walltime_minutes``, the ``batch_directory`` on the server, and a ``submissions`` list
-        pairing each job with the allocation that runs it. Either host adds an ``invalid_jobs`` list when a recorded
-        descriptor could not be built into a job. Returns an error when the prepared-batch registry cannot be read, when
-        an identifier resolves to no prepared batch, or when no batch is named. Returns an error as well when the
-        named batches mix hosts, when every prepared job is blocked or already succeeded, or when no recorded
-        descriptor builds into a job.
+        submission covered, ``walltime_minutes``, the ``batch_directory`` on the server, a ``withheld_jobs`` list
+        naming each job it neither submitted nor adopted alongside the executor its tracker claims, and a
+        ``submissions`` list pairing each job with the allocation that runs it. Either host adds an ``invalid_jobs``
+        list when a recorded descriptor could not be built into a job. Returns an error when the prepared-batch
+        registry cannot be read, when an identifier resolves to no prepared batch, or when no batch is named. Returns
+        an error as well when the named batches mix hosts, when every prepared job is blocked or already succeeded, or
+        when no recorded descriptor builds into a job. A remote dispatch reports each of its own steps as itself,
+        returning an error when the server cannot be reached, when the reconciliation cannot resolve what already runs,
+        when the host refuses to clear the dispatched jobs' records, and when the scheduler rejects the submission.
     """
     try:
         documents, missing = read_prepared_batches(batch_ids=batch_ids)
@@ -428,12 +466,23 @@ def get_processing_status_tool(
     Naming a filter adds a page of jobs carrying identity and status. Filtering to ``failed`` is how a caller reads
     which jobs failed, and opting into detail adds each one's error text, timing, and the resources it occupies.
 
-    A ``remote`` call carries an ``outcomes`` entry for any batch that settled and closed on it. A ``local`` call
-    carries one once the run this process dispatched has closed and recorded an outcome for at least one of its
-    batches. The report covers the batches named in ``batch_ids``, or the batches the last run covered when the
-    argument names none. Each entry is the durable snapshot that closure took of what a batch's jobs recorded. Read
-    ``complete``, ``succeeded``, ``failed``, ``blocked``, and ``outstanding`` from it to decide whether the run needs
-    anything further, and ``failed_jobs`` for the error text each failure recorded.
+    A ``remote`` call carries an ``outcomes`` entry for any batch that settled and closed on it, and resolves every
+    allocation of every batch that remains outstanding against three records: the scheduler's accounting, the
+    scheduler's queue, and the processing tracker of the job the allocation carries. Each allocation reports the
+    ``scheduler_state`` those first two records place it in, the ``tracker_status`` the third holds, the ``verdict``
+    the three of them carry, and the ``remediation`` that verdict prescribes. A verdict of ``running`` means the
+    scheduler still holds the recorded allocation, or holds the one this job's own tracker claims, and nothing is
+    remediated for it, which is how work another machine submitted is left alone by a ledger that never recorded it.
+    ``finished`` and ``failed`` mean the job recorded an outcome its tracker keeps, ``abandoned`` means nothing claims
+    the job, and ``stranded`` means its tracker still claims to be running while no allocation is. Each batch also
+    carries a ``progress`` verdict of ``progressing``, ``stalled``, or ``awaiting_closure`` alongside the remedy for
+    it, and is stalled when none of its allocations resolves as running and at least one is gone from both scheduler
+    records, which no later query changes. ``retire_remote_batches_tool`` is what remediates such a batch. A ``local``
+    call carries an ``outcomes`` entry once the run this process dispatched has closed and recorded an outcome for at
+    least one of its batches. The report covers the batches named in ``batch_ids``, or the batches the last run
+    covered when the argument names none. Each entry is the durable snapshot that closure took of what a
+    batch's jobs recorded. Read ``complete``, ``succeeded``, ``failed``, ``blocked``, and ``outstanding`` from it to
+    decide whether the run needs anything further, and ``failed_jobs`` for the error text each failure recorded.
 
     Args:
         host: Which batch to report, either ``local`` for this machine's pool or ``remote`` for the outstanding
@@ -444,7 +493,7 @@ def get_processing_status_tool(
             ``local`` call made while a batch runs returns one error naming every identifier the running batch does
             not cover, since one pool holds one batch.
         status_filter: Restricts the listing to one status. Locally one of ``succeeded``, ``failed``, ``running``, or
-            ``scheduled``, and remotely a scheduler state such as ``FAILED``, ``RUNNING``, or ``BLOCKED``.
+            ``scheduled``, and remotely an accounting state such as ``FAILED``, ``RUNNING``, or ``BLOCKED``.
         session_paths: Restricts the listing to these session root directories.
         job_ids: Restricts the listing to these tracker job identifiers.
         job_names: Restricts the listing to these job type names, such as ``motion_energy``.
@@ -456,8 +505,14 @@ def get_processing_status_tool(
         detailed: Determines whether the listed jobs carry their resources, timing, provenance, and error text.
 
     Returns:
-        For ``remote``, a response dict with ``active``, the ``batches`` covered, a ``summary`` counting the allocations
-        by scheduler state, a ``breakdown`` per axis, and the ``outcomes`` of any batch that closed on this call. For
+        For ``remote``, a response dict with ``active``, the ``batches`` covered, each carrying its
+        ``outstanding_seconds``, its ``progress`` verdict, a ``verdicts`` count per allocation verdict, its
+        ``running_allocations``, ``stranded_allocations``, and ``unresolvable_allocations``, and its ``remedy``,
+        ``stalled_batch_ids`` naming the batches that can no longer settle, ``uncovered_batch_ids`` naming any batch
+        another process recorded while this call ran, which this call's records say nothing about and which the next
+        read covers, a ``summary`` counting the allocations by accounting state, a ``breakdown`` per axis,
+        ``scheduler_read_error``, which is empty unless one of the
+        scheduler's records could not be read, and the ``outcomes`` of any batch that closed on this call. For
         ``local``, a response dict with ``active`` (whether the manager thread is still running), ``canceled``, a
         ``summary`` counting the batch's succeeded, failed, running, and scheduled jobs alongside their total, the
         ``status`` label resolved from those counts, and a ``breakdown`` per axis. Carries a ``jobs`` list with
@@ -557,7 +612,10 @@ def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = No
 
     Locally this is cooperative: in-flight jobs finish and queued jobs are dropped. Remotely it cancels queued and
     running allocations alike, and the scheduler cancels a dependent of a canceled allocation in turn because its
-    dependency can no longer complete successfully.
+    dependency can no longer complete successfully. A remote cancellation covers every allocation the ledger recorded
+    for the named batches and then, resolving them the way ``get_processing_status_tool`` resolves them, every further
+    allocation a job's own tracker claims and the scheduler still holds, which is how it reaches a run another machine
+    submitted.
 
     Args:
         host: Which batch to cancel, either ``local`` for this machine's pool or ``remote`` for the server's scheduler.
@@ -565,9 +623,10 @@ def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = No
             one pool holds one batch.
 
     Returns:
-        A response dict with ``canceled`` and, for ``local``, the number of queued jobs in ``dropped_jobs``. For
-        ``remote`` it carries the ``canceled_jobs`` count and the ``batch_ids`` the cancellation covered. Returns an
-        error when nothing is running or outstanding.
+        A response dict with ``canceled``, a ``message`` stating what the cancellation did, and, for ``local``, the
+        number of queued jobs in ``dropped_jobs``. For ``remote`` it carries the ``canceled_jobs`` count, the
+        ``canceled_allocations`` it named, and the ``batch_ids`` the cancellation covered. Returns an error when
+        nothing is running or outstanding.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -588,6 +647,62 @@ def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = No
         dropped_jobs=dropped,
         message="Cancellation requested. In-flight jobs will finish, queued jobs were dropped.",
     )
+
+
+@mcp.tool()
+def retire_remote_batches_tool(
+    batch_ids: list[str], *, force: bool = False, drop_without_outcome: bool = False
+) -> dict[str, Any]:
+    """Applies the resolved remediation to every allocation of the named batches, then drops their ledger entries.
+
+    This is the one tool that acts on what ``get_processing_status_tool`` resolves with ``host='remote'``. Every
+    allocation is resolved there and here by the same three records, and the ``verdict`` that resolution carries
+    decides what happens to it. A ``stranded`` allocation, whose job's tracker still claims to be running while no
+    allocation is, has that job returned to the scheduled state, which is what releases a job no rerun could otherwise
+    reach. A ``finished``, ``failed``, or ``abandoned`` allocation has its tracker left exactly as it stands, so no
+    result is discarded and no failure is silently cleared. Every named batch is then snapshotted through the same
+    closure a settled batch goes through, and its ledger entry is dropped, which is what stops the batch being
+    outstanding and stops its jobs being claimed during reconciliation.
+
+    Two guarantees stand in front of that, and each is waived by its own flag and by nothing else. A batch holding an
+    allocation that resolves as ``running`` is refused, because remediating it would disturb work the scheduler is
+    still carrying. ``force`` waives that one, and then every allocation those entries leave held is canceled before
+    any tracker is written, the allocation a job's own tracker claims included, since that claim may name another
+    machine's allocation and it is the one actually carrying the job. A batch whose outcome cannot be snapshotted is
+    refused, because the ledger entry is the last record naming the run, and ``drop_without_outcome`` waives that one.
+    An unreachable server hides every record, so every allocation resolves as ``running``, both waivers are needed to
+    remediate through it, and remediating then cancels nothing and writes no tracker, because reaching either needs
+    the connection that failed.
+
+    This drops the ledger entries of the named batches, and the snapshot it takes first replaces each covered batch's
+    prepared document with the outcome recorded for it. It removes neither those outcomes nor the state snapshots
+    beside them: ``forget_prepared_batches_tool`` clears the batch registry that holds both.
+
+    Args:
+        batch_ids: The outstanding batches to remediate, as ``get_processing_status_tool`` reports them with
+            ``host='remote'``. Naming none is an error, since remediation never defaults to the whole ledger.
+        force: Determines whether to remediate batches holding an allocation that resolves as running. Every
+            allocation those entries leave held is canceled before any tracker is written, the one a job's tracker
+            claims included. An allocation whose state could not be read at all still resolves as running and is
+            canceled by nothing, so waiving the refusal for it drops its entry while leaving its tracker untouched.
+        drop_without_outcome: Determines whether to drop the ledger entries when their outcome cannot be snapshotted.
+
+    Returns:
+        A response dict with ``retired``, the ``batch_ids`` the ledger held and dropped, ``total_allocations`` counting
+        the allocations they held, a ``batches`` list carrying each batch's ``batch_id``, its ``covered_batch_ids``,
+        its ``allocations``, and its ``outstanding_seconds``, and an ``allocations`` list carrying, for each
+        allocation, its identity, its ``scheduler_state``, its ``tracker_status``, its ``verdict``, the
+        ``remediation`` applied, and whether it was ``cancelled``, whether its ``tracker_reset`` ran, whether its
+        ``snapshot_recorded``, and whether its ``entry_dropped``. It also carries ``cancelled_allocations``, a
+        ``reset_jobs`` count, the ``outcomes`` closure recorded, the ``outcome_directory`` on this machine holding
+        those outcome files and the state snapshots they cite, a ``snapshot_error`` that is empty when the snapshot
+        succeeded, and a ``message``. Returns an error when the ledger cannot be read or written, when no batch is
+        outstanding, when no identifier is named, when a named identifier is not outstanding, when the jobs' own
+        processing trackers cannot be read, when the scheduler's accounting cannot be read, when an allocation
+        resolves as running and ``force`` is not set, when a cancellation or a tracker reset fails, and when the
+        snapshot fails and ``drop_without_outcome`` is not set.
+    """
+    return remote_batch_retire(batch_ids=batch_ids, force=force, drop_without_outcome=drop_without_outcome)
 
 
 @mcp.tool()
@@ -658,7 +773,12 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
     The ``checksum`` pipeline owns no directory, because it writes its stored value into the acquired data itself.
     Cleaning it removes its tracker and leaves that stored value in place, so the unit keeps the baseline against which
     a later verification compares. The ``forging`` pipeline owns its whole dataset hierarchy, so cleaning it removes
-    every assembled feather in that dataset alongside the tracker.
+    every assembled feather in that dataset alongside the tracker. It also owns one cross-recording directory inside
+    every source session the dataset names, holding what its cross-recording stages wrote into that session's own
+    imaging output, and cleaning the pipeline removes each of those too, leaving the session's single-recording output
+    and the directories any other dataset owns beside it in place. Those directories are resolved before anything is
+    removed, so a resolver that fails leaves the unit untouched, and a source session that no longer loads is reported
+    and passed over.
 
     Args:
         pipeline: The batch pipeline to clean, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
@@ -946,6 +1066,11 @@ def _execute_remote_batch(
         the first batch. Every batch it dispatched is recorded on the ledger entry, so closure snapshots an outcome for
         each rather than for the first alone.
 
+        Each step names its own cause, because what a caller does next differs by cause: a connection is restored, a
+        scheduler outage is waited out, a host that refuses a reset is repaired, and a rejected submission is read off
+        the scheduler's own answer. Every step ahead of the submission leaves the batch exactly as it was, so retrying
+        it costs nothing.
+
     Args:
         pending: The batch's jobs.
         batch_ids: The prepared batches being dispatched. The first names the directory into which the scripts and logs
@@ -958,31 +1083,36 @@ def _execute_remote_batch(
     walltime = walltime_minutes if walltime_minutes > 0 else REMOTE_JOB_WALLTIME_MINUTES
     batch_id = batch_ids[0]
     try:
-        with connect_to_server() as server:
-            reconciliation = reconcile_remote_jobs(server=server, jobs=pending)
-            _reset_batch_jobs(host=RemoteHost(server=server), jobs=reconciliation.resettable)
-            descriptors = [_render_descriptor(job=job) for job in reconciliation.dispatchable]
+        connection = connect_to_server()
+    except Exception as exception:
+        return error_response(message=f"{_UNREACHABLE_SERVER} {exception}")
 
+    with connection as server:
+        host = RemoteHost(server=server)
+        try:
+            reconciliation = reconcile_remote_jobs(server=server, jobs=pending)
+        except Exception as exception:
+            return error_response(message=f"{_RECONCILIATION_FAILURE} {exception}")
+
+        try:
+            _reset_batch_jobs(host=host, jobs=reconciliation.resettable)
+        except Exception as exception:
+            return error_response(message=f"{_RESET_FAILURE} {exception}")
+
+        try:
             submissions = submit_batch(
                 server=server,
-                jobs=descriptors,
+                jobs=[_render_descriptor(job=job) for job in reconciliation.dispatchable],
                 batch_id=batch_id,
                 adopted=reconciliation.adopted,
                 covered_batch_ids=batch_ids,
                 walltime_minutes=walltime,
             )
-            batch_directory = str(remote_batch_directory(server=server, batch_id=batch_id))
+        except Exception as exception:
+            return error_response(message=f"{_SUBMISSION_FAILURE} {exception}")
 
-            # Closes the earlier batches that finished while this one was prepared, so the ledger sheds them without
-            # waiting for a status read that may never come. Observing a state does not retire it, so the closure
-            # step has to follow the query.
-            ledger = read_ledger()
-            outstanding = [submission for batch in ledger.batches for submission in batch.submissions]
-            if outstanding:
-                statuses = query_submissions(server=server, submissions=outstanding)
-                close_settled_batches(host=RemoteHost(server=server), batches=ledger.batches, statuses=statuses)
-    except Exception as exception:
-        return error_response(message=f"Unable to submit the remote batch. {exception}")
+        batch_directory = str(remote_batch_directory(server=server, batch_id=batch_id))
+        _close_finished_batches(server=server, host=host, batch_id=batch_id)
 
     return ok_response(
         started=True,
@@ -997,11 +1127,56 @@ def _execute_remote_batch(
             {"unit_path": unit_path, "job_id": job_id, "slurm_job_id": allocation}
             for (unit_path, job_id), allocation in sorted(reconciliation.adopted.items())
         ],
+        withheld_jobs=[
+            {"unit_path": str(job.unit_path), "job_id": job.job_id, "executor_id": job.executor_id}
+            for job in reconciliation.withheld
+        ],
         submissions=[
             {"job_id": submission.job_id, "slurm_job_id": submission.slurm_job_id, "job_name": submission.job_name}
             for submission in submissions
         ],
     )
+
+
+def _close_finished_batches(server: Server, host: ExecutionHost, batch_id: str) -> None:
+    """Closes the outstanding batches that finished before this submission was accepted.
+
+    Notes:
+        The ledger sheds a finished batch here rather than waiting for a status read that may never come. The batches
+        are resolved exactly as a status read resolves them and closed from those resolutions, so this housekeeping
+        drops nothing a status read would report as still held.
+
+        A failure is reported as a warning rather than raised, because it runs behind an accepted submission and
+        raising would answer a submitted batch as a failed one. The batches it could not close stay outstanding, so
+        the next query tries them again.
+
+    Args:
+        server: The connected server that runs the allocations.
+        host: The host holding the data the batches' jobs read.
+        batch_id: The identifier of the batch this submission dispatched, which the warning names.
+    """
+    try:
+        ledger = read_ledger()
+        if not ledger.batches:
+            return
+        outstanding = [submission for batch in ledger.batches for submission in batch.submissions]
+        claims = resolve_tracker_claims(host=host, submissions=outstanding)
+        reading = read_scheduler_records(
+            server=server, allocations=resolve_queried_allocations(submissions=outstanding, claims=claims)
+        )
+        close_settled_batches(
+            host=host,
+            batches=ledger.batches,
+            resolutions=resolve_allocations(batches=ledger.batches, reading=reading, claims=claims),
+        )
+    except Exception as exception:
+        console.echo(
+            message=(
+                f"Unable to close the batches that finished before '{batch_id}' was submitted, which stay "
+                f"outstanding so the next query can try again. {exception}"
+            ),
+            level=LogLevel.WARNING,
+        )
 
 
 def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:

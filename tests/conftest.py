@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+from natsort import natsorted
 import platformdirs
 from sollertia_shared_assets import (
     DESCRIPTOR_REGISTRY,
@@ -87,6 +88,10 @@ MOTION_ENERGY_FRAME_HEIGHT: int = 100
 
 MOTION_ENERGY_FRAME_WIDTH: int = 64
 """The width of a synthetic recording frame, chosen so it is not a multiple of the analysis bin size."""
+
+_BLOCKED_QUEUE_REASON: str = "DependencyNeverSatisfied"
+"""The reason the stubbed queue reports for an allocation whose dependency can no longer be satisfied, which is the
+text the server matches on."""
 
 _SLURM_FIRST_JOB_ID: int = 1000
 """The allocation identifier the stub scheduler assigns to the first submission it accepts."""
@@ -650,6 +655,7 @@ class StubSSHTransport:
         submitted_scripts: The server path of every script the scheduler accepted.
         job_statuses: The accounting state reported for each allocation identifier.
         blocked_job_ids: The allocation identifiers the queue reports as permanently blocked.
+        queued_job_ids: The allocation identifiers the queue currently holds.
         connections: The host and user pairs the transport was asked to authenticate.
         closed: Determines whether the connection was closed.
     """
@@ -662,6 +668,7 @@ class StubSSHTransport:
         self.submitted_scripts: list[str] = []
         self.job_statuses: dict[str, str] = {}
         self.blocked_job_ids: set[str] = set()
+        self.queued_job_ids: set[str] = set()
         self.connections: list[tuple[str, str]] = []
         self.closed: bool = False
         self._responses: dict[str, tuple[str, str, int]] = {}
@@ -744,10 +751,28 @@ class StubSSHTransport:
             return "\n".join(rows) + ("\n" if rows else ""), "", 0
 
         if command.startswith("squeue "):
-            rows = [f"{job_id}|DependencyNeverSatisfied" for job_id in sorted(self.blocked_job_ids)]
-            return "\n".join(rows) + ("\n" if rows else ""), "", 0
+            return self._queue(command=command)
 
         return "", "", 0
+
+    def _queue(self, command: str) -> tuple[str, str, int]:
+        """Answers one queue listing out of the identifiers this transport holds.
+
+        The server reads the queue two ways. It asks for the reason field to find the allocations whose dependencies
+        can no longer be satisfied, and asks for the identifiers alone to find every allocation the queue holds, so
+        the requested output format is what tells the two reads apart.
+
+        Args:
+            command: The queue invocation the server issued.
+
+        Returns:
+            A tuple of the standard output, the standard error, and the exit code.
+        """
+        if "%r" in command:
+            rows = [f"{job_id}|{_BLOCKED_QUEUE_REASON}" for job_id in natsorted(self.blocked_job_ids)]
+        else:
+            rows = list(natsorted(self.queued_job_ids))
+        return "\n".join(rows) + ("\n" if rows else ""), "", 0
 
     def _find(self, command: str) -> tuple[str, str, int]:
         """Answers one depth-bounded marker search out of the temporary server-side filesystem.
