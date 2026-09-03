@@ -193,9 +193,8 @@ def close_settled_batches(
         caller's own resolution rather than a second reading of the scheduler, and it is what keeps this closure from
         diverging from the verdicts a caller is shown: the caller resolves once and hands the same entries to both, and
         nothing here consults a record of its own. An entry prescribing ``none`` holds its batch open because the work
-        may still be live, one prescribing a reset holds it open because a tracker still claims a run no allocation is
-        carrying, and one prescribing a cancellation holds it open because an allocation is still the scheduler's. Each
-        of those is released by the explicit remediation rather than automatically.
+        may still be live, and one prescribing a reset holds it open because a tracker still claims a run no allocation
+        is carrying. Each of those is released by the explicit remediation rather than automatically.
 
         A batch holding no allocation carries no entry at all, so nothing it holds prescribes anything but a drop and
         it closes. That is the exit such a record needs, since closure is what drops it.

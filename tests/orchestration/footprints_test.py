@@ -1750,10 +1750,10 @@ def test_dataset_stages_are_sized_from_the_processed_recordings_they_read(
     # cindra picks each stage's width itself, so the allocation this call declared does not survive the sizing pass.
     assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"].cores != 30
     # The per-session assembly is this package's own stage, so its projection stays here and it keeps the allocation
-    # it was handed. Half prevalence over two recordings keeps a cluster appearing in one of them, so the four hundred
-    # pooled regions bound the templates at four hundred rather than at either recording's own two hundred.
+    # it was handed. Half prevalence over two recordings keeps a cluster appearing in one of them, so the pooled
+    # ceiling stands at four hundred, which the headroom the widest recording allows then caps at three hundred.
     assert estimates[FORGING_JOB_NAME, first.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=4000, regions=200, tracked_regions=400)
+        cores=1, memory_mb=assembly_memory(samples=4000, regions=200, tracked_regions=300)
     )
 
 
@@ -2220,10 +2220,11 @@ def test_the_tracked_region_bound_is_drawn_from_the_animals_whole_recording_set(
     assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
         cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000)
     )
-    # Dropping the widest recording from the set would pool four thousand regions over a minimum of two and bound the
-    # result at two thousand, which is a different gigabyte bucket rather than a saving the rounding absorbs.
+    # Dropping the widest recording from the set would pool four thousand regions over a minimum of two, which the
+    # headroom ceiling then caps at fifteen hundred, a different gigabyte bucket rather than a saving the rounding
+    # absorbs.
     assert assembly_memory(samples=100_000, regions=1000, tracked_regions=3000) != assembly_memory(
-        samples=100_000, regions=1000, tracked_regions=2000
+        samples=100_000, regions=1000, tracked_regions=1500
     )
 
 
@@ -2274,12 +2275,12 @@ def test_a_complete_recording_set_bounds_the_assembly_and_an_unreadable_entry_is
     # The session being sized is named by the refusal's opening rather than by that set, so it is checked separately.
     assert all(session.session_name not in reported for session in sessions[1:4])
     assert reported.count(sessions[0].session_name) == 1
-    # Bounding the four surviving recordings would pool four thousand regions over a minimum of two and land at two
-    # thousand, which is two thirds of the complete set's figure and a whole gigabyte bucket below it. That figure is
-    # what a scheduler would have reserved, and a job reserved below what it holds is killed and cancels its
-    # dependents, so the refusal above stands in place of reporting it.
+    # Bounding the four surviving recordings would pool four thousand regions over a minimum of two, which the
+    # headroom ceiling caps at fifteen hundred, half the complete set's figure and a whole gigabyte bucket below it.
+    # That figure is what a scheduler would have reserved, and a job reserved below what it holds is killed and cancels
+    # its dependents, so the refusal above stands in place of reporting it.
     assert (
-        assembly_memory(samples=100_000, regions=1000, tracked_regions=2000)
+        assembly_memory(samples=100_000, regions=1000, tracked_regions=1500)
         < complete[FORGING_JOB_NAME, sessions[0].session_name].memory_mb
     )
 

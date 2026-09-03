@@ -65,8 +65,8 @@ Notes:
 
 SETTLED_ALLOCATION: str = "settled"
 """The scheduler state of an allocation accounting reports in a state it never leaves and the queue no longer carries,
-and of one the queue reports as permanently blocked. The scheduler has finished with it, or will never start it, so
-nothing it holds can change again."""
+of one the queue reports as permanently blocked, and of one this reading has since cancelled. The scheduler has
+finished with it, or will never start it, so nothing it holds can change again."""
 
 GONE_ALLOCATION: str = "gone"
 """The scheduler state of an allocation accounting returns no row for and the queue does not carry. Both records
@@ -74,8 +74,8 @@ disclaim it, and only both of them together are evidence that the scheduler no l
 
 RUNNING_ALLOCATION: str = "running"
 """The verdict on an allocation the scheduler still holds, on one whose job a still-held allocation claims on its
-tracker, and on one whose job's tracker claims an executor outside the scheduler. Nothing is remediated for it, because
-every remediation this module applies would disturb work that may still be live."""
+tracker, and on one whose job's tracker claims to be running under an executor outside the scheduler. Nothing is
+remediated for it, because every remediation this module applies would disturb work that may still be live."""
 
 FINISHED_ALLOCATION: str = "finished"
 """The verdict on an allocation the scheduler no longer holds whose job recorded success. Its tracker is left exactly
@@ -90,8 +90,9 @@ ABANDONED_ALLOCATION: str = "abandoned"
 tracker holds no record of at all. Nothing claims that job, so it is already runnable once the ledger entry is gone."""
 
 STRANDED_ALLOCATION: str = "stranded"
-"""The verdict on an allocation the scheduler no longer holds whose job's tracker still claims to be running it. This
-is the one verdict whose remediation writes to a tracker, because that claim is what no rerun can otherwise clear."""
+"""The verdict on an allocation the scheduler no longer holds whose job's tracker still claims to be running it under
+an executor the scheduler can answer for. This is the one verdict whose remediation writes to a tracker, because that
+claim is what no rerun can otherwise clear."""
 
 NO_REMEDIATION: str = "none"
 """The remediation prescribed for a running allocation, which is to leave it alone."""
@@ -194,8 +195,8 @@ class SchedulerReading:
     preceded the cancellation said."""
     unreadable_reason: str = ""
     """What stopped one of the scheduler's records from being read, or empty when both answered. Every allocation this
-    reading has not cancelled resolves as held while this is set, because a record that did not answer is no evidence
-    that the scheduler has finished with an allocation."""
+    reading has neither cancelled nor found permanently blocked resolves as held while this is set, because a record
+    that did not answer is no evidence that the scheduler has finished with an allocation."""
 
     def resolve_state(self, allocation: str) -> str:
         """Resolves one allocation to the state the scheduler's two records place it in.
@@ -375,6 +376,7 @@ def submit_batch(
 
     Raises:
         RuntimeError: If the scheduler rejects a submission.
+        Timeout: If the submission ledger's lock cannot be acquired within the timeout period.
     """
     batch_directory = remote_batch_directory(server=server, batch_id=batch_id)
     server.create(remote_path=batch_directory, is_dir=True, parents=True)
@@ -557,7 +559,8 @@ def read_scheduler_records(server: Server, allocations: Sequence[str]) -> Schedu
         output and reporting that as 'no row for anything' would resolve every allocation as gone at once.
 
         The queue is read second and a failure there is carried rather than raised, because the reading it leaves is
-        still usable: every allocation resolves as held, which is the reading that disturbs nothing.
+        still usable: every allocation the reading has neither cancelled nor found permanently blocked resolves as
+        held, which is the reading that disturbs nothing.
 
     Args:
         server: The connected server that runs the allocations.
@@ -591,8 +594,8 @@ def resolve_allocations(
         so an allocation neither record answered for is still resolved rather than passed over.
 
         An allocation resolves as running whenever the scheduler holds it, holds the allocation its job's tracker
-        claims, or that tracker claims an executor neither of the scheduler's records answers for. Everything else is
-        resolved by what that tracker recorded, because the tracker is what gates rerunning the job.
+        claims, or that tracker claims to be running under an executor neither of the scheduler's records answers for.
+        Everything else is resolved by what that tracker recorded, because the tracker is what gates rerunning the job.
 
     Args:
         batches: The recorded batches whose allocations to resolve.

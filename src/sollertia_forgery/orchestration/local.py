@@ -412,6 +412,7 @@ def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[Pending
         state: The active job execution state whose jobs are reset. Its trackers are rewritten in place.
 
     Raises:
+        TimeoutError: If a tracker's lock file cannot be acquired within the timeout period.
         ValueError: If the batch names an identifier the unit's tracker does not hold.
     """
     for tracker_path, jobs in group_jobs_by_tracker(state=state).items():

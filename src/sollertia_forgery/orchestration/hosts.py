@@ -292,7 +292,9 @@ class LocalHost:
 
         Raises:
             ValueError: If the arguments contradict each other, or if the dataset's acquisition system is unknown.
-            FileNotFoundError: If a named session resolves to no directory under the project root.
+            FileNotFoundError: If a named session resolves to no directory under the project root, or if the
+                acquisition system's resolver reports a missing input it needs for an animal.
+            RuntimeError: If a named session resolves to more than one directory under the project root.
         """
         define_forging_dataset(
             name=dataset_name,

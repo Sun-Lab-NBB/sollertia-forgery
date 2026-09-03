@@ -128,13 +128,14 @@ being refused."""
 _UNRESOLVED_FRAME_COUNT: int = -1
 """The frame count charged to a motion-energy job whose camera left no recording this pass could read. A container no
 pass opened reports no length, and the length is what decides how many decoders the stage opens, so such a job is
-charged the full width its type declared rather than the single decoder a short recording earns. No container reports
-a negative length, which is what makes this value unambiguous as the answer for a recording that was never read."""
+charged the full width its type declared rather than the single decoder a short recording earns. Any non-positive
+length routes to that same full-width charge, whether it is this sentinel or a length a container reported, so the value
+needs no distinguishing from a container's own answer."""
 
 _CHECKSUM_CHUNK_MEMORY_MB: int = 8
 """The read buffer one checksum worker allocates, which is the fixed chunk the data-structures library streams every
-file through. The buffer is allocated once per worker and reused for every chunk of every file that worker hashes, so
-it is the whole data-dependent term a worker carries."""
+file through. The buffer is allocated once per file and reused for every chunk of it, so one worker holds one buffer
+at a time and that buffer is the whole data-dependent term the worker carries."""
 
 _CHECKSUM_READER_MEMORY_MB: int = SPAWNED_CHILD_MEMORY_MB + _CHECKSUM_CHUNK_MEMORY_MB
 """The resident memory one checksum worker holds. The pool that opens the workers is spawn-started, so each of them
@@ -195,7 +196,7 @@ Notes:
     peak by one single-day column, which is the safe direction, while a model taking neither peak's part under-reserves
     the load whenever a session's single-day column stands above its four multi-day columns and its sub-datasets
     together. Tracking prunes hard, so that is the ordinary case rather than the extreme one: a recording detecting two
-    thousand regions of which five hundred are tracked holds one single-day column of eight hundred megabytes against
+    thousand regions of which one hundred are tracked holds one single-day column of eight hundred megabytes against
     four multi-day columns of a hundred and sixty and a sub-dataset term of fifty, which the fifteen percent tolerance
     and the gigabyte rounding cannot absorb.
 """
@@ -227,9 +228,9 @@ _TRACKED_REGION_HEADROOM: float = 1.5
 """The multiple of the most populated recording's region count that ceilings the templates multi-day tracking keeps.
 
 Notes:
-    The domain reading of the multiple, in the words of the model cindra states it in: "we have at most every cell in
-    the most populated recording + maybe half of it coming from other recordings. That should be getting us very close
-    to the actual maximum."
+    The multiple is a domain assumption about how a dataset's recordings overlap rather than a figure derived from the
+    pipeline. A tracked dataset holds at most every region of its most populated recording, plus about half that count
+    again contributed by regions the other recordings hold and it does not.
 """
 
 _MODULE_SPECIFIER_SEPARATOR: str = "-"
@@ -422,8 +423,9 @@ def size_dataset_jobs(
 
     Notes:
         Reads array headers, feather metadata and the presence of the recording metadata alone, so sizing a dataset
-        decodes no fluorescence and reads no timestamp. Each cross-recording stage scales with the processed data the
-        single-recording pipeline wrote for the sessions that carry two-photon data.
+        decodes no fluorescence and materializes no timestamp column, reading at most a camera clock's two endpoints.
+        Each cross-recording stage scales with the processed data the single-recording pipeline wrote for the sessions
+        that carry two-photon data.
 
         Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
         per job. The two cross-recording stages belong to cindra, so both halves of their figures are cindra's own
@@ -927,13 +929,12 @@ def _size_two_photon_job(
 
         The binarization, registration and processing stages are sized from the recording's own geometry, and the two
         per-plane stages additionally from the plane their specifier names, so each of them receives a figure taken
-        from what it reads. The combination stage is not: its whole data-dependent term is the region count, and no
-        recording states that count until its detection stage has run. What cindra charges the combination stage is
-        therefore the ceiling the recording's own configuration allows, which is the multiplier the detection loop
-        applies to its configured iteration limit, taken across the recording's planes. Every recording of one
-        acquisition system carrying the same plane count therefore receives the identical figure whatever it went on
-        to detect, so this is a configuration bound the stage shares rather than an estimate taken from the recording,
-        and it stands above what a recording detects by whatever margin its configured limit stands above its data.
+        from what it reads. The combination stage takes its frame count and its channel count from that same geometry,
+        while its region term alone is a configuration ceiling, because no recording states its region count until the
+        detection stage has run. What cindra charges for that term is therefore the ceiling the recording's own
+        configuration allows, which is the multiplier the detection loop applies to its configured iteration limit,
+        taken across the recording's planes. That one term stands above what a recording detects by whatever margin its
+        configured limit stands above its data.
 
         The bound stands because the region count is not a raw input. It is written by a stage scheduled ahead of this
         one, so at plan time no reading of the recording answers it, and a plan has to size every stage before any of
@@ -1750,7 +1751,8 @@ def _size_behavior_assembly_job(system: str, project_root: Path, animal: str, se
     Raises:
         FileNotFoundError: If the session carries no reference clock its system's assembler would settle on, in which
             case nothing states the height of the frame the job builds.
-        ValueError: If the acquisition system is unknown.
+        ValueError: If the acquisition system is unknown, or if the system's own resolver does not cover the session's
+            type and therefore states none of the heights the job's sources stand at.
     """
     resolve_assembly_geometry = resolve_assembly_geometry_resolver(system=system)
     geometry = resolve_assembly_geometry(

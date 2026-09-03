@@ -891,8 +891,8 @@ def test_an_identifier_outside_the_pipeline_enumeration_resolves_to_no_dispatch(
 
 
 def test_a_registered_job_type_reports_the_cores_it_declares() -> None:
-    """Verifies that a stage sized by this package itself runs at the declared allocation, while a stage sized per job
-    by a library falls back to it, so it is reported unnarrowed either way.
+    """Verifies that a stage sized by this package itself reports the allocation the dispatch table declares for it,
+    so it is reported unnarrowed.
     """
     assert resolve_job_cores(job_name=CHECKSUM_JOB_NAME) == 8
     assert resolve_job_cores(job_name=FORGING_JOB_NAME) == 1

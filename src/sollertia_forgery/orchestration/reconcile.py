@@ -93,12 +93,12 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
         own descriptors, which preparation filled from the host's state artifact, rather than by opening a tracker
         across the transport while the batch runs.
 
-        A job whose verdict is ``running`` is left alone, since every allocation the resolution reports that way is
-        one the scheduler still holds, one whose job a still-held allocation claims on its tracker, or one whose
-        tracker claims an executor outside the scheduler. The first two name an allocation, so the job is adopted onto
-        it and its dependents wait on that allocation rather than on a second one this run would submit. The third
-        names none, so there is nothing to adopt and nothing for a dependent to wait on: that job is withheld with its
-        dependents, because dispatching it would run a second copy over a tracker its own executor may still be
+        A job whose verdict is ``running`` is left alone, since every allocation the resolution reports that way is one
+        the scheduler still holds, one whose job a still-held allocation claims on its tracker, or one whose tracker
+        claims to be running under an executor outside the scheduler. The first two name an allocation, so the job is
+        adopted onto it and its dependents wait on that allocation rather than on a second one this run would submit.
+        The third names none, so there is nothing to adopt and nothing for a dependent to wait on: that job is withheld
+        with its dependents, because dispatching it would run a second copy over a tracker its own executor may still be
         writing to, and that is the one verdict whose remediation is to leave everything as it stands.
 
         Every other verdict releases the job. ``finished``, ``failed``, and ``abandoned`` mean nothing carries it any
