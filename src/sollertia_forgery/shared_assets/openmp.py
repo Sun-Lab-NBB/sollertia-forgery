@@ -342,10 +342,15 @@ def _verify_runtime_loadable() -> bool:
         True when the fresh interpreter loads the runtime, and False when it does not.
     """
     # The command is this interpreter running a module-level literal, so no part of it comes from a caller.
-    result = subprocess.run(  # noqa: S603 - the executable and the script are both fixed by this module.
-        args=[sys.executable, "-c", _VERIFICATION_SCRIPT],
-        capture_output=True,
-        check=False,
-        timeout=_VERIFICATION_TIMEOUT,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 - the executable and the script are both fixed by this module.
+            args=[sys.executable, "-c", _VERIFICATION_SCRIPT],
+            capture_output=True,
+            check=False,
+            timeout=_VERIFICATION_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        # A loader that has not answered within the timeout is one this host cannot rely on, so the wait resolves the
+        # same way a failed load does rather than aborting the whole request.
+        return False
     return result.returncode == 0

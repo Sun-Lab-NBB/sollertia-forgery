@@ -317,6 +317,19 @@ def test_the_post_link_verification_runs_a_fresh_interpreter() -> None:
     assert openmp_module._verify_runtime_loadable()
 
 
+def test_a_verification_that_never_answers_reports_the_runtime_as_unloadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that an expired verification resolves the same way a failed load does, so a stalled loader reports an
+    unloadable runtime rather than aborting the request that linked it.
+    """
+
+    def expire(*_args: object, **_kwargs: object) -> None:
+        raise openmp_module.subprocess.TimeoutExpired(cmd="python", timeout=openmp_module._VERIFICATION_TIMEOUT)
+
+    monkeypatch.setattr(openmp_module.subprocess, "run", expire)
+
+    assert not openmp_module._verify_runtime_loadable()
+
+
 # Reporting
 
 
