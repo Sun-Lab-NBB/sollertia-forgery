@@ -97,6 +97,21 @@ Job Orchestration
 .. autodata:: sollertia_forgery.orchestration.reconcile.LOCAL_HOST_LABEL
 .. autodata:: sollertia_forgery.orchestration.reconcile.REMOTE_HOST_LABEL
 .. autodata:: sollertia_forgery.orchestration.remote.REMOTE_JOB_WALLTIME_MINUTES
+.. autodata:: sollertia_forgery.orchestration.remote.HELD_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.SETTLED_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.GONE_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.RUNNING_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.FINISHED_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.FAILED_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.ABANDONED_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.STRANDED_ALLOCATION
+.. autodata:: sollertia_forgery.orchestration.remote.NO_REMEDIATION
+.. autodata:: sollertia_forgery.orchestration.remote.DROP_REMEDIATION
+.. autodata:: sollertia_forgery.orchestration.remote.RESET_REMEDIATION
+.. autodata:: sollertia_forgery.orchestration.remote.CANCEL_REMEDIATION
+.. autodata:: sollertia_forgery.orchestration.remote.PROGRESSING_BATCH
+.. autodata:: sollertia_forgery.orchestration.remote.STALLED_BATCH
+.. autodata:: sollertia_forgery.orchestration.remote.AWAITING_CLOSURE_BATCH
 
 Compute Server Transport
 ========================
@@ -108,6 +123,17 @@ Compute Server Transport
 
 .. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
 .. autodata:: sollertia_forgery.server.server.TERMINAL_JOB_STATUSES
+
+Agnostic Substrate
+==================
+
+.. automodule:: sollertia_forgery.shared_assets
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.shared_assets.pipelines.SESSION_PIPELINES
 
 Command-Line Interface
 ======================
