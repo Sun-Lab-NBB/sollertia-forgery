@@ -87,9 +87,9 @@ def assemble_cindra_dataset(
             frame TTL timestamps.
         multiday_data_path: The path to the session's multi-recording cindra output directory (the directory that
             directly contains ``cell_fluorescence.npy`` and its companions).
-        raw_data_path: The path to the session's raw_data directory. Used by the ScanImage-based fallback alignment
-            path to load the per-frame metadata archive when the duration-tolerance filter alone cannot recover the
-            expected frame count.
+        raw_data_path: The path to the session's raw_data directory. Supplies the per-frame ScanImage metadata
+            archive to the unacquired-pulse-run discard, which runs on every assembly, and to the ScanImage-based
+            fallback alignment path when the duration-tolerance filter alone cannot recover the expected frame count.
 
     Returns:
         The frame-aligned fluorescence table, carrying the ``frame``, ``time_us``, and ``elapsed_minutes`` columns

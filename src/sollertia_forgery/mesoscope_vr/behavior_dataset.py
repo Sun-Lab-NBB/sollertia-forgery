@@ -60,9 +60,10 @@ def assemble_behavior_dataset(
             assembled dataset before returning it to the caller.
 
     Returns:
-        A DataFrame aligned to the reference time vector with the columns ``time_us``, ``elapsed_minutes``,
-        ``system_state``, ``lick``, ``water_uL``, and ``reward``, plus the optional ``brake``, ``screens``,
-        ``torque_N_cm``, ``distance_cm``, and ``speed_cm_s`` columns when their source feathers are present.
+        A DataFrame aligned to the reference time vector with the columns ``system_state``, ``lick``, ``water_uL``,
+        and ``reward``, plus the ``time_us`` and ``elapsed_minutes`` columns when ``drop_time_columns`` is False, and
+        the optional ``brake``, ``screens``, ``torque_N_cm``, ``distance_cm``, and ``speed_cm_s`` columns when their
+        source feathers are present.
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML, or its valve, lick, or system state feather, is

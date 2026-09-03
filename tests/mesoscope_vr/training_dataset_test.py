@@ -318,8 +318,8 @@ def test_resolve_mesoscope_assembly_geometry_reports_the_reference_clock_and_eve
 
     assert geometry.reference_samples == _BODY_FRAME_COUNT
 
-    # One entry per clock the assembly reads, in the order it reads them: the face and body cameras, whose three
-    # feathers each share one clock, then the valve, lick and encoder feathers, then the two runtime state feathers.
+    # One entry per clock the assembly reads, in the order it reads them: the face and body cameras, whose per-camera
+    # feathers share one clock, then the valve, lick and encoder feathers, then the two runtime state feathers.
     # The optional screen, brake and torque feathers a run-training session never writes are absent from both.
     assert geometry.source_samples == (
         _FACE_FRAME_COUNT,

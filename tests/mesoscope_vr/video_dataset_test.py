@@ -278,9 +278,9 @@ def test_resolve_slowest_camera_clock_rejects_a_directory_holding_no_clock(video
 def test_resolve_slowest_camera_clock_rejects_a_clock_holding_no_frame(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
-    # A feather holding no row is the only input the frame-count condition ever decides. Every shorter clock a session
-    # can carry holds one row, which spans no duration and is refused on the span condition instead, so this is the
-    # case that pins the count being weighed before the endpoints are read: an empty feather has no endpoint to read.
+    # A feather holding no row is the only input the frame-count condition is load-bearing for. A one-row feather it
+    # also refuses would fail the span condition anyway were the count check removed, while an empty feather has no
+    # endpoint to read at all, so this is the case that pins the count being weighed before the endpoints are read.
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock())
 
     with pytest.raises(FileNotFoundError, match=re.escape("at least two frames")):

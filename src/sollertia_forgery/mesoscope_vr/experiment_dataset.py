@@ -135,10 +135,11 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
             future_to_name[future]: future.result() for future in as_completed(future_to_name)
         }
 
-    # Stacks the sub-datasets into the unified feather, masks non-run experiment columns, and writes it uncompressed so
-    # downstream consumers can memory-map it. Stacking requires every sub-dataset to carry the reference clock's
-    # height, so one that drifts off that clock raises rather than being padded. The video sub-dataset joins only when
-    # it produced columns, so a session processed without camera data still forges.
+    # Stacks the sub-datasets into the unified feather, masks non-run experiment columns, clips the result to the
+    # session bounds, and writes it uncompressed so downstream consumers can memory-map it. Stacking requires every
+    # sub-dataset to carry the reference clock's height, so one that drifts off that clock raises rather than being
+    # padded. The video sub-dataset joins only when it produced columns, so a session processed without camera data
+    # still forges.
     sub_datasets = [fluorescence_data, results["behavior"], results["runtime"]]
     if results["video"].width > 0:
         sub_datasets.append(results["video"])
