@@ -29,9 +29,9 @@ from sollertia_forgery.video.motion_energy import (
     _bin_frame,
     _join_chunks,
     _plan_chunks,
-    _energy_chunk,
     _MotionEnergyColumn,
     resolve_camera_video,
+    _compute_chunk_energy,
     compute_camera_motion_energy,
 )
 
@@ -68,11 +68,15 @@ reading the library's own tuple keeps a rename loud, since a variable that silen
 decode worker opening a pool sized to the whole machine."""
 
 
-def _write_video(path: Path, frames: NDArray[np.uint8], fps: int = 30) -> Path:
+def _write_video(path: Path, frames: NDArray[np.uint8], frame_rate: int = 30) -> Path:
     """Writes a stack of grayscale frames into a video file the analysis can decode, and returns its path."""
     height, width = frames.shape[1:]
     writer = cv2.VideoWriter(
-        filename=str(path), fourcc=cv2.VideoWriter_fourcc(*"mp4v"), fps=fps, frameSize=(width, height), isColor=True
+        filename=str(path),
+        fourcc=cv2.VideoWriter_fourcc(*"mp4v"),
+        fps=frame_rate,
+        frameSize=(width, height),
+        isColor=True,
     )
     for frame in frames:
         writer.write(cv2.cvtColor(src=frame, code=cv2.COLOR_GRAY2BGR))
@@ -161,18 +165,29 @@ def patched_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNa
     return session
 
 
-def test_binning_matches_exact_block_mean() -> None:
-    """Verifies the block-mean reduction is exact, which resizing with pixel-area interpolation is not.
+@pytest.fixture(scope="module")
+def chunked_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Builds a recording long enough for the analysis to split it into more than one decode chunk.
 
-    This is the regression guard against replacing the box filter with ``cv2.resize(..., INTER_AREA)``. Pixel-area
-    interpolation is an exact block mean only when both dimensions divide evenly by the bin size. Both real cameras'
-    dimensions fail that, so the interpolation blends across block boundaries.
+    The frames are kept small so the encode stays cheap, since only the frame count decides the chunk plan.
     """
+    frame_count = MINIMUM_CHUNK_FRAMES * 2
+    frames = np.zeros((frame_count, 16, 16), dtype=np.uint8)
+    for index in range(frame_count):
+        frames[index, index % 10 : index % 10 + 4, 2:6] = 255
+    return _write_video(path=tmp_path_factory.mktemp("chunked").joinpath("chunked.mp4"), frames=frames)
+
+
+def test_binning_matches_exact_block_mean() -> None:
+    """Verifies the block-mean reduction is exact, which resizing with pixel-area interpolation is not."""
     generator = np.random.default_rng(seed=3)
     frame = generator.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
 
     binned = _bin_frame(frame=frame)
 
+    # This guards against replacing the box filter with a pixel-area resize, which is an exact block mean only when
+    # both dimensions divide evenly by the bin size. Both real cameras' dimensions fail that, so such a resize blends
+    # across block boundaries.
     bin_height = _FRAME_HEIGHT // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
     bin_width = _FRAME_WIDTH // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
     expected = (
@@ -193,18 +208,18 @@ def test_binning_crops_partial_blocks(static_video: Path) -> None:
 
 
 def test_chunked_result_is_bit_identical_to_sequential(moving_video: Path) -> None:
-    """Verifies splitting a recording into decode chunks changes nothing about the result.
-
-    The seam invariant on which the whole parallel design rests: each chunk beyond the first decodes a priming frame
-    so the difference spanning its leading boundary is computed rather than lost or duplicated.
-    """
-    sequential_energy, sequential_luminance = _energy_chunk(
+    """Verifies splitting a recording into decode chunks changes nothing about the result."""
+    sequential_energy, sequential_luminance = _compute_chunk_energy(
         video_path=str(moving_video), start_frame=0, frame_count=_FIXTURE_FRAME_COUNT
     )
 
+    # Each chunk beyond the first decodes a priming frame, so the difference spanning its leading boundary is
+    # computed rather than lost or duplicated, which is the seam invariant on which the whole parallel design rests.
     chunk_energies, chunk_luminances = [], []
     for start in range(0, _FIXTURE_FRAME_COUNT, _CHUNK_FRAMES):
-        energy, luminance = _energy_chunk(video_path=str(moving_video), start_frame=start, frame_count=_CHUNK_FRAMES)
+        energy, luminance = _compute_chunk_energy(
+            video_path=str(moving_video), start_frame=start, frame_count=_CHUNK_FRAMES
+        )
         chunk_energies.append(energy)
         chunk_luminances.append(luminance)
     chunked_energy = np.concatenate(chunk_energies)
@@ -285,12 +300,10 @@ def test_output_schema_is_positional(tmp_path: Path, moving_video: Path) -> None
 
 
 def test_unresolved_worker_count_is_resolved(tmp_path: Path, moving_video: Path) -> None:
-    """Verifies a caller may pass an unresolved worker count, as remote mode does.
-
-    Remote mode forwards the raw ``workers`` value, which may be -1. Passing that straight to a process pool raises,
-    so the analysis must resolve it itself.
-    """
+    """Verifies a caller may pass an unresolved worker count, as remote mode does."""
     output_path = tmp_path.joinpath("moving_energy.feather")
+    # Remote mode forwards the raw worker count, which may be -1. Passing that straight to a process pool raises, so
+    # the analysis resolves it itself.
     compute_camera_motion_energy(video_path=moving_video, output_path=output_path, workers=-1)
     assert len(pl.read_ipc(output_path)) == _FIXTURE_FRAME_COUNT
 
@@ -328,14 +341,12 @@ def test_missing_recording_resolves_to_none(tmp_path: Path) -> None:
 
 
 def test_camera_recording_is_resolved_on_the_whole_name(tmp_path: Path) -> None:
-    """Verifies a camera name is not matched as a suffix of a different camera's name.
-
-    ``body_camera`` itself ends in ``_camera``, so a suffix match would resolve a camera named ``camera`` to the body
-    camera's recording and silently measure the wrong camera.
-    """
+    """Verifies a camera name is not matched as a suffix of a different camera's name."""
     tmp_path.joinpath("session_body_camera.mp4").touch()
     tmp_path.joinpath("session_face_camera.mp4").touch()
 
+    # The body camera's own name ends in the shorter name, so a suffix match would resolve the camera named camera to
+    # the body camera's recording and silently measure the wrong camera.
     assert resolve_camera_video(camera_data_directory=tmp_path, session_name="session", camera_name="camera") is None
     resolved = resolve_camera_video(camera_data_directory=tmp_path, session_name="session", camera_name="face_camera")
     assert resolved is not None
@@ -359,10 +370,7 @@ def test_pipeline_writes_one_energy_feather_per_camera(tmp_path: Path, patched_s
 
 
 def test_pipeline_energy_stage_no_ops_without_a_recording(tmp_path: Path, patched_session: SimpleNamespace) -> None:
-    """Verifies a camera with no recording completes its job rather than failing the shared tracker.
-
-    A rig that ran only one of its registered cameras must not wedge the video tracker on the camera it did not run.
-    """
+    """Verifies a camera with no recording completes its job rather than failing the shared tracker."""
     frames = np.zeros((20, _FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
     _record_cameras(session=patched_session, names=("face_camera",), frames=frames)
 
@@ -405,11 +413,7 @@ def test_pipeline_dispatches_a_single_energy_job_by_id(tmp_path: Path, patched_s
 
 
 def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patched_session: SimpleNamespace) -> None:
-    """Verifies every registered camera contributes an energy job to the tracker-alignment universe.
-
-    The universe must cover every registered camera rather than only those the invocation runs, so that a partial
-    invocation aligns the tracker without wiping the sibling job that an earlier run already completed.
-    """
+    """Verifies every registered camera contributes an energy job to the tracker-alignment universe."""
     frames = np.zeros((20, _FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
     _record_cameras(session=patched_session, names=("face_camera", "body_camera"), frames=frames)
     run_video_processing_pipeline(session_path=tmp_path, energy=True, workers=1)
@@ -435,16 +439,14 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
 
 @pytest.mark.xdist_group(name="worker_pool")
 def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies the thread caps are set inside the block and the prior environment is restored on exit.
-
-    The caps must not leak past their own pool. Every caller outside a decode pool relies on the numeric backends
-    opening their full thread pool, so a leaked cap would silently narrow them for the rest of the process.
-    """
+    """Verifies the thread caps are set inside the block and the prior environment is restored on exit."""
     sentinel = "OMP_NUM_THREADS"
     monkeypatch.setenv(name=sentinel, value="13")
 
     with limit_worker_threads():
         assert all(os.environ[variable] == "1" for variable in _THREAD_LIMIT_VARIABLES)
+    # Every caller outside a decode pool relies on the numeric backends opening their full thread pool, so a cap
+    # leaking past the block would silently narrow them for the rest of the process.
     assert os.environ[sentinel] == "13"
 
 
@@ -468,19 +470,6 @@ def test_unreadable_recording_errors(tmp_path: Path) -> None:
         compute_camera_motion_energy(video_path=broken_path, output_path=tmp_path.joinpath("out.feather"), workers=1)
 
 
-@pytest.fixture(scope="module")
-def chunked_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Builds a recording long enough for the analysis to split it into more than one decode chunk.
-
-    The frames are kept small so the encode stays cheap, since only the frame count decides the chunk plan.
-    """
-    frame_count = MINIMUM_CHUNK_FRAMES * 2
-    frames = np.zeros((frame_count, 16, 16), dtype=np.uint8)
-    for index in range(frame_count):
-        frames[index, index % 10 : index % 10 + 4, 2:6] = 255
-    return _write_video(path=tmp_path_factory.mktemp("chunked").joinpath("chunked.mp4"), frames=frames)
-
-
 @pytest.mark.xdist_group(name="worker_pool")
 def test_own_pool_multi_chunk_result_matches_the_sequential_pass(tmp_path: Path, chunked_video: Path) -> None:
     """Verifies a recording split across a pool the analysis owns yields exactly the sequential result."""
@@ -488,7 +477,7 @@ def test_own_pool_multi_chunk_result_matches_the_sequential_pass(tmp_path: Path,
     compute_camera_motion_energy(video_path=chunked_video, output_path=output_path, workers=2)
 
     written = pl.read_ipc(output_path)
-    sequential_energy, sequential_luminance = _energy_chunk(
+    sequential_energy, sequential_luminance = _compute_chunk_energy(
         video_path=str(chunked_video), start_frame=0, frame_count=MINIMUM_CHUNK_FRAMES * 2
     )
 
@@ -577,18 +566,18 @@ def test_chunk_decode_rejects_an_unopenable_recording(tmp_path: Path) -> None:
     broken_path.write_bytes(b"not a video")
 
     with pytest.raises(ValueError, match="Unable to open"):
-        _energy_chunk(video_path=str(broken_path), start_frame=0, frame_count=5)
+        _compute_chunk_energy(video_path=str(broken_path), start_frame=0, frame_count=5)
 
 
 def test_chunk_decode_rejects_an_undecodable_priming_frame(moving_video: Path) -> None:
     """Verifies a chunk errors when its priming frame lies past the end of the recording, rather than skipping it."""
     with pytest.raises(ValueError, match="Unable to decode the frame preceding"):
-        _energy_chunk(video_path=str(moving_video), start_frame=5000, frame_count=_CHUNK_FRAMES)
+        _compute_chunk_energy(video_path=str(moving_video), start_frame=5000, frame_count=_CHUNK_FRAMES)
 
 
 def test_chunk_decode_stops_at_the_end_of_the_recording(moving_video: Path) -> None:
     """Verifies a chunk planned longer than the recording returns only the frames that decoded."""
-    energy, luminance = _energy_chunk(video_path=str(moving_video), start_frame=0, frame_count=200)
+    energy, luminance = _compute_chunk_energy(video_path=str(moving_video), start_frame=0, frame_count=200)
 
     assert energy.size == len(_decoded_frames(moving_video))
     assert energy.size == luminance.size

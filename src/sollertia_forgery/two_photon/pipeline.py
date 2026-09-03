@@ -31,8 +31,8 @@ if TYPE_CHECKING:
     from cindra import SingleRecordingConfiguration
 
 _STAGE_DEFAULT_WORKERS: int = -1
-"""The worker count that leaves the allocation to cindra's measured default for the stage being run. The orchestration
-layer names a positive count instead, which overrides the default with the width at which the job was admitted."""
+"""The worker count that leaves the allocation to cindra's measured default for the stage being run. A positive count
+overrides that default with the width the caller names."""
 
 _ALL_PLANES: int = -1
 """The target-plane value that runs the per-plane stages for every virtual imaging plane the recording holds."""
@@ -63,10 +63,10 @@ def run_two_photon_processing_pipeline(
         plane, and the single combination job, all sharing one tracker. The virtual-plane count is a property of the
         recording's acquisition parameters on disk. In local mode this invocation primes the recording, writing the
         shared bootstrap that every per-job stage reads and reporting the plane count back. In remote mode it only loads
-        the bootstrap primed by the preparation step and fails when that bootstrap is absent, because a job that primed
-        alongside its peers would overwrite each peer plane's runtime data with its own stale snapshot. The full
-        four-stage universe defines tracker alignment, so a partial invocation keeps every sibling job in the shared
-        tracker.
+        the bootstrap primed by the preparation step and fails when that bootstrap is absent. A job that primed
+        alongside its peers would otherwise overwrite each peer plane's runtime data with its own stale snapshot. The
+        full four-stage universe defines tracker alignment. A partial invocation therefore keeps every sibling job in
+        the shared tracker.
 
         cindra records each dispatched job's start, completion, and failure directly on this tracker, which lives in
         the session's cindra output directory (``session.processed_data.two_photon_tracker_path``). Two runtimes
@@ -74,8 +74,7 @@ def run_two_photon_processing_pipeline(
         registration to processing to combination order, and every stage runs when no flag is set. The registration and
         processing stages honor ``target_plane`` to narrow the pass to one plane. In remote mode (a ``job_id`` is
         provided) only the single job matching that identifier runs, so the stage flags and ``target_plane`` are
-        ignored. This lets an external scheduler drive cross-job parallelism by dispatching each identifier
-        concurrently.
+        ignored.
 
         The worker count reaches cindra as a call argument, so it applies to every stage this invocation dispatches
         rather than being baked into the configuration.
@@ -313,7 +312,7 @@ def two_photon_job_prerequisites(
     return resolve_single_recording_prerequisites(jobs=universe)
 
 
-def _configuration_path(session: SessionData) -> Path:
+def _resolve_configuration_path(session: SessionData) -> Path:
     """Resolves where the session's shared cindra configuration is materialized.
 
     Args:
@@ -368,7 +367,7 @@ def _resolve_primed_plane_count(session: SessionData) -> int | None:
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
             for the acquisition parameters file.
     """
-    if not _configuration_path(session=session).is_file():
+    if not _resolve_configuration_path(session=session).is_file():
         return None
 
     configuration, _ = _resolve_configuration(
@@ -400,8 +399,8 @@ def _resolve_configuration(
 
     Notes:
         The output root is the session's processed-data root, under which cindra creates its ``cindra`` subdirectory.
-        The configuration comes from the acquisition system's resolver with only the session-bound locations and the
-        supplied runtime settings overridden, so every system-resolved processing parameter stands as returned.
+        The configuration comes from the acquisition system's resolver, with only the session-bound locations and the
+        supplied runtime settings overridden. Every system-resolved processing parameter therefore stands as returned.
 
         cindra takes the worker count as a call argument, so the allocation belongs to the invocation that runs a
         stage.
@@ -420,8 +419,8 @@ def _resolve_configuration(
 
     Raises:
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
-            is not present, if the acquisition system's resolver reports missing inputs it needs to resolve the
-            configuration, or, in remote mode, if the session carries no materialized cindra configuration.
+            is not present, or if the acquisition system's resolver reports missing inputs it needs to resolve the
+            configuration. In remote mode, also raised when the session carries no materialized cindra configuration.
         ValueError: If the acquisition system's resolver cannot resolve a configuration for the session.
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
             for the acquisition parameters file.
@@ -463,7 +462,7 @@ def _resolve_configuration(
     # cindra reads this file once per job, and only its priming step writes it back, so one copy per session serves
     # every job the session dispatches. Confining the write to the owning invocation keeps it outside the window in
     # which jobs run concurrently.
-    materialized_configuration_path = _configuration_path(session=session)
+    materialized_configuration_path = _resolve_configuration_path(session=session)
     if persist:
         configuration.save(file_path=materialized_configuration_path)
     elif not materialized_configuration_path.is_file():

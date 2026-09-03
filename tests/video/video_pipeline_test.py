@@ -370,11 +370,9 @@ def test_manifest_without_cameras_errors(experiment_session: SessionData) -> Non
 
 
 def test_missing_manifest_errors(experiment_session: SessionData) -> None:
-    """Verifies a session with no camera manifest reports the missing file rather than an empty universe.
-
-    The created session hierarchy carries no behavior-data directory until a source writes into it, so this also
-    covers the session that ran no DataLogger-backed source at all.
-    """
+    """Verifies a session with no camera manifest reports the missing file rather than an empty universe."""
+    # The created session hierarchy carries no behavior-data directory until a source writes into it, so this also
+    # covers the session that ran no DataLogger-backed source at all.
     assert not experiment_session.raw_data.behavior_data_path.exists()
 
     with pytest.raises(FileNotFoundError, match=f"No camera manifest \\('{CAMERA_MANIFEST_FILENAME}'\\)"):
@@ -428,12 +426,7 @@ def test_remote_mode_keeps_the_job_records_earlier_invocations_left(
     camera_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies a remote invocation registers its own job without deleting the entries its siblings already hold.
-
-    A scheduler dispatches one session's jobs as separate invocations, so an invocation that aligned the tracker
-    against itself alone rather than against the full job universe would wipe every sibling's recorded state. The
-    session would then report unprocessed and its already-completed jobs would be dispatched a second time.
-    """
+    """Verifies a remote invocation registers its own job without deleting the entries its siblings already hold."""
     behavior_directory = camera_session.raw_data.behavior_data_path
     write_frame_archive(behavior_directory, _FACE_SOURCE_ID)
     write_frame_archive(behavior_directory, _BODY_SOURCE_ID)
@@ -443,6 +436,9 @@ def test_remote_mode_keeps_the_job_records_earlier_invocations_left(
 
     run_video_processing_pipeline(session_path=_session_path(camera_session), job_id=body_job, workers=1)
 
+    # A scheduler dispatches one session's jobs as separate invocations, so an invocation that aligned the tracker
+    # against itself alone rather than against the full job universe would wipe every sibling's recorded state. The
+    # session would then report unprocessed and its already-completed jobs would be dispatched a second time.
     assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
     assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
 
@@ -502,16 +498,14 @@ def test_rename_job_preserves_a_feather_already_named_canonically(
     experiment_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies a manifest name that already equals the parsed filename leaves that feather untouched.
-
-    Unlinking the canonical name in that case would destroy the parsed feather the job is meant to publish.
-    """
+    """Verifies a manifest name that already equals the parsed filename leaves that feather untouched."""
     canonical_name = f"camera_{_FACE_SOURCE_ID}"
     _write_manifest(directory=experiment_session.raw_data.behavior_data_path, cameras={_FACE_SOURCE_ID: canonical_name})
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
 
     run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
 
+    # Unlinking the canonical name in that case would destroy the parsed feather the job is meant to publish.
     parsed_path = _video_directory(experiment_session).joinpath(f"{canonical_name}_timestamps.feather")
     assert pl.read_ipc(parsed_path).height == _RECORDING_FRAMES
     assert _job_status(experiment_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
@@ -521,11 +515,7 @@ def test_rename_job_refuses_a_manifest_naming_two_cameras_alike(
     experiment_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies two cameras sharing one manifest name are refused rather than published over each other.
-
-    Both resolve the same canonical filename, so whichever ran last would answer for both cameras and the other
-    camera's timestamps would never be published under a name of their own.
-    """
+    """Verifies two cameras sharing one manifest name are refused rather than published over each other."""
     _write_manifest(
         directory=experiment_session.raw_data.behavior_data_path,
         cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _FACE_CAMERA},
@@ -533,6 +523,8 @@ def test_rename_job_refuses_a_manifest_naming_two_cameras_alike(
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
 
+    # Both cameras resolve the same canonical filename, so whichever ran last would answer for both of them and the
+    # other camera's timestamps would never be published under a name of their own.
     with pytest.raises(ValueError, match="for more than one camera"):
         run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
 
@@ -543,11 +535,7 @@ def test_rename_job_refuses_a_camera_named_after_another_cameras_parsed_feather(
     experiment_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies a camera is refused when its canonical filename is another camera's parsed feather.
-
-    Publishing it would unlink that camera's only copy of its timestamps and re-point the name at this camera's data,
-    which the job would then report as a success.
-    """
+    """Verifies a camera is refused when its canonical filename is another camera's parsed feather."""
     _write_manifest(
         directory=experiment_session.raw_data.behavior_data_path,
         cameras={_FACE_SOURCE_ID: f"camera_{_BODY_SOURCE_ID}", _BODY_SOURCE_ID: _BODY_CAMERA},
@@ -555,6 +543,8 @@ def test_rename_job_refuses_a_camera_named_after_another_cameras_parsed_feather(
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
 
+    # Publishing it would unlink that camera's only copy of its timestamps and re-point the name at this camera's
+    # data, which the job would then report as a success.
     with pytest.raises(ValueError, match="is the parsed feather of a different camera"):
         run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
 
@@ -672,15 +662,13 @@ def test_prerequisites_order_the_rename_job_after_every_parse_job(camera_session
 
 @pytest.mark.parametrize("filename", ["sync_log.npz", "51_frames.npz", "51_log_extra.npz"])
 def test_archive_discovery_ignores_a_foreign_archive_name(camera_session: SessionData, filename: str) -> None:
-    """Verifies an archive whose name matches no registered camera is passed over rather than parsed as one.
-
-    A name that carries no source identifier, and a name that carries one without the archive suffix, must both leave
-    the registered camera without an archive rather than yielding it the wrong file.
-    """
+    """Verifies an archive whose name matches no registered camera is passed over rather than parsed as one."""
     camera_session.raw_data.behavior_data_path.joinpath(filename).touch()
 
     _session, _universe, possible = discover_video_jobs(session_path=_session_path(camera_session))
 
+    # A name that carries no source identifier, and a name that carries one without the archive suffix, must both
+    # leave the registered camera without an archive rather than yielding it the wrong file.
     assert not [job for job in possible if job[0] == CAMERA_EXTRACTION_JOB_NAME]
     assert (RENAME_JOB_NAME, "") not in possible
 

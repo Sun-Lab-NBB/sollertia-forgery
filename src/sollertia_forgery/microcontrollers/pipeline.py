@@ -102,8 +102,8 @@ def run_microcontroller_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Looks up the parser function of every module this session's acquisition system can parse, and the event codes
-    # of the modules that the session configured for use, inferring the system from the session.
+    # The acquisition system is inferred from the session, which is what keeps this pipeline agnostic of the system
+    # whose data it processes.
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
     event_codes = _resolve_eligible_event_codes(session=session)
 
@@ -115,7 +115,6 @@ def run_microcontroller_processing_pipeline(
     # the job discovery that both need that topology share one read.
     job_universe = resolve_jobs(log_directory=log_directory)
 
-    # Derives the per-controller extraction configurations from the manifest topology and the event codes.
     controllers = _resolve_controllers(session=session, event_codes=event_codes, job_universe=job_universe)
 
     universe, requested, extraction_archives, parse_specifiers = _discover_jobs(
@@ -148,7 +147,9 @@ def run_microcontroller_processing_pipeline(
     # Writes the configuration before any job is dispatched, in both modes, since the extraction binding reads each
     # controller's targets from the file rather than from memory and a remotely dispatched job may be the only work
     # this process does.
-    config_path = _materialize_extraction_config(controllers=controllers, output_directory=extraction_output)
+    configuration_path = _materialize_extraction_configuration(
+        controllers=controllers, output_directory=extraction_output
+    )
 
     if job_id is not None:
         _execute_remote_job(
@@ -160,7 +161,7 @@ def run_microcontroller_processing_pipeline(
             extraction_archives=extraction_archives,
             extraction_output=extraction_output,
             parse_output=parse_output,
-            config_path=config_path,
+            configuration_path=configuration_path,
             tracker=tracker,
             workers=workers,
             display_progress=display_progress,
@@ -168,11 +169,11 @@ def run_microcontroller_processing_pipeline(
     else:
         # Resolves the worker budget once and creates a single process pool that spans BOTH stages. The stages run
         # strictly in sequence, so one pool serves the extraction stage (intra-archive batch decoding) and then the
-        # parse stage (one future per module) with a single worker spawn. The caps cover the pool's whole life,
-        # since it starts its children on demand and each child sizes its library thread pools while importing,
-        # before any code of this pipeline runs inside it. numba latches its own ceiling while it is imported and
-        # rejects an environment variable that disagrees afterwards, so it is pinned instead by the initializer that
-        # every child runs through its runtime setter.
+        # parse stage (one future per module) with a single worker spawn. The caps cover the pool's whole life, since
+        # it starts its children on demand and each child sizes its library thread pools while importing, before any
+        # code of this pipeline runs inside it. Numba latches its own ceiling while it is imported and rejects an
+        # environment variable that disagrees afterwards, so it is pinned instead by the initializer that every child
+        # runs through its runtime setter.
         resolved_workers = resolve_worker_count(requested_workers=workers)
         with limit_worker_threads(), ExitStack() as pool_scope:
             shared_executor = (
@@ -185,7 +186,7 @@ def run_microcontroller_processing_pipeline(
             _run_extraction_stage(
                 extraction_archives=extraction_archives,
                 extraction_output=extraction_output,
-                config_path=config_path,
+                configuration_path=configuration_path,
                 tracker=tracker,
                 workers=resolved_workers,
                 executor=shared_executor,
@@ -211,20 +212,20 @@ def discover_microcontroller_jobs(
     """Resolves the microcontroller pipeline's job universe and possible subset for the target session.
 
     Notes:
-        The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
-        controller that declares at least one module that the acquisition system parses and that the session configured
-        for use, plus one parse job per such module. The possible subset narrows the universe to controllers whose log
-        archive resolves to exactly one file under the raw behavior data tree. A controller with no archive, or one
-        whose name matches several archives, can be neither extracted nor parsed. Locating those archives is delegated
-        to the acquisition library's own resolver, so discovery reads the manifest and indexes the archive names,
-        leaving the archives' contents and every output file untouched.
+        The universe enumerates every job the session's microcontroller manifest could produce. It holds one extraction
+        job per controller that declares at least one module that the acquisition system parses and that the session
+        configured for use, plus one parse job per such module. The possible subset narrows the universe to controllers
+        whose log archive resolves to exactly one file under the raw behavior data tree. A controller with no archive,
+        or one whose name matches several archives, can be neither extracted nor parsed. Locating those archives is
+        delegated to the acquisition library's own resolver, so discovery reads the manifest and indexes the archive
+        names, leaving the archives' contents and every output file untouched.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
-        subset of that universe. Extraction specifiers are controller IDs and parse specifiers are
+        The loaded session, the job universe as ``(job_name, specifier)`` pairs, and the possible subset of that
+        universe. Extraction specifiers are controller IDs and parse specifiers are
         ``"{controller_id}-{module_type}-{module_id}"``.
 
     Raises:
@@ -319,7 +320,8 @@ def _resolve_controllers(
         job_universe: The resolved job universe, whose sources carry the modules each registered controller declares.
 
     Returns:
-        An ordered mapping from each manifest controller ID (as a string) to its derived ControllerExtractionConfig.
+        Each manifest controller's derived extraction configuration, keyed by its controller ID and ordered as the
+        manifest declares the controllers.
 
     Raises:
         FileNotFoundError: If the microcontroller manifest is not present at the session's canonical raw behavior
@@ -363,14 +365,14 @@ def _resolve_controllers(
     return controllers
 
 
-def _materialize_extraction_config(
+def _materialize_extraction_configuration(
     controllers: Mapping[str, ControllerExtractionConfig], output_directory: Path
 ) -> Path:
     """Writes the session's derived extraction configuration into the microcontroller data directory.
 
     Notes:
         The acquisition binding reads each controller's extraction targets from a configuration file rather than
-        from an in-memory object. The configuration slf derives from the manifest and its own event code registry
+        from an in-memory object. The configuration that slf derives from the manifest and its own event code registry
         therefore reaches disk before any extraction job runs. The file is written under the acquisition library's own
         configuration filename, next to the extracted output and the processing tracker.
 
@@ -386,16 +388,16 @@ def _materialize_extraction_config(
         The path to the written extraction configuration file.
     """
     output_directory.mkdir(parents=True, exist_ok=True)
-    config_path = output_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
-    ExtractionConfig(controllers=list(controllers.values())).to_yaml(file_path=config_path)
-    return config_path
+    configuration_path = output_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
+    ExtractionConfig(controllers=list(controllers.values())).to_yaml(file_path=configuration_path)
+    return configuration_path
 
 
 def _extract_controller(
     archive_path: Path,
     output_directory: Path,
     controller_id: str,
-    config_path: Path,
+    configuration_path: Path,
     job_id: str,
     tracker: ProcessingTracker,
     *,
@@ -419,8 +421,8 @@ def _extract_controller(
         output_directory: The directory where the raw per-module feather files are written (the session's
             microcontroller data directory).
         controller_id: The controller ID whose archive is being extracted.
-        config_path: The path to the materialized extraction configuration declaring every controller's modules and
-            per-module event codes.
+        configuration_path: The path to the materialized extraction configuration declaring every controller's modules
+            and per-module event codes.
         job_id: The hexadecimal identifier of this extraction job in the shared processing tracker.
         tracker: The shared processing tracker recording the extraction job's state.
         workers: The number of worker processes the extraction may use to parallelize message decoding within the
@@ -437,7 +439,7 @@ def _extract_controller(
         job_id=job_id,
         workers=workers,
         tracker=tracker,
-        config_path=config_path,
+        config_path=configuration_path,
         display_progress=display_progress,
         executor=executor,
     )
@@ -468,11 +470,9 @@ def _discover_jobs(
         job_universe: The resolved job universe, whose sources carry each registered controller's archive.
 
     Returns:
-        A tuple of (universe, requested, extraction_archives, parse_specifiers). ``universe`` and ``requested`` are
-        lists of ``(job_name, specifier)`` tuples. ``extraction_archives`` maps each present controller ID to its
-        archive path. ``parse_specifiers`` maps each requested parse specifier (``"{controller}-{type}-{id}"``) to
-        its ``(controller_id, module_type, module_id)`` triple.
-
+        The job universe and the requested subset, both as ``(job_name, specifier)`` pairs, then the archive path of
+        each present controller keyed by controller ID, and finally each requested parse specifier
+        (``"{controller}-{type}-{id}"``) mapped to its ``(controller_id, module_type, module_id)`` triple.
     """
     universe: list[tuple[str, str]] = []
     requested: list[tuple[str, str]] = []
@@ -480,13 +480,13 @@ def _discover_jobs(
     parse_specifiers: dict[str, tuple[str, int, int]] = {}
 
     for source in job_universe.sources:
-        controller_config = controllers.get(source.source_id)
-        if controller_config is None:
+        controller_configuration = controllers.get(source.source_id)
+        if controller_configuration is None:
             continue
 
         eligible = [
             (module.module_type, module.module_id)
-            for module in controller_config.modules
+            for module in controller_configuration.modules
             if (module.module_type, module.module_id) in parsers
         ]
         if not eligible:
@@ -512,7 +512,7 @@ def _discover_jobs(
 def _run_extraction_stage(
     extraction_archives: dict[str, Path],
     extraction_output: Path,
-    config_path: Path,
+    configuration_path: Path,
     tracker: ProcessingTracker,
     *,
     workers: int,
@@ -531,7 +531,7 @@ def _run_extraction_stage(
     Args:
         extraction_archives: The present controllers' archive paths, keyed by controller ID.
         extraction_output: The directory where raw per-module feathers are written.
-        config_path: The path to the materialized extraction configuration that supplies each job's targets.
+        configuration_path: The path to the materialized extraction configuration that supplies each job's targets.
         tracker: The shared processing tracker.
         workers: The resolved worker-process count, passed through to size each archive's decode batches.
         executor: The shared process pool spanning both pipeline stages, or None for sequential processing.
@@ -576,7 +576,7 @@ def _run_extraction_stage(
                     archive_path=archive_path,
                     output_directory=extraction_output,
                     controller_id=controller_id,
-                    config_path=config_path,
+                    configuration_path=configuration_path,
                     job_id=extraction_job_ids[controller_id],
                     tracker=tracker,
                     workers=workers,
@@ -781,7 +781,7 @@ def _execute_remote_job(
     extraction_archives: Mapping[str, Path],
     extraction_output: Path,
     parse_output: Path,
-    config_path: Path,
+    configuration_path: Path,
     tracker: ProcessingTracker,
     *,
     workers: int,
@@ -804,7 +804,7 @@ def _execute_remote_job(
         extraction_archives: The resolved archive path of every processable controller, keyed by controller ID.
         extraction_output: The directory holding (or receiving) the raw per-module feathers.
         parse_output: The directory that receives a parser's domain-specific feather.
-        config_path: The path to the materialized extraction configuration a remote extraction job reads.
+        configuration_path: The path to the materialized extraction configuration a remote extraction job reads.
         tracker: The shared processing tracker.
         workers: The requested worker-process count.
         display_progress: Determines whether to display a progress bar.
@@ -833,7 +833,7 @@ def _execute_remote_job(
             archive_path=archive_path,
             output_directory=extraction_output,
             controller_id=controller_id,
-            config_path=config_path,
+            configuration_path=configuration_path,
             job_id=job_id,
             tracker=tracker,
             workers=resolved_workers,

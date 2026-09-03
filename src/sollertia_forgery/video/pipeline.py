@@ -83,8 +83,7 @@ def run_video_processing_pipeline(
         stage sequentially over one shared worker pool, and runs every stage when no flag is set or all three are set,
         mirroring the cindra pipeline's resolution. The parse and energy jobs honor ``target_camera`` to narrow that
         pass to a single camera. In remote mode (a ``job_id`` is provided) only the single job matching that identifier
-        runs, chosen entirely by the identifier, so the flags and ``target_camera`` are ignored. This lets an external
-        scheduler drive cross-job parallelism by dispatching each job identifier concurrently. Either way a parse job
+        runs, chosen entirely by the identifier, so the flags and ``target_camera`` are ignored. Either way a parse job
         fans its archive decoding across the worker pool once the archive is large enough, an energy job fans its
         recording decoding the same way, and the rename and tracking jobs run single-core.
 
@@ -108,13 +107,14 @@ def run_video_processing_pipeline(
 
     Raises:
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the camera
-            manifest registers no cameras, if the raw behavior data tree holds more than one camera manifest, if no
-            camera log archives are discovered for the timestamp stage, or if job_id does not match an available job.
-            Also raised when target_camera has no discovered log archive while the timestamp stage runs, or is not
-            registered in the camera manifest while the motion-energy stage runs, when a camera's recording cannot be
-            opened, reports no frames, cannot decode the frame preceding a decode chunk, or ends early at a chunk
-            other than the last, and when two cameras resolve the same canonical timestamp filename or one camera's
-            canonical filename is another camera's parsed feather.
+            manifest registers no cameras, or if the raw behavior data tree holds more than one camera manifest. Also
+            raised when no camera log archives are discovered for the timestamp stage, or when job_id does not match
+            an available job. The same error covers a target_camera with no discovered log archive while the timestamp
+            stage runs, or one that is not registered in the camera manifest while the motion-energy stage runs. It
+            also covers a camera recording that cannot be opened, reports no frames, cannot decode the frame preceding
+            a decode chunk, or ends early at a chunk other than the last. Two cameras resolving the same canonical
+            timestamp filename raise it as well, as does one camera's canonical filename colliding with another
+            camera's parsed feather.
         OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and the
             log archives are located.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
@@ -170,9 +170,9 @@ def run_video_processing_pipeline(
             console.error(message=message, error=FileNotFoundError)
 
         # Caps the worker threading layers around the single job this identifier selects. The extraction binding and
-        # the motion-energy job each enter this same cap around the pool they create, so this outer context is the
-        # one that reaches a pool the system's donated tracking function opens, which its registry contract does not
-        # require it to pin.
+        # the motion-energy job each enter this same cap around the pool they create. This outer context therefore
+        # reaches a pool the system's donated tracking function opens, which its registry contract does not require it
+        # to pin.
         with limit_worker_threads():
             _dispatch_job(
                 job_name=job_name,
@@ -255,8 +255,8 @@ def run_video_processing_pipeline(
     # cores. The pool starts its children on demand and each child sizes its library thread pools while importing,
     # before any job code of ours runs, so the caps have to be in place here rather than inside the workers. Scoping
     # them to the pool rather than setting them at import keeps the rest of the library multithreaded. numba latches
-    # its own ceiling while it is imported and rejects an environment variable that disagrees afterwards, so it is
-    # pinned instead by the initializer that every child runs through its runtime setter.
+    # its own ceiling while it is imported and rejects an environment variable that disagrees afterwards. It is pinned
+    # instead by the initializer that every child runs through its runtime setter.
     with limit_worker_threads(), ExitStack() as pool_scope:
         shared_executor = (
             pool_scope.enter_context(
@@ -370,7 +370,7 @@ def _resolve_camera_jobs(data_directory: Path) -> JobUniverse:
 
         The resolver answers a tree holding no manifest with an empty universe rather than an error, and refuses a
         directory that is not there at all. A session that ran no DataLogger-backed source has no behavior data
-        directory, which carries no manifest exactly as an empty directory would, so both outcomes are reported here as
+        directory, which carries no manifest exactly as an empty directory would. Both outcomes are reported here as
         the one condition that stops this pipeline: the manifest that defines its job universe is absent.
 
     Args:

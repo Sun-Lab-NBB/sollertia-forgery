@@ -44,11 +44,11 @@ def run_runtime_processing_pipeline(
     """Decodes and parses the acquisition runtime's log archive for the target session.
 
     Notes:
-        This is a single-stage pipeline. It locates the acquisition system's runtime DataLogger archive under the
-        session's raw behavior-data directory and decodes it into a raw ``(time_us, payload)`` message table. It then
-        hands that table to the registered runtime parser, which writes the system's behavior feathers into the
-        session's processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and
-        parser come from the session's acquisition system.
+        Runs as a single stage. Locates the acquisition system's runtime DataLogger archive under the session's raw
+        behavior-data directory and decodes it into a raw ``(time_us, payload)`` message table. The decoded table then
+        reaches the registered runtime parser, which writes the system's behavior feathers into the session's processed
+        runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and parser come from the
+        session's acquisition system.
 
         The runtime job is the only job this pipeline produces, so it always runs. The registered parser may
         additionally raise system-specific errors (for example ``ValueError`` or ``RuntimeError``) that propagate
@@ -127,14 +127,14 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
         The archives are indexed through the data-structures library, which owns the name under which each source writes
         its archive, so a session that recorded no runtime archive is reported without this pipeline restating that
         naming rule. The index covers the logger's own output directory, which is where a session's archives are
-        assembled side by side, and the pipeline resolves its own archive through that same helper.
+        assembled side by side.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
-        subset of that universe.
+        The loaded session, the job universe as ``(job_name, specifier)`` pairs, and the possible subset of that
+        universe.
 
     Raises:
         ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
@@ -181,8 +181,8 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
         display_progress: Determines whether to display a per-batch progress bar during a parallel decode.
 
     Returns:
-        A Polars DataFrame with a ``time_us`` UInt64 column of absolute message timestamps and a ``payload`` Binary
-        column of the corresponding raw message payloads, in archive order.
+        The archive's messages in archive order, as a ``time_us`` column of absolute timestamps paired with a
+        ``payload`` column of the corresponding raw message bytes.
     """
     reader = LogArchiveReader(archive_path=archive_path)
     onset_us = reader.onset_timestamp_us
@@ -233,15 +233,15 @@ def _decode_batches(
         display_progress: Determines whether to display a per-batch progress bar.
 
     Returns:
-        A tuple of the concatenated UInt64 timestamps and the ordered list of raw payload bytes across all batches.
+        The concatenated message timestamps and the raw payload bytes, both in archive order across every batch.
     """
     timestamp_chunks: list[NDArray[np.uint64]] = [np.array([], dtype=np.uint64) for _ in batches]
     payload_chunks: list[list[bytes]] = [[] for _ in batches]
 
     # Each decode child re-imports and sizes its library thread pools before any of this code runs inside it, so the
-    # caps cover the pool's whole life rather than sitting inside its workers. numba latches its own ceiling
-    # while it is imported and rejects an environment variable that disagrees afterwards, so each child pins it
-    # through its own runtime setter in the pool initializer instead.
+    # caps cover the pool's whole life rather than sitting inside its workers. Numba latches its own ceiling while it
+    # is imported and rejects an environment variable that disagrees afterwards, so each child pins it through its own
+    # runtime setter in the pool initializer instead.
     with (
         limit_worker_threads(),
         ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker_threads) as executor,
@@ -262,7 +262,7 @@ def _decode_batches(
                 index = future_to_index[completed_future]
                 timestamp_chunks[index], payload_chunks[index] = completed_future.result()
                 if progress_bar is not None:
-                    progress_bar.update(1)
+                    progress_bar.update(n=1)
 
     timestamps: NDArray[np.uint64] = np.concatenate(timestamp_chunks)
     payloads = [payload for chunk in payload_chunks for payload in chunk]
@@ -273,10 +273,10 @@ def _decode_batch(archive_path: Path, onset_us: np.uint64, keys: list[str]) -> t
     """Decodes a single batch of runtime messages into timestamps and raw payload bytes.
 
     Notes:
-        This is the atomic unit of work dispatched to worker processes by the parallel decode path, so it must remain
-        importable at module level and accept only picklable arguments. It re-opens the archive with the pre-discovered
-        onset timestamp and iterates only the batch's message keys, copying each payload into immutable bytes so the
-        result can cross the process boundary.
+        Remains importable at module level and accepts only picklable arguments, since the parallel decode path
+        dispatches this to worker processes. Re-opens the archive with the pre-discovered onset timestamp and iterates
+        only the batch's message keys, copying each payload into immutable bytes so the result can cross the process
+        boundary.
 
     Args:
         archive_path: The path to the runtime archive to read.
@@ -284,7 +284,7 @@ def _decode_batch(archive_path: Path, onset_us: np.uint64, keys: list[str]) -> t
         keys: The message keys this batch is responsible for decoding.
 
     Returns:
-        A tuple of the batch's UInt64 timestamps and the ordered list of its raw payload bytes.
+        The batch's message timestamps and its raw payload bytes, both in archive order.
     """
     reader = LogArchiveReader(archive_path=archive_path, onset_us=onset_us)
     timestamps: list[np.uint64] = []
