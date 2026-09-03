@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metadata section. Provides the general ID information about the project.
 [project]
 name = "sollertia-forgery"
-version = "1.0.0rc5"
+version = "1.0.0rc6"
 description = "Provides tools for processing and managing the data acquired using the Sollertia data acquisition platform."
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,13 +43,13 @@ dependencies = [
     "ataraxis-time>=7,<8",
     "ataraxis-base-utilities>=7,<8",
     "ataraxis-data-structures>=7.1,<8",  # 7.1 first exports the atomic and direct write helpers
-    "sollertia-shared-assets>=10,<11",  # 10.0.0 first exports the shared checksum exclusion set
+    "sollertia-shared-assets>=10.0.0rc5,<11",  # 10.0.0 first exports the shared checksum exclusion set
 
     # Acquisition and Processing Pipelines (called in-process by the video, microcontroller, two-photon, and forging
     # pipelines)
     "ataraxis-video-system>=5.1,<6",  # 5.1 first exports the OutputLayout against which the video pipeline resolves
     "ataraxis-communication-interface>=7.1,<8",  # 7.1 first answers the archive estimator with a JobSizing record
-    "cindra>=2,<3",  # 2.0.0 first states the re-measured registration and processing worker allocations
+    "cindra>=2.0.0rc7,<3",  # 2.0.0 first states the re-measured registration and processing worker allocations
 
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
     # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
@@ -263,6 +263,11 @@ addopts = "--import-mode=importlib"
 # entry from shadowing the installed distribution against which the tests measure coverage.
 pythonpath = ["."]
 
+# Registers the marker that pytest-xdist declares when it loads and that the concurrency tests carry. A run that
+# disables the plugin, or an environment installing pytest alone, otherwise emits one PytestUnknownMarkWarning per
+# decorated test.
+markers = ["xdist_group(name): Routes every test carrying this name to a single pytest-xdist worker process."]
+
 # Configures the coverage data the '{py}-test' tox task collects. Most of the interface layer is excluded from
 # measurement, as the Click command modules, the MCP server, and the MCP tool modules reach external infrastructure
 # that only a live CLI invocation or MCP session supplies. The exclusions are listed per module rather than as a
@@ -288,6 +293,13 @@ omit = [
     "*/sollertia_forgery/interfaces/server_tools.py",
 ]
 
+# Silences the 'no-data-collected' warning that a pytest-xdist worker prints to stderr when it receives no test. The
+# test task passes '-n logical', which starts one worker per logical core, so any run selecting fewer tests than the
+# host has cores leaves workers idle, and each idle worker measures nothing. The warning bypasses the pytest warnings
+# summary and lands on stderr, while the '--cov-fail-under' gate the test task applies still catches a run that
+# genuinely measures nothing.
+disable_warnings = ["no-data-collected"]
+
 # Used by the 'coverage' tox task to merge the coverage data files the '{py}-test' tasks produce.
 [tool.coverage.paths]
 
@@ -304,9 +316,11 @@ source = [
 [tool.coverage.html]
 directory = "reports/coverage_html"
 
-# Specifies the coverage gate and additional ignore directives
+# Specifies the reporting settings and the ignore directives. The 100% gate is absent here and lives on the two tox
+# commands that enforce it, because pytest-cov adopts a 'fail_under' declared in this section whenever the command line
+# names no '--cov-fail-under' of its own. A partial run against a project declaring it here therefore reports a coverage
+# failure and exits non-zero even when every selected test passes.
 [tool.coverage.report]
-fail_under = 100     # Requires the test suite to cover every measured statement and branch
 show_missing = true  # Lists the statements missed by the test suite, so a failed check names the lines to cover
 exclude_lines = [
     "pragma: no cover",
