@@ -1613,7 +1613,7 @@ def test_a_plane_job_naming_a_plane_the_recording_does_not_hold_is_refused(exper
     write_surgery_metadata(session=experiment_session)
     write_raw_imaging(session=experiment_session)
 
-    with pytest.raises(ValueError, match="does not hold"):
+    with pytest.raises(ValueError, match=r"does\s+not\s+hold"):
         two_photon_estimates(
             session=experiment_session,
             jobs=[(str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}99", 8)],

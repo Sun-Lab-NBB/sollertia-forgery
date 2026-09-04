@@ -474,7 +474,7 @@ def test_resolve_controllers_rejects_manifest_with_no_extractable_module(tmp_pat
     session = _make_session(tmp_path)
     _write_inputs(session=session, modules=((9, 9),), stage_archive=False)
 
-    with pytest.raises(ValueError, match="declares a module"):
+    with pytest.raises(ValueError, match=r"declares\s+a\s+module"):
         pipeline_module._resolve_controllers(
             session=session,
             event_codes={(2, 1): (51, 52)},
@@ -951,7 +951,7 @@ def test_a_second_microcontroller_manifest_in_the_tree_is_rejected(
 
     # One recording writes one manifest beside its archives, so a second manifest under the same tree belongs to
     # another recording and makes every controller name in it ambiguous rather than redundant.
-    with pytest.raises(ValueError, match=r"tree holds\s+2\s+microcontroller_manifest"):
+    with pytest.raises(ValueError, match=r"tree\s+holds\s+2\s+microcontroller_manifest"):
         run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
 

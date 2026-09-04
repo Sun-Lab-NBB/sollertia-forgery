@@ -157,7 +157,7 @@ def test_resolve_slowest_camera_clock_ignores_degenerate_feathers(tmp_path: Path
 
 def test_resolve_slowest_camera_clock_errors_without_cameras(tmp_path: Path) -> None:
     """Verifies a video directory with no usable camera timestamp feather cannot supply a reference clock."""
-    with pytest.raises(FileNotFoundError, match="no camera clock"):
+    with pytest.raises(FileNotFoundError, match=r"no\s+camera\s+clock"):
         resolve_slowest_camera_clock(video_data_path=tmp_path)
 
 

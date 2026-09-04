@@ -4,6 +4,7 @@ macOS.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -211,7 +212,7 @@ def test_naming_the_link_path_as_the_runtime_is_refused(tmp_path: Path, monkeypa
     monkeypatch.setattr(openmp_module.sys, "platform", "darwin")
     monkeypatch.setattr(openmp_module, "_openmp_runtime_loadable", lambda: False)
 
-    with pytest.raises(RuntimeError, match="already sits where the link would be written"):
+    with pytest.raises(RuntimeError, match=r"already\s+sits\s+where\s+the\s+link\s+would\s+be\s+written"):
         resolve_openmp_runtime(runtime_path=runtime, link_path=runtime, execute=True)
 
     # Unlinking the destination before writing the link would remove the only copy of the runtime and leave a link
@@ -234,7 +235,7 @@ def test_naming_the_runtime_by_a_second_route_to_the_same_file_is_refused(
     # Neither the command's arguments nor the discovery resolve the paths they are given, so an operator naming the
     # runtime relative to the link's own directory spells one file two ways. Comparing the spellings rather than the
     # files they name would replace the host's only runtime with a link pointing at itself.
-    with pytest.raises(RuntimeError, match="already sits where the link would be written"):
+    with pytest.raises(RuntimeError, match=r"already\s+sits\s+where\s+the\s+link\s+would\s+be\s+written"):
         resolve_openmp_runtime(runtime_path=second_route, link_path=runtime, execute=True)
 
     assert runtime.read_bytes() == b"the runtime"
@@ -304,10 +305,17 @@ def test_an_unwritable_link_directory_names_the_permission_remedy(
 
 
 @pytest.mark.xdist_group(name="worker_pool")
-def test_the_post_link_verification_runs_a_fresh_interpreter() -> None:
+def test_the_post_link_verification_runs_a_fresh_interpreter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that the loader search path is read once per process, so only a new interpreter reports whether the link
     took.
     """
+    # The runtime the module names is a macOS dylib, so loading it here would assert a precondition of the host rather
+    # than the behavior of the call. The substituted script answers with the exit status the call reads, and answers
+    # it from a process this one is not, which is the whole of what the verification establishes.
+    monkeypatch.setattr(
+        openmp_module, "_VERIFICATION_SCRIPT", f"import os; raise SystemExit(0 if os.getpid() != {os.getpid()} else 1)"
+    )
+
     assert openmp_module._verify_runtime_loadable()
 
 

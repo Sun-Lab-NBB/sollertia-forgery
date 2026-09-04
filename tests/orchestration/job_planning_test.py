@@ -717,7 +717,7 @@ def test_projecting_a_project_that_does_not_exist_is_rejected(tmp_path: Path) ->
     """Verifies that a missing project holds neither a unit to read nor a writable location, so it is named here
     rather than surfacing as a walk failure partway through the projection.
     """
-    with pytest.raises(FileNotFoundError, match="does not name an existing directory"):
+    with pytest.raises(FileNotFoundError, match=r"does\s+not\s+name\s+an\s+existing\s+directory"):
         generate_project_plan(project_directory=tmp_path.joinpath("NeverCreated"))
 
 
