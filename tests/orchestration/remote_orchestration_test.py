@@ -821,6 +821,18 @@ def test_units_spanning_two_projects_are_rejected() -> None:
         )
 
 
+def test_a_unit_path_holding_too_few_parents_is_rejected() -> None:
+    """Verifies that a path shallower than its kind sits below its project is refused under the documented error."""
+    with pytest.raises(ValueError, match="must name at least that many parents"):
+        resolve_project_root(unit_paths=[Path("/2024_11_04")], unit_kind="session")
+
+
+def test_a_shallow_dataset_path_is_rejected_at_its_own_depth() -> None:
+    """Verifies that the refusal follows the unit kind's depth, which is one level for a dataset."""
+    with pytest.raises(ValueError, match="must name at least that many parents"):
+        resolve_project_root(unit_paths=[Path()], unit_kind="dataset")
+
+
 def test_a_batch_joins_the_state_table_to_the_planned_figures() -> None:
     """Verifies that state names which jobs exist and the plan sizes them, which is the whole descriptor."""
     document = build_document(
