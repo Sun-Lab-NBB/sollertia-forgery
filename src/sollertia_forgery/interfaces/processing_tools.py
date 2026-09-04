@@ -120,13 +120,13 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
 """The job fields detail adds, which are the resources the job occupies, its timing and provenance, its runtime
 parameters, and its prerequisite jobs."""
 
-_RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "cores", "memory_mb")
-"""The job fields a semi-detail resource listing carries, which are the job's identity and its planned figures. The unit
-path is left off a semi-detail row because the unit entry already names it, and detail adds it back for a caller
-reading one job closely."""
+_RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "unit_path", "cores", "memory_mb")
+"""The job fields a semi-detail resource listing carries, which are the job's identity, the unit it reads, and its
+planned figures. The unit path rides every row because a job identifier derives from the job name and the specifier
+alone, so the units of one call share the identifier of the same stage and nothing else in the row separates them."""
 
-_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "unit_path", "options")
-"""The job fields detail adds, naming the unit the job reads, its prerequisite jobs, and the parameters it would use."""
+_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "options")
+"""The job fields detail adds, naming the job's prerequisite jobs and the parameters it would use."""
 
 _STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in ProcessingStatus)
 """The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the values
@@ -377,7 +377,8 @@ def execute_jobs_tool(
         prepared-batch registry cannot be read, when an identifier resolves to no prepared batch, or when no batch is
         named. Returns an error as well when the named batches mix hosts, when every prepared job is blocked or already
         succeeded, and when no recorded descriptor builds into a job. A local dispatch also returns an error when a
-        batch is already running in this process, since one pool holds one batch. A remote dispatch reports each of its
+        batch is already running in this process, since one pool holds one batch, and when the recorded state of the
+        dispatched jobs cannot be cleared. A remote dispatch reports each of its
         own steps as itself. It returns an error when the server cannot be reached, when the reconciliation cannot
         resolve what already runs, when the host refuses to clear the dispatched jobs' records, and when the scheduler
         rejects the submission.
@@ -796,8 +797,8 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
     Returns:
         A response dict with ``pipeline``, ``host``, ``total_paths`` removed, ``removed_bytes`` freed across every
         unit, and a ``removed`` list carrying each path and the bytes it held. Returns an error when a batch is running
-        locally, since removing the output of a job in flight would fail that job. It also returns an error when the
-        pipeline or the host is not supported, and when the host cannot carry out the removal.
+        in this process, since removing the output of a job in flight would fail that job. It also returns an error
+        when the pipeline or the host is not supported, and when the host cannot carry out the removal.
     """
     if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
@@ -809,7 +810,10 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
     running = state is not None and state.manager_thread is not None and state.manager_thread.is_alive()
     if host == LOCAL_HOST_LABEL and running:
         return error_response(
-            message="A batch is currently running. Wait for it to finish or cancel it before cleaning output."
+            message=(
+                "A batch is currently running in this process. Wait for it to finish or cancel it before cleaning "
+                "output."
+            )
         )
 
     try:
@@ -979,11 +983,21 @@ def _execute_local_batch(
     running = _LOCAL_RUN.state
     if running is not None and running.manager_thread is not None and running.manager_thread.is_alive():
         return error_response(
-            message="A batch is already running. Wait for it to finish or cancel it before starting another."
+            message=(
+                "A batch is already running in this process. Wait for it to finish or cancel it before starting "
+                "another."
+            )
         )
 
     reconciliation = reconcile_local_jobs(jobs=pending)
-    _reset_batch_jobs(host=host, jobs=reconciliation.resettable)
+
+    # The reset takes each unit's tracker lock, which a concurrent writer can hold past the acquisition timeout, so the
+    # dispatch reports that contention rather than raising out of the tool.
+    try:
+        _reset_batch_jobs(host=host, jobs=reconciliation.resettable)
+    except Exception as exception:
+        return error_response(message=f"Unable to clear the recorded state of the batch's jobs. {exception}")
+
     dispatchable = reconciliation.dispatchable
 
     core_budget = resolve_worker_count(requested_workers=core_budget_override, reserved_cores=RESERVED_CORES)
