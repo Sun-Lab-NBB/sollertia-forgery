@@ -288,7 +288,9 @@ def inspect_job_resources_tool(
 
     Returns:
         A response dict with the ``pipeline`` inspected, the ``host`` that holds the data, ``total_units``, and a
-        ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``, and ``summed_memory_mb``.
+        ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``, ``summed_memory_mb``,
+        ``largest_job_resident_mb``, and ``summed_resident_mb``. A caller sizing this machine's pool budgets against
+        the anonymous totals, and a caller sizing a scheduler submission budgets against the resident ones.
         Carries a ``breakdown`` per job type and a ``units`` list naming each session and how many jobs it resolved.
         Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a
         filter is named or the listing is requested. For ``local`` it also carries this machine's ``total_memory_mb``
@@ -313,6 +315,8 @@ def inspect_job_resources_tool(
             "widest_job_cores": max((int(job["cores"]) for job in jobs), default=0),
             "largest_job_memory_mb": max((int(job["memory_mb"]) for job in jobs), default=0),
             "summed_memory_mb": sum(int(job["memory_mb"]) for job in jobs),
+            "largest_job_resident_mb": max((int(job["resident_mb"] or job["memory_mb"]) for job in jobs), default=0),
+            "summed_resident_mb": sum(int(job["resident_mb"] or job["memory_mb"]) for job in jobs),
         },
         breakdown={"job_name": count_values(values=[job["job_name"] for job in jobs])},
     )

@@ -85,7 +85,8 @@ def plan_session_jobs_tool(
     Returns:
         A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
         Carries a ``units`` list, whose entries hold each session's ``unit_path``, ``unit_name``, ``job_count``, and
-        ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. A
+        ``summed_memory_mb`` and ``summed_resident_mb``, or its ``unit_path``, a ``job_count`` of zero, and the
+        ``error`` that stopped it. A
         ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, host=host, regenerate_plan=regenerate_plan)
@@ -111,7 +112,8 @@ def plan_dataset_jobs_tool(
     Returns:
         A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
         Carries a ``units`` list, whose entries hold each dataset's ``unit_path``, ``unit_name``, ``job_count``, and
-        ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. A
+        ``summed_memory_mb`` and ``summed_resident_mb``, or its ``unit_path``, a ``job_count`` of zero, and the
+        ``error`` that stopped it. A
         ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, host=host, regenerate_plan=regenerate_plan)
@@ -134,7 +136,8 @@ def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[s
 
     Returns:
         A response dict with ``project_path``, ``host``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
-        ``largest_job_memory_mb``, ``widest_job_cores``, a per-unit-kind and per-pipeline ``pipeline_totals``, and the
+        ``largest_job_memory_mb``, ``summed_resident_mb``, ``largest_job_resident_mb``, ``widest_job_cores``, a
+        per-unit-kind and per-pipeline ``pipeline_totals``, and the
         ``elapsed_seconds`` the projection took. Returns an error when the project cannot be read.
     """
     if host not in HOST_LABELS:
@@ -318,14 +321,32 @@ def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
         frame: The whole plan projection.
 
     Returns:
-        A dictionary with the total jobs, the summed and largest memory, and the widest core allocation.
+        A dictionary with the total jobs, the summed and largest figure of both memory terms, and the widest core
+        allocation.
+
+    Notes:
+        Both memory terms are totaled, because a caller sizing work for this machine's pool budgets against the
+        anonymous term while a caller sizing a scheduler submission budgets against the resident one. Reporting the
+        anonymous total alone leaves the second caller under-requesting by whatever its jobs map.
     """
     if frame.height == 0:
-        return {"total_jobs": 0, "summed_memory_mb": 0, "largest_job_memory_mb": 0, "widest_job_cores": 0}
+        return {
+            "total_jobs": 0,
+            "summed_memory_mb": 0,
+            "largest_job_memory_mb": 0,
+            "summed_resident_mb": 0,
+            "largest_job_resident_mb": 0,
+            "widest_job_cores": 0,
+        }
+    # A plan stamped before the resident term entered the model carries no figure for it, and the anonymous term is
+    # the whole of what that model measured, so it stands in until the plan is regenerated.
+    resident = frame["resident_mb"].fill_null(frame["memory_mb"])
     return {
         "total_jobs": frame.height,
         "summed_memory_mb": int(frame["memory_mb"].sum()),
         "largest_job_memory_mb": int(frame["memory_mb"].max()),  # type: ignore[arg-type]
+        "summed_resident_mb": int(resident.sum()),
+        "largest_job_resident_mb": int(resident.max()),  # type: ignore[arg-type]
         "widest_job_cores": int(frame["cores"].max()),  # type: ignore[arg-type]
     }
 
@@ -337,8 +358,8 @@ def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
         frame: The whole plan projection.
 
     Returns:
-        A list of entries, each carrying the unit kind, the pipeline, its job count, its summed memory, and its widest
-        core allocation, ordered by unit kind and then by pipeline.
+        A list of entries, each carrying the unit kind, the pipeline, its job count, both of its summed memory
+        figures, and its widest core allocation, ordered by unit kind and then by pipeline.
     """
     if frame.height == 0:
         return []
@@ -347,6 +368,7 @@ def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
         .agg(
             pl.len().alias("jobs"),
             pl.col("memory_mb").sum().alias("summed_memory_mb"),
+            pl.col("resident_mb").fill_null(pl.col("memory_mb")).sum().alias("summed_resident_mb"),
             pl.col("cores").max().alias("widest_job_cores"),
         )
         .sort("unit_kind", "pipeline")
