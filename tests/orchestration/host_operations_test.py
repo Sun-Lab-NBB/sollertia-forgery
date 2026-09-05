@@ -175,6 +175,7 @@ def write_plan_table(path: Path, rows: list[dict[str, Any]]) -> Path:
                 "specifier": "1",
                 "cores": 16,
                 "memory_mb": 4096,
+                "resident_mb": 5120,
                 "prerequisite_ids": [],
                 **row,
             }
@@ -777,8 +778,8 @@ def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
     write_plan_table(
         path=stub_ssh_transport.local_path(plan_path),
         rows=[
-            {"job_id": "energy", "session": "2026-01-02-03-04-05-000006", "memory_mb": 4096},
-            {"job_id": "rename", "session": "2026-01-02-03-04-05-000006", "memory_mb": 512},
+            {"job_id": "energy", "session": "2026-01-02-03-04-05-000006", "memory_mb": 4096, "resident_mb": 5120},
+            {"job_id": "rename", "session": "2026-01-02-03-04-05-000006", "memory_mb": 512, "resident_mb": 1536},
             # A dataset row names no session, so a session batch's summary passes over it.
             {"job_id": "forge", "unit_kind": DATASET_UNIT, "animal": None, "dataset": "a_dataset"},
         ],

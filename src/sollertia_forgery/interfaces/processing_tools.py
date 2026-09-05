@@ -315,8 +315,8 @@ def inspect_job_resources_tool(
             "widest_job_cores": max((int(job["cores"]) for job in jobs), default=0),
             "largest_job_memory_mb": max((int(job["memory_mb"]) for job in jobs), default=0),
             "summed_memory_mb": sum(int(job["memory_mb"]) for job in jobs),
-            "largest_job_resident_mb": max((int(job["resident_mb"] or job["memory_mb"]) for job in jobs), default=0),
-            "summed_resident_mb": sum(int(job["resident_mb"] or job["memory_mb"]) for job in jobs),
+            "largest_job_resident_mb": max((int(job["resident_mb"]) for job in jobs), default=0),
+            "summed_resident_mb": sum(int(job["resident_mb"]) for job in jobs),
         },
         breakdown={"job_name": count_values(values=[job["job_name"] for job in jobs])},
     )

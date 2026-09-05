@@ -338,15 +338,12 @@ def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
             "largest_job_resident_mb": 0,
             "widest_job_cores": 0,
         }
-    # A plan stamped before the resident term entered the model carries no figure for it, and the anonymous term is
-    # the whole of what that model measured, so it stands in until the plan is regenerated.
-    resident = frame["resident_mb"].fill_null(frame["memory_mb"])
     return {
         "total_jobs": frame.height,
         "summed_memory_mb": int(frame["memory_mb"].sum()),
         "largest_job_memory_mb": int(frame["memory_mb"].max()),  # type: ignore[arg-type]
-        "summed_resident_mb": int(resident.sum()),
-        "largest_job_resident_mb": int(resident.max()),  # type: ignore[arg-type]
+        "summed_resident_mb": int(frame["resident_mb"].sum()),
+        "largest_job_resident_mb": int(frame["resident_mb"].max()),  # type: ignore[arg-type]
         "widest_job_cores": int(frame["cores"].max()),  # type: ignore[arg-type]
     }
 
@@ -368,7 +365,7 @@ def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
         .agg(
             pl.len().alias("jobs"),
             pl.col("memory_mb").sum().alias("summed_memory_mb"),
-            pl.col("resident_mb").fill_null(pl.col("memory_mb")).sum().alias("summed_resident_mb"),
+            pl.col("resident_mb").sum().alias("summed_resident_mb"),
             pl.col("cores").max().alias("widest_job_cores"),
         )
         .sort("unit_kind", "pipeline")

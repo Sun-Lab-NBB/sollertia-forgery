@@ -269,7 +269,9 @@ def make_document(host: str = "workstation", pipeline: str = "checksum") -> Batc
         host=host,
         options={"regenerate_checksum": True},
         units=[{"unit_path": "/nonexistent/session", "unit_name": "session", "job_count": 1, "blocked_count": 1}],
-        jobs=[{"job_id": "a_job", "unit_path": "/nonexistent/session", "cores": 8, "memory_mb": 1024}],
+        jobs=[
+            {"job_id": "a_job", "unit_path": "/nonexistent/session", "cores": 8, "memory_mb": 1024, "resident_mb": 2048}
+        ],
         blocked_jobs=[{"job_id": "a_blocked_job", "unsatisfied_prerequisite_ids": ["a_job"]}],
     )
 

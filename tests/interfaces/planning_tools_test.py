@@ -28,6 +28,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "51",
         "cores": 16,
         "memory_mb": 4000,
+        "resident_mb": 5024,
         "prerequisite_ids": ["camera_timestamp_rename-"],
     },
     {
@@ -41,6 +42,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "",
         "cores": 1,
         "memory_mb": 400,
+        "resident_mb": 1424,
     },
     {
         "unit_kind": SESSION_UNIT,
@@ -53,6 +55,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "",
         "cores": 8,
         "memory_mb": 900,
+        "resident_mb": 1924,
     },
     {
         "unit_kind": DATASET_UNIT,
@@ -65,6 +68,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "2026-01-02-03-04-05-000006",
         "cores": 1,
         "memory_mb": 6000,
+        "resident_mb": 7024,
     },
 ]
 """A projection holding both unit kinds, two jobs of one pipeline for one session, and one job waiting on another."""

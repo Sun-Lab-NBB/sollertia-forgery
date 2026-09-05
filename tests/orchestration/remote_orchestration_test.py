@@ -122,6 +122,7 @@ def build_descriptor(
         "pipeline": pipeline,
         "cores": cores,
         "memory_mb": memory_mb,
+        "resident_mb": memory_mb + 1024,
         "prerequisite_ids": list(prerequisite_ids),
         "options": {},
     }
@@ -170,6 +171,7 @@ def build_plan_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
                 "specifier": "1",
                 "cores": 16,
                 "memory_mb": 4096,
+                "resident_mb": 5120,
                 "prerequisite_ids": [],
                 **row,
             }
@@ -369,8 +371,10 @@ def test_a_submission_requests_the_cores_and_memory_the_job_was_prepared_at() ->
     script = server.submitted[0].command_script
 
     assert "#SBATCH --cpus-per-task=16" in script
-    # 5000 megabytes rounds up to five gigabytes, since understating a request kills the allocation outright.
-    assert "#SBATCH --mem=5G" in script
+    # The scheduler packs a node by what each allocation declares, so it is given the job's resident figure of 6024
+    # megabytes rather than its anonymous 5000, and that rounds up to six gigabytes because understating a request
+    # leaves the host reclaiming the shortfall from a job that is holding it.
+    assert "#SBATCH --mem=6G" in script
     assert "#SBATCH --time=08:00:00" in script
 
 
@@ -611,7 +615,8 @@ def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
             unit_path="/data/Project/Animal/Session",
             unit_name="Session",
             cores=16,
-            memory_mb=4096,
+            # The record states the figure the allocation was given, which is the job's resident term.
+            memory_mb=5120,
             output_log=str(batch_directory.joinpath("0000-Session-motion_energy-1.out")),
             error_log=str(batch_directory.joinpath("0000-Session-motion_energy-1.err")),
         )
@@ -837,7 +842,7 @@ def test_a_batch_joins_the_state_table_to_the_planned_figures() -> None:
     """Verifies that state names which jobs exist and the plan sizes them, which is the whole descriptor."""
     document = build_document(
         pipeline="video",
-        plan=build_plan_frame(rows=[{"job_id": "energy", "cores": 16, "memory_mb": 5000}]),
+        plan=build_plan_frame(rows=[{"job_id": "energy", "cores": 16, "memory_mb": 5000, "resident_mb": 6024}]),
         state=build_state_frame(rows=[{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
@@ -1006,7 +1011,7 @@ def test_a_remote_batch_is_resolved_from_the_projects_own_artifacts(
     place_server_table(
         transport=stub_ssh_transport,
         remote_path=project_plan_path(project_directory=_SERVER_PROJECT_ROOT),
-        frame=build_plan_frame([{"job_id": "energy", "cores": 16, "memory_mb": 5000}]),
+        frame=build_plan_frame([{"job_id": "energy", "cores": 16, "memory_mb": 5000, "resident_mb": 6024}]),
     )
     place_server_table(
         transport=stub_ssh_transport,

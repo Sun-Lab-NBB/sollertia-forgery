@@ -339,7 +339,8 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
     """Builds one job descriptor into the pending job that both backends dispatch.
 
     Args:
-        job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, and ``memory_mb``, and optionally
+        job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, ``memory_mb``, ``resident_mb``, and
+            optionally
             ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``,
             ``options``, ``status``, and ``executor_id``.
 
@@ -359,7 +360,7 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         pipeline=job.get("pipeline", ""),
         core_weight=int(job["cores"]),
         memory_mb=int(job["memory_mb"]),
-        resident_mb=int(job.get("resident_mb") or job["memory_mb"]),
+        resident_mb=int(job["resident_mb"]),
         prerequisite_ids=tuple(job.get("prerequisite_ids", ())),
         options=dict(job.get("options") or {}),
         status=job.get("status") or "",
@@ -406,11 +407,7 @@ def _build_job_descriptor(
         "tracker_path": tracker_path,
         "cores": int(plan_row["cores"]),
         "memory_mb": int(plan_row["memory_mb"]),
-        # A plan stamped before the resident term entered the model carries no figure for it, and the anonymous term
-        # is the whole of what that model measured, so it stands in until the plan is regenerated. Retuning the model
-        # restamps its version, so a stale plan is re-estimated on the next planning pass rather than dispatched from
-        # this fallback indefinitely.
-        "resident_mb": int(plan_row.get("resident_mb") or plan_row["memory_mb"]),
+        "resident_mb": int(plan_row["resident_mb"]),
         "prerequisite_ids": [
             prerequisite for prerequisite in (plan_row["prerequisite_ids"] or []) if prerequisite in trackable_ids
         ],

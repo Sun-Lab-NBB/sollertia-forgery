@@ -173,6 +173,7 @@ def _build_plan_row(
         "specifier": specifier,
         "cores": cores,
         "memory_mb": memory_mb,
+        "resident_mb": memory_mb + 1024,
         "prerequisite_ids": [
             _resolve_identifier(job_name=name, specifier=upstream) for name, upstream in prerequisites
         ],
@@ -491,6 +492,7 @@ def test_job_options_round_trip_from_descriptor_to_worker() -> None:
         "pipeline": ProcessingPipelines.CHECKSUM.value,
         "cores": 8,
         "memory_mb": 1024,
+        "resident_mb": 2048,
         "options": {"regenerate_checksum": True},
     }
     assert build_pending_job(job=descriptor).options == {"regenerate_checksum": True}
@@ -623,7 +625,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "tracker_path": "/nonexistent/project/305/a_session/tracker.yaml",
         "cores": 8,
         "memory_mb": 4096,
-        "resident_mb": 4096,
+        "resident_mb": 5120,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
         # Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
