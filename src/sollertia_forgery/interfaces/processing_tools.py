@@ -384,7 +384,8 @@ def execute_jobs_tool(
         remote dispatch adds the ``batch_id`` under which its scripts and logs are filed, the ``batch_ids`` the
         submission covered, ``walltime_minutes``, and the ``batch_directory`` on the server. It also adds a
         ``withheld_jobs`` list naming each job it neither submitted nor adopted alongside the executor its tracker
-        claims, and a ``submissions`` list pairing each job with the allocation that runs it. Either host adds an
+        claims, and a ``submissions`` list pairing each job with the allocation that runs it, its ``cores``, and
+        the ``memory_mb`` that allocation requested, which is the job's resident figure. Either host adds an
         ``invalid_jobs`` list when a recorded descriptor could not be built into a job. Returns an error when the
         prepared-batch registry cannot be read, when an identifier resolves to no prepared batch, or when no batch is
         named. Returns an error as well when the named batches mix hosts, when every prepared job is blocked or already
@@ -1173,6 +1174,8 @@ def _execute_remote_batch(
                 "specifier": submission.specifier,
                 "unit_path": submission.unit_path,
                 "unit_name": submission.unit_name,
+                "cores": submission.cores,
+                "memory_mb": submission.memory_mb,
             }
             for submission in submissions
         ],
@@ -1223,6 +1226,11 @@ def _close_finished_batches(server: Server, host: ExecutionHost, batch_id: str) 
 def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
     """Renders one reconciled job as the descriptor a submission dispatches.
 
+    Notes:
+        Both memory figures are carried, because the descriptor is read back into a job before it is submitted and the
+        scheduler is given the resident one. Rendering the anonymous figure alone leaves the read-back falling to its
+        own default and every allocation requesting the anonymous term.
+
     Args:
         job: The job to render.
 
@@ -1239,6 +1247,7 @@ def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
         "tracker_path": str(job.tracker_path),
         "cores": job.core_weight,
         "memory_mb": job.memory_mb,
+        "resident_mb": job.resident_mb,
         "prerequisite_ids": list(job.prerequisite_ids),
         "options": dict(job.options),
     }
