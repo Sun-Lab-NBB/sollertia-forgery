@@ -20,8 +20,10 @@ from cindra import (
     SingleRecordingJobNames,
     resolve_array_path,
     resolve_output_path,
+    parse_plane_specifier,
     size_multi_recording_job,
     size_single_recording_job,
+    resolve_recording_geometry,
     read_tracked_recording_geometry,
 )
 import pandas as pd
@@ -116,6 +118,62 @@ _DECODER_BUFFER_MEMORY_MB: int = 96
 """The resident memory one decode worker holds for its codec reference frames and its decoder state, beyond the frame
 buffers the measurement itself retains."""
 
+_SPAWNED_SLF_CHILD_MEMORY_MB: int = 512
+"""The resident memory one child spawned inside this package holds before it touches data.
+
+Notes:
+    A child spawned here re-imports this package, which carries OpenCV, NumPy, cindra, and the compiled kernels, so it
+    costs several times the bare interpreter that ``SPAWNED_CHILD_MEMORY_MB`` charges. That figure describes a child
+    holding nothing but the interpreter, and the library exporting it opens no pool of its own, so a pool whose
+    children carry this package's own imports is measured here instead. A sixteen-worker job charged the bare figure
+    was allocated 6 GB against a measured peak near 10 GB, which the scheduler's memory cgroup answered by killing it.
+"""
+
+_DEPENDENCY_CHILD_SURPLUS_MB: int = _SPAWNED_SLF_CHILD_MEMORY_MB - SPAWNED_CHILD_MEMORY_MB
+"""The memory a dependency's own sizing pass leaves unmodelled for each child its stage spawns inside this package.
+
+Notes:
+    A dependency sizes its stage against the interpreter that dependency alone fills, which is the whole model while
+    that library runs the stage itself. This package runs it instead, so every child the stage spawns re-imports this
+    package rather than that library, and holds the difference measured here on top of the figure the dependency
+    reported. The dependency's own figure stays correct for its own runtime and is still taken whole, with this
+    surplus added beside it rather than replacing it.
+"""
+
+_RESIDENT_ESTIMATE_TOLERANCE: float = 1.10
+"""The margin every resident estimate carries above the terms it sums.
+
+Notes:
+    The mapped term is derived from the geometry the acquisition configured rather than measured off the files a
+    stage writes, so it lands within a couple of percent of the extent either way. A stage whose mapped term dominates
+    its anonymous one therefore inherits that error directly, and the conversion stage measured four percent of
+    headroom without this margin. The margin holds every stage above ten percent, which is the floor a resident figure
+    is held to because the host answers a shortfall by stalling the job rather than by failing it.
+"""
+
+_PLANE_MAPPING_STAGES: frozenset[SingleRecordingJobNames] = frozenset(
+    {SingleRecordingJobNames.BINARIZE, SingleRecordingJobNames.REGISTER, SingleRecordingJobNames.PROCESS}
+)
+"""The two-photon stages that hold a plane binary memory-mapped for the whole of their run."""
+
+_TWO_CHANNEL_COUNT: int = 2
+"""The channels a recording holds when its acquisition configured a second one, which doubles every plane binary."""
+
+_PLANE_BINARY_PATTERN: str = "*_data.bin"
+"""The glob matching the binarized plane files the imaging library writes, which are the files a cross-recording
+extraction job maps."""
+
+_SHARED_LIBRARY_IMAGE_MB: int = 256
+"""The file-backed image one job holds resident, covering the interpreter and every shared object its import graph maps.
+
+Notes:
+    The pages are shared by every process of the job, so the scheduler's memory cgroup charges them once however wide
+    the job runs. Measurement holds the figure between 206 MB and 221 MB across jobs running one, six, ten, and
+    eighteen processes, which is what identifies the term as per-job rather than per-process. Summing the resident set
+    of each process instead counts the same pages once per process, so a figure derived that way overstates a wide
+    job by the width it runs at.
+"""
+
 _RETAINED_FRAME_BUFFERS: int = 2
 """The number of full-resolution single-precision frame buffers a decode worker keeps live. Binning produces a
 strided view that retains its full-frame base, and the current and previous binned frames are live at once."""
@@ -137,11 +195,15 @@ _CHECKSUM_CHUNK_MEMORY_MB: int = 8
 streams every file. The buffer is allocated once per file and reused for every chunk of it, so one worker holds one
 buffer at a time and that buffer is the whole data-dependent term the worker carries."""
 
-_CHECKSUM_READER_MEMORY_MB: int = SPAWNED_CHILD_MEMORY_MB + _CHECKSUM_CHUNK_MEMORY_MB
-"""The resident memory one checksum worker holds. The pool that opens the workers is spawn-started, so each of them
-pays the interpreter and import graph a spawned child carries, and each holds its own read buffer above that. Stating
-the figure as the shared spawned-child cost plus the buffer is what makes a retune of that shared cross-library figure
-reach this model as well. A checksum worker is therefore never modeled as cheaper than the spawned child it is."""
+_CHECKSUM_READER_MEMORY_MB: int = _SPAWNED_SLF_CHILD_MEMORY_MB + _CHECKSUM_CHUNK_MEMORY_MB
+"""The resident memory one checksum worker holds.
+
+Notes:
+    The pool that opens the workers is spawn-started and it is opened here, so each worker re-imports this package
+    rather than the library exporting the bare spawned-child figure, and each holds its own read buffer above that.
+    Charging the bare figure left an eight-worker job modeled at 3072 MB against a measured 2966 MB of anonymous
+    memory, which is under four percent of headroom on the one term a scheduler kills a job over.
+"""
 
 _TRACE_ARRAY_DIMENSIONS: int = 2
 """The axes a cindra trace array carries, which are its regions and its samples."""
@@ -257,12 +319,24 @@ class JobFootprint:
         Carries the two fields every dependency's own sizing record carries, so a stage that a library owns and a
         stage that this package owns describe themselves the same way. Both halves follow from the job's input, and a
         job whose input cannot be read raises rather than reporting a footprint nothing measured.
+
+        The mapped term is the one field a dependency's record does not carry, because a dependency sizes the memory
+        its stage allocates rather than the pages the host holds resident behind it. It stays zero for every stage
+        that reads its input through the file interface, and a stage that maps its input states the bytes it maps.
     """
 
     cores: int
     """The cores the job occupies."""
     memory_mb: int
-    """The reportable memory the job holds at its peak, in megabytes."""
+    """The anonymous memory the job holds at its peak, in megabytes, which is the term a local pool schedules on."""
+    mapped_mb: int = 0
+    """The bytes the job memory-maps, in megabytes, which stay resident behind it without being anonymous."""
+
+    @property
+    def resident_mb(self) -> int:
+        """Returns the peak resident memory the job holds, in megabytes, which is the term SLURM schedules on."""
+        summed = self.memory_mb + self.mapped_mb + _SHARED_LIBRARY_IMAGE_MB
+        return _round_to_gigabyte(memory_mb=int(summed * _RESIDENT_ESTIMATE_TOLERANCE))
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,6 +703,25 @@ def _apply_tolerance(memory_mb: int) -> int:
     return _round_to_gigabyte(memory_mb=int(memory_mb * MEMORY_ESTIMATE_TOLERANCE) + 1)
 
 
+def _dependency_child_surplus(cores: int) -> int:
+    """Resolves the memory a dependency-sized stage holds beyond its own figure when this package runs it.
+
+    Notes:
+        A stage running at a single core opens no pool, so it spawns no child and holds nothing beyond what the
+        dependency modeled. A wider stage opens one child per allocated core and keeps its own reader alongside them,
+        which is the same shape every dependency here models, so the surplus covers one process more than the cores.
+
+    Args:
+        cores: The cores the dependency's sizing pass picked for the stage.
+
+    Returns:
+        The memory to add to the dependency's own figure, in megabytes.
+    """
+    if cores <= 1:
+        return 0
+    return (cores + 1) * _DEPENDENCY_CHILD_SURPLUS_MB
+
+
 def _size_camera_extraction_job(archive_path: Path) -> JobFootprint:
     """Sizes one camera timestamp extraction job through the video library's own sizing pass.
 
@@ -652,7 +745,10 @@ def _size_camera_extraction_job(archive_path: Path) -> JobFootprint:
         FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
     """
     sizing = size_camera_extraction_job(archive_path=archive_path)
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb + _dependency_child_surplus(cores=sizing.cores)),
+    )
 
 
 def _size_controller_extraction_job(archive_path: Path) -> JobFootprint:
@@ -678,7 +774,10 @@ def _size_controller_extraction_job(archive_path: Path) -> JobFootprint:
         FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
     """
     sizing = size_controller_extraction_job(archive_path=archive_path)
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb + _dependency_child_surplus(cores=sizing.cores)),
+    )
 
 
 def _size_runtime_job(archive_path: Path, cores: int) -> JobFootprint:
@@ -909,7 +1008,7 @@ def _size_motion_energy_job(recording: _EnergyRecording, cores: int) -> JobFootp
             memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB),
         )
 
-    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB
+    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB
     return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + chunks * per_worker))
 
 
@@ -970,7 +1069,55 @@ def _size_two_photon_job(
         configuration=configuration,
         data_path=data_path,
     )
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb),
+        mapped_mb=_mapped_plane_megabytes(
+            job_name=job_name, specifier=specifier, output_root=output_root, data_path=data_path
+        ),
+    )
+
+
+def _mapped_plane_megabytes(job_name: str, specifier: str, output_root: Path, data_path: Path | None) -> int:
+    """Resolves the plane binaries one two-photon stage memory-maps, in megabytes.
+
+    Notes:
+        The three stages that hold a plane binary open map every byte of it. The conversion stage creates one map per
+        plane and writes the whole recording through it, and the two per-plane stages map the one plane their
+        specifier names. A stage denied those pages does not fail, it stalls, because the host answers the shortfall
+        by writing dirty pages back synchronously. Measurement puts the conversion stage at 67 seconds holding its
+        binaries against 58 minutes to 2 hours charged a gigabyte, for the same five and a half minutes of processor
+        time, which is what makes these bytes a demand rather than a convenience.
+
+        The extent is derived from the acquisition metadata and one source file header, so it answers before the
+        conversion stage has written anything. That reading reports the frame count the acquisition configured, which
+        stands about two percent above the frames a recording actually lands, so the figure leans high by that margin.
+
+        The combination stage reads the plane binaries a plane at a time rather than holding them, so it maps none of
+        them and is charged nothing here.
+
+    Args:
+        job_name: The tracker job name identifying the stage.
+        specifier: The plane specifier for a per-plane stage, empty for the whole-recording stages.
+        output_root: The output root the recording's cindra configuration was given.
+        data_path: The raw imaging directory from which the geometry is read.
+
+    Returns:
+        The megabytes the stage maps, which is zero for every stage that maps nothing.
+    """
+    stage = SingleRecordingJobNames(job_name)
+    if stage not in _PLANE_MAPPING_STAGES:
+        return 0
+
+    # An unreadable acquisition resolves to no plane at all, so the sum below answers zero without a guard of its own.
+    geometry = resolve_recording_geometry(output_root=output_root, data_path=data_path)
+    index = parse_plane_specifier(specifier=specifier)
+    planes = tuple(plane for plane in geometry.planes if index is None or plane.index == index)
+    channels = _TWO_CHANNEL_COUNT if geometry.two_channels else 1
+    mapped = sum(
+        plane.height * plane.width * plane.frame_count * geometry.source_element_bytes * channels for plane in planes
+    )
+    return _bytes_to_megabytes(byte_count=mapped)
 
 
 def _size_multi_recording_job(
@@ -1032,7 +1179,13 @@ def _size_multi_recording_job(
         configuration=configuration,
         planned_roi_count=planned_roi_count,
     )
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb),
+        mapped_mb=_mapped_recording_megabytes(
+            job_name=job_name, specifier=specifier, directories=recording_directories
+        ),
+    )
 
 
 def _size_pose_tracking_job(session: SessionData, cores: int) -> JobFootprint:
@@ -1223,6 +1376,34 @@ def _session_marker(project_root: Path, animal: str, session: str) -> SessionDat
         The loaded session.
     """
     return SessionData.load(session_path=project_root.joinpath(animal, session))
+
+
+def _mapped_recording_megabytes(job_name: MultiRecordingJobNames, specifier: str, directories: tuple[Path, ...]) -> int:
+    """Resolves the binarized imaging data one cross-recording job maps, in megabytes.
+
+    Notes:
+        The extraction stage reads its recording's plane binaries through a memory map, so every byte of them stays
+        resident behind the job while it runs. Measurement puts the resident file-backed term of that stage at 99% of
+        those binaries, against an anonymous term under a tenth of it, which is what makes the mapped bytes the figure
+        that decides how many of these jobs a host schedules at once.
+
+        The discovery stage reads the combined traces of every recording it spans through the file interface, so it
+        maps none of them and is charged nothing here. A recording whose binaries are absent is charged nothing
+        either, because the stage that writes them is scheduled ahead of this one and the plan is read before it runs.
+
+    Args:
+        job_name: The cindra stage the job runs.
+        specifier: The job's tracker specifier, which names a session for the extraction stage.
+        directories: The cindra output directory of every recording the job spans.
+
+    Returns:
+        The megabytes the job maps, which is zero for every stage that maps nothing.
+    """
+    if job_name is not MultiRecordingJobNames.EXTRACT:
+        return 0
+    mapped = [directory for directory in directories if specifier in directory.parts]
+    total = sum(binary.stat().st_size for directory in mapped for binary in directory.rglob(_PLANE_BINARY_PATTERN))
+    return _bytes_to_megabytes(byte_count=total)
 
 
 def _animal_recording_directories(dataset: DatasetData, animal: str, project_root: Path) -> tuple[Path, ...]:

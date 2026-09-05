@@ -37,7 +37,13 @@ class PendingJob:
     is per job rather than per type, so two jobs of one type legitimately differ here, and dispatch only caps this
     width at what the executing host can supply."""
     memory_mb: int = 0
-    """The memory this job occupies while it runs, estimated from the data it will process."""
+    """The anonymous memory this job occupies while it runs, estimated from the data it will process. This is the
+    term a local process pool schedules on, because anonymous pages are the ones a host cannot reclaim under
+    pressure."""
+    resident_mb: int = 0
+    """The resident memory this job holds while it runs, which adds the pages it maps to the anonymous term. This is
+    the term SLURM schedules on, because the scheduler packs a node by the memory each allocation declares and a job
+    that declares less than it holds resident drives the node into reclaim."""
     prerequisite_ids: tuple[str, ...] = ()
     """The identifiers of the jobs that must succeed before this job may be dispatched. Resolved from the pipeline's
     own job ordering, and empty for a job that depends on nothing."""
@@ -353,6 +359,7 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         pipeline=job.get("pipeline", ""),
         core_weight=int(job["cores"]),
         memory_mb=int(job["memory_mb"]),
+        resident_mb=int(job.get("resident_mb") or job["memory_mb"]),
         prerequisite_ids=tuple(job.get("prerequisite_ids", ())),
         options=dict(job.get("options") or {}),
         status=job.get("status") or "",
@@ -399,6 +406,11 @@ def _build_job_descriptor(
         "tracker_path": tracker_path,
         "cores": int(plan_row["cores"]),
         "memory_mb": int(plan_row["memory_mb"]),
+        # A plan stamped before the resident term entered the model carries no figure for it, and the anonymous term
+        # is the whole of what that model measured, so it stands in until the plan is regenerated. Retuning the model
+        # restamps its version, so a stale plan is re-estimated on the next planning pass rather than dispatched from
+        # this fallback indefinitely.
+        "resident_mb": int(plan_row.get("resident_mb") or plan_row["memory_mb"]),
         "prerequisite_ids": [
             prerequisite for prerequisite in (plan_row["prerequisite_ids"] or []) if prerequisite in trackable_ids
         ],

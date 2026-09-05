@@ -1098,12 +1098,15 @@ def test_preparing_a_batch_covering_no_unit_is_rejected() -> None:
 # Tests for the scheduler operations through which a submitted batch is followed and stopped
 
 
-def test_a_batch_that_queued_nothing_is_never_recorded(connected_server: Server) -> None:
-    """Verifies that the ledger names outstanding allocations, so a submission the scheduler never accepted leaves
-    nothing behind.
+def test_a_batch_that_queued_nothing_is_still_recorded(connected_server: Server) -> None:
+    """Verifies that a batch reaches the ledger before its first allocation, so a submission the host kills partway
+    through leaves a record the remote tools still answer for.
     """
     assert submit_batch(server=connected_server, jobs=[], batch_id="batch01") == []
-    assert read_ledger().batches == []
+
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    assert recorded.submissions == []
 
 
 def test_a_submission_writes_each_job_script_into_the_batch_directory_it_created(
@@ -1325,3 +1328,18 @@ def test_mirroring_without_regeneration_pulls_the_artifacts_as_the_server_last_w
     # Discovery reads the project's datasets with one server-side search, so the invocations the mirror issues carry
     # that search and nothing else.
     assert [command for command in stub_ssh_transport.commands if not command.startswith("find -L ")] == []
+
+
+def test_the_placeholder_record_carries_forward_an_earlier_attempts_allocations(connected_server: Server) -> None:
+    """Verifies that the record written before a submission merges rather than replaces, so re-running a batch the
+    scheduler only partly accepted keeps the allocations the first attempt queued.
+    """
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
+    first = submit_batch(server=connected_server, jobs=jobs, batch_id="batch01")
+    assert len(first) == 1
+
+    submit_batch(server=connected_server, jobs=[], batch_id="batch01")
+
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    assert [entry.slurm_job_id for entry in recorded.submissions] == [first[0].slurm_job_id]

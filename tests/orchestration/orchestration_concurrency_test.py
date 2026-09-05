@@ -623,6 +623,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "tracker_path": "/nonexistent/project/305/a_session/tracker.yaml",
         "cores": 8,
         "memory_mb": 4096,
+        "resident_mb": 4096,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
         # Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than

@@ -310,6 +310,10 @@ def submit_batch(
     Notes:
         The scheduler sequences the graph itself, so this process may exit as soon as the last job is queued.
 
+        The batch is recorded before the first allocation is queued, so a status read reaching this batch mid-flight
+        resolves it and a cancellation reaches every allocation the scheduler has accepted. A submission the host kills
+        partway through therefore leaves a batch the remote tools still answer for.
+
         Every accepted allocation is recorded in the submission ledger, including when the scheduler rejects a later
         job of the same batch, since the allocations it already accepted stay queued.
 
@@ -352,6 +356,25 @@ def submit_batch(
 
     submissions: list[RemoteSubmission] = []
     allocation_of_job: dict[tuple[str, str], str] = dict(adopted or {})
+    covered = list(covered_batch_ids) if covered_batch_ids else [batch_id]
+    submitted_at = current_timestamp()
+
+    # The batch reaches the ledger before the first allocation is queued, so an allocation the scheduler has accepted
+    # is never held by a batch no record names. A submission killed partway through therefore leaves a batch that a
+    # status read still resolves and a cancellation still reaches, rather than allocations nothing can see. The empty
+    # resubmission list takes the merge path, which carries forward every allocation an earlier attempt recorded.
+    record_batch(
+        batch=SubmissionBatch(
+            batch_id=batch_id,
+            batch_ids=covered,
+            batch_directory=str(batch_directory),
+            submitted_at=submitted_at,
+            walltime_minutes=walltime_minutes,
+            submissions=[],
+        ),
+        resubmitted=[],
+    )
+
     try:
         _submit_ordered_jobs(
             server=server,
@@ -367,9 +390,9 @@ def submit_batch(
             record_batch(
                 batch=SubmissionBatch(
                     batch_id=batch_id,
-                    batch_ids=list(covered_batch_ids) if covered_batch_ids else [batch_id],
+                    batch_ids=covered,
                     batch_directory=str(batch_directory),
-                    submitted_at=current_timestamp(),
+                    submitted_at=submitted_at,
                     walltime_minutes=walltime_minutes,
                     submissions=submissions,
                 ),
@@ -895,7 +918,7 @@ def _submit_ordered_jobs(
             working_directory=batch_directory,
             conda_environment=server.environment,
             cpu_threads=job.core_weight,
-            ram=max(1, ceil(job.memory_mb / _MEGABYTES_PER_GIGABYTE)),
+            ram=max(1, ceil(job.resident_mb / _MEGABYTES_PER_GIGABYTE)),
             time=walltime_minutes,
             dependencies=dependencies,
         )
@@ -916,7 +939,7 @@ def _submit_ordered_jobs(
                 unit_path=str(job.unit_path),
                 unit_name=job.name,
                 cores=job.core_weight,
-                memory_mb=job.memory_mb,
+                memory_mb=job.resident_mb,
                 output_log=str(output_log),
                 error_log=str(error_log),
             )
