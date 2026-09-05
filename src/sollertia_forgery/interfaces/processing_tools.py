@@ -120,7 +120,15 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
 """The job fields detail adds, which are the resources the job occupies, its timing and provenance, its runtime
 parameters, and its prerequisite jobs."""
 
-_RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "unit_path", "cores", "memory_mb")
+_RESOURCE_SEMI_FIELDS: tuple[str, ...] = (
+    "job_id",
+    "job_name",
+    "specifier",
+    "unit_path",
+    "cores",
+    "memory_mb",
+    "resident_mb",
+)
 """The job fields a semi-detail resource listing carries, which are the job's identity, the unit it reads, and its
 planned figures. The unit path rides every row because a job identifier derives from the job name and the specifier
 alone, so the units of one call share the identifier of the same stage and nothing else in the row separates them."""
@@ -1154,7 +1162,14 @@ def _execute_remote_batch(
             for job in reconciliation.withheld
         ],
         submissions=[
-            {"job_id": submission.job_id, "slurm_job_id": submission.slurm_job_id, "job_name": submission.job_name}
+            {
+                "job_id": submission.job_id,
+                "slurm_job_id": submission.slurm_job_id,
+                "job_name": submission.job_name,
+                "specifier": submission.specifier,
+                "unit_path": submission.unit_path,
+                "unit_name": submission.unit_name,
+            }
             for submission in submissions
         ],
     )

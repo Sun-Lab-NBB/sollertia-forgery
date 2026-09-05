@@ -732,3 +732,51 @@ def _reject_unmatched(field: str, values: list[str], available: set[str]) -> dic
     if not unknown:
         return None
     return error_response(message=f"No scheduler record has '{field}' in {unknown}. Available: {sorted(available)}.")
+
+
+@mcp.tool()
+def pull_remote_path_tool(remote_path: str, destination: str) -> dict[str, Any]:
+    """Copies a file or directory off the compute server onto this machine.
+
+    The server holds every artifact a remote run produces, and the project-state readers mirror only the manifest, the
+    job table, and the plan. This carries anything else back, which covers a session's processed data, one feather, and
+    the standard output and error a batch's allocations wrote.
+
+    A directory is copied whole, with its tree beneath it. The copy lands inside the destination directory under the
+    remote path's own final component, and the destination is created when it does not exist.
+
+    Args:
+        remote_path: The absolute path, on the server, to the file or directory to copy.
+        destination: The absolute path to the local directory that receives the copy.
+
+    Returns:
+        A response dict with the ``remote_path`` copied, the ``local_path`` at which the copy landed, whether the copy
+        ``is_directory``, the ``total_files`` it holds, and the ``total_bytes`` it occupies. Returns an error when the
+        server holds nothing at the named path, and when the copy itself fails.
+    """
+    target = Path(destination)
+    source = Path(remote_path)
+    try:
+        with connect_to_server() as server:
+            if not server.exists(remote_path=source):
+                return error_response(
+                    message=(
+                        f"Unable to copy '{remote_path}' off the compute server. The server holds no file or directory "
+                        f"at that path."
+                    )
+                )
+            is_directory = server.is_directory(remote_path=source)
+            target.mkdir(parents=True, exist_ok=True)
+            local_path = target.joinpath(source.name)
+            server.pull(local_path=local_path, remote_path=source)
+    except Exception as exception:
+        return error_response(message=f"Unable to copy '{remote_path}' off the compute server. {exception}")
+
+    copied = sorted(path for path in local_path.rglob("*") if path.is_file()) if is_directory else [local_path]
+    return ok_response(
+        remote_path=str(source),
+        local_path=str(local_path),
+        is_directory=is_directory,
+        total_files=len(copied),
+        total_bytes=sum(path.stat().st_size for path in copied),
+    )

@@ -31,6 +31,7 @@ from ..orchestration import (
 )
 from .host_resolution import (
     HOST_LABELS,
+    reported_project_path,
     resolve_execution_host,
     resolve_readable_project,
     unsupported_host_message,
@@ -49,8 +50,11 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "specifier",
     "cores",
     "memory_mb",
+    "resident_mb",
 )
-"""The job fields a semi-detail listing carries, which are the job's subject, its identity, and its figures."""
+"""The job fields a semi-detail listing carries, which are the job's subject, its identity, and its figures. Both
+memory figures are carried, because a local pool is budgeted against the anonymous one while the scheduler is given
+the resident one, so a reader sizing a batch needs whichever matches the host it targets."""
 
 _PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "memory_modeled", "prerequisite_ids")
 """The job fields detail adds, which are the tracked job's identifier, whether a model of the job's own input produced
@@ -228,7 +232,7 @@ def read_project_plan_tool(
 
     frame = pl.read_ipc(source=plan_path, memory_map=True)
     response = ok_response(
-        project_path=str(directory),
+        project_path=reported_project_path(project_path=project_path, directory=directory, host=host),
         plan_path=str(plan_path),
         **_plan_totals(frame=frame),
         breakdown=frame_breakdown(frame=frame, axes=_PLAN_AXES),

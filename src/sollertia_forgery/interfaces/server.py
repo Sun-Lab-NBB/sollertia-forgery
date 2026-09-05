@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shlex
 from typing import Any
+from pathlib import Path
 
 import click
 from tabulate import tabulate
@@ -724,4 +725,46 @@ def _format_sacct_output(raw_output: str) -> str:
         headers=_SACCT_HEADERS,
         tablefmt="simple",
         colalign=["center"] * len(_SACCT_HEADERS),
+    )
+
+
+@server_cli.command("pull", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-r",
+    "--remote-path",
+    type=str,
+    required=True,
+    help="The absolute path, on the server, to the file or directory to copy.",
+)
+@click.option(
+    "-d",
+    "--destination",
+    type=click.Path(exists=False, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The absolute path to the local directory that receives the copy.",
+)
+def pull_command(remote_path: str, destination: Path) -> None:
+    """Copies a file or directory off the remote compute server onto this machine.
+
+    A directory is copied whole. The copy lands inside the destination directory under the remote path's own final
+    component, which is how a session's processed data, one feather, or a batch's logs are brought back.
+    """
+    source = Path(remote_path)
+    with Server(configuration=get_server_configuration()) as server:
+        if not server.exists(remote_path=source):
+            message = (
+                f"Unable to copy '{remote_path}' off the compute server. The server holds no file or directory at "
+                f"that path."
+            )
+            console.error(message=message, error=FileNotFoundError)
+
+        destination.mkdir(parents=True, exist_ok=True)
+        local_path = destination.joinpath(source.name)
+        server.pull(local_path=local_path, remote_path=source)
+
+    copied = sorted(path for path in local_path.rglob("*") if path.is_file()) if local_path.is_dir() else [local_path]
+    total = sum(path.stat().st_size for path in copied)
+    console.echo(
+        message=f"Copied {len(copied)} file(s), {total / 1024**2:.1f} MB, to '{local_path}'.",
+        level=LogLevel.SUCCESS,
     )
