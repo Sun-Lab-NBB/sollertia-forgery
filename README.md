@@ -186,15 +186,24 @@ resolves its universe this way, a completed tracker already accounts for every s
 Work reaches a host as a **job**, and every pipeline models its jobs the same way.
 
 1. **Plan.** `slf plan` reads a unit's acquisition data, registers on its processing tracker every job that unit is able
-   to run, and records each job's cores, memory, and upstream jobs into a per-unit `job_plan.yaml`. A unit runs only the
-   jobs registered on its tracker.
+   to run, and records each job's cores, its two memory figures, and its upstream jobs into a per-unit `job_plan.yaml`.
+   A unit runs only the jobs registered on its tracker.
 2. **Prepare.** Preparation joins the tracker state to those records into one descriptor per job, and registers the
    result under a batch identifier. A job counts as blocked when preparation can neither queue its upstream stage nor
    confirm that the stage already succeeded.
 3. **Execute.** Dispatch runs the prepared batch on one of two backends. The local engine admits jobs against a budget
-   of cores and memory, then dispatches them onto a shared process pool in dependency order. The remote engine submits
-   one SLURM allocation per job, each sized from its own estimate and sequenced through an `afterok` dependency.
+   of cores and anonymous memory, then dispatches them onto a shared process pool in dependency order. The remote engine
+   submits one SLURM allocation per job, each requesting the job's resident memory and sequenced through an `afterok`
+   dependency.
 4. **Close.** Closure snapshots the state recorded by a finished batch's jobs, while the batch is still tracked.
+
+Every job carries two memory figures, and the same sizing pass resolves both. The anonymous figure is the memory the
+job allocates, and the resident figure adds the pages the job maps and the shared library image its processes hold in
+common, above a margin. The local engine budgets against the anonymous figure, because anonymous pages are the ones a
+host cannot reclaim under pressure, and a SLURM allocation requests the resident figure, because the scheduler's memory
+cgroup charges a job for every page it holds. Only a stage that maps its input carries a non-zero mapped term, which
+covers the two-photon `binarization`, `registration`, and `processing` stages and the forging pipeline's
+`multiday_extraction` stage. Every other job's two figures differ by the shared image and the margin alone.
 
 Each job holds one of four statuses on its tracker, and a rerun resolves only the work still outstanding:
 
@@ -231,7 +240,7 @@ Session/
 │   ├── camera_data/                              <- The camera recordings and the tracking pass's pose predictions
 │   └── ...                                       <- The session's descriptors, configurations, and metadata
 └── processed_data/
-    ├── job_plan.yaml                             <- Every job's cores, memory, and upstream jobs
+    ├── job_plan.yaml                             <- Every job's cores, memory figures, and upstream jobs
     ├── runtime_data/
     │   ├── runtime_processing_tracker.yaml
     │   └── ...                                   <- The system's parsed runtime state and trial tables
@@ -313,6 +322,7 @@ takes a system selector:
 | `server discover`         | Discovers and prints the sessions stored under the project's directory on the server        |
 | `server batches`          | Reports the batches outstanding on the server's scheduler and resolves every allocation     |
 | `server retire-batch`     | Remediates the named batches and drops them from this machine's submission ledger           |
+| `server pull`             | Copies a file or directory off the compute server onto this machine                         |
 | `mcp`                     | Starts the agentic Model Context Protocol server using the requested transport              |
 | `omp`                     | Links the OpenMP runtime Numba loads on macOS into a directory the loader searches          |
 
@@ -340,21 +350,22 @@ remote half of every job, so it holds this library and the processing libraries 
 ### Running a Remote Batch
 
 The remote path runs the same prepared jobs that the local batch engine runs, so one job graph, one core table, and one
-memory model serve both. A run has three steps, each exposed as a Model Context Protocol tool and carried out on the
-server by the `slf` CLI:
+memory model serve both, each backend taking the memory figure it schedules on. A run has three steps, each exposed as a
+Model Context Protocol tool and carried out on the server by the `slf` CLI:
 
 1. **Prepare.** `prepare_batch_tool` with `host='remote'` refreshes the plan and state tables on the server and pulls
    them, which is one state table per project for a session batch and one per named dataset for a dataset batch.
    Planning reads each unit's acquisition data, writes the runnable jobs of that unit onto its processing tracker, and
-   records each job's cores, memory, and upstream jobs. It refreshes the recorded status every time and re-estimates
-   only the figures a unit's cache does not already hold, so a submission's sizing never changes underneath it. State
-   generation turns those trackers into a table. A job absent from that table is a job that the unit is unable to run.
-   The submitting host therefore resolves a batch from the tables alone, without opening anything on the server. The
-   plan and state records join on the job identifier and become one descriptor per job, registered under a batch
-   identifier.
+   records each job's cores, both of its memory figures, and its upstream jobs. It refreshes the recorded status every
+   time and re-estimates only the figures a unit's cache does not already hold, so a submission's sizing never changes
+   underneath it. State generation turns those trackers into a table. A job absent from that table is a job that the
+   unit is unable to run. The submitting host therefore resolves a batch from the tables alone, without opening anything
+   on the server. The plan and state records join on the job identifier and become one descriptor per job, registered
+   under a batch identifier.
 2. **Submit.** `execute_jobs_tool` renders each job as its own shell script, transfers it over SFTP, and submits it as
-   its own SLURM allocation, sized from its own estimate, in dependency order. It takes no host of its own, because a
-   batch runs where it was prepared. Each script carries an SBATCH directive block, activates the configured conda
+   its own SLURM allocation, requesting the resident memory that job's own estimate reports, in dependency order. It
+   takes no host of its own, because a batch runs where it was prepared. Each script carries an SBATCH directive block,
+   activates the configured conda
    environment, and then runs the `slf` command for its job. Each job declares an `afterok` dependency on the
    allocations of the upstream jobs held by the batch, so the scheduler sequences the graph and the batch finishes with
    nothing running locally.
@@ -455,11 +466,12 @@ Every tool names a filesystem path by what that path holds. On the batch tools, 
 root, which is a session root for every session pipeline and a dataset root for `forging`. A `dataset_path` on the
 forging and planning tools names one forged dataset's root, and a `project_path` names a project root under the data
 root. Most tools take a `host`, which is `local` for the data on this machine and `remote` for the data on the compute
-server. Eight tools take none. `execute_jobs_tool` takes none because a batch runs where it was prepared,
+server. Nine tools take none. `execute_jobs_tool` takes none because a batch runs where it was prepared,
 `forget_prepared_batches_tool` and `read_resource_model_tool` answer for this machine alone, the two
-server-configuration tools are always local, and `discover_remote_project_tool`, `read_scheduler_jobs_tool`, and
-`retire_remote_batches_tool` always address the compute server. On `list_prepared_batches_tool` the `host` is a filter
-rather than a target, and omitting it lists the batches prepared against either host.
+server-configuration tools are always local, and `discover_remote_project_tool`, `read_scheduler_jobs_tool`,
+`pull_remote_path_tool`, and `retire_remote_batches_tool` always address the compute server. On
+`list_prepared_batches_tool` the `host` is a filter rather than a target, and omitting it lists the batches prepared
+against either host.
 
 #### Starting the Server
 
@@ -474,7 +486,7 @@ The `-t/--transport` option selects the transport. The default `stdio` serves a 
 
 #### Available Tools
 
-The server registers twenty-seven tools across six modules.
+The server registers twenty-eight tools across six modules.
 
 The dataset tools compose forged datasets and report their forging job state:
 
@@ -532,6 +544,7 @@ The server tools author the compute server's credentials and read what that serv
 | `write_server_configuration_tool` | Creates or replaces the server configuration YAML in that same configuration subdirectory                  |
 | `discover_remote_project_tool`    | Enumerates the sessions and forged datasets a project holds on the compute server, with their server paths |
 | `read_scheduler_jobs_tool`        | Reads the compute server's own record of its allocations, queued or already settled                        |
+| `pull_remote_path_tool`           | Copies a file or directory off the compute server onto this machine, a directory whole with its tree       |
 
 ### Skills
 
