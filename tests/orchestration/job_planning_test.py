@@ -48,7 +48,7 @@ from sollertia_forgery.orchestration.planning import (
     _dataset_plan_path,
     _session_plan_path,
 )
-from sollertia_forgery.orchestration.footprints import _POSE_TABLE_COPIES, JobFootprint
+from sollertia_forgery.orchestration.footprints import _POSE_TABLE_COPIES, JobFootprint, resolve_model_version
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1150,3 +1150,48 @@ def test_an_empty_set_of_batches_names_no_host(isolated_working_directory: Path)
     """Verifies that executing nothing names no host, which stops the run rather than guessing one."""
     with pytest.raises(ValueError, match="empty set of prepared batches"):
         resolve_batch_host(documents=[])
+
+
+def test_the_projection_treats_a_cache_another_model_stamped_as_unplanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a cache stamped by another model contributes no row, so the table never publishes figures the
+    sizing pass would not answer with today.
+    """
+    project = tmp_path.joinpath("Project")
+    session = make_session(root=project.joinpath("305", "2026-01-02-03-04-05-000006"))
+    dataset = make_dataset(root=project.joinpath("ds_stale"))
+
+    plan_unit(
+        unit_path=project.joinpath("ds_stale"),
+        unit_kind=DATASET_UNIT,
+        dispatches=[
+            make_dispatch(
+                pipeline=ProcessingPipelines.FORGING,
+                unit=dataset,
+                universe=_RUNTIME_JOBS,
+                memory_mb=6400,
+                unit_kind=DATASET_UNIT,
+            )
+        ],
+    )
+
+    # The cache is restamped rather than rewritten, so its figures stay readable and only its provenance changes.
+    cache = project.joinpath("ds_stale", "job_plan.yaml")
+    cache.write_text(cache.read_text().replace(resolve_model_version(), "0123456789ab"))
+
+    monkeypatch.setattr(
+        target=planning_module,
+        name="iterate_sessions",
+        value=lambda root_path: [session],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="discover_project_datasets",
+        value=lambda project_root: [dataset],  # noqa: ARG005
+    )
+
+    frame = pl.read_ipc(source=generate_project_plan(project_directory=project), memory_map=True)
+
+    # A projected stale row would reach a scheduler as a memory figure this model never produced.
+    assert frame.height == 0

@@ -262,10 +262,14 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     rows: list[dict[str, Any]] = []
     planned_units = 0
     unplanned_units = 0
+    # A cache stamped by another model states figures this model never produced, so it counts as unplanned along
+    # with a unit that carries no cache at all. Projecting it would publish figures the sizing pass would not
+    # answer with today, and a scheduler reads those figures.
+    model_version = resolve_model_version()
 
     for session in iterate_sessions(root_path=project_directory):
         plan = _load_plan(plan_path=_session_plan_path(session=session))
-        if plan is None:
+        if plan is None or plan.model_version != model_version:
             unplanned_units += 1
             continue
         planned_units += 1
@@ -276,7 +280,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
 
     for dataset in discover_project_datasets(project_root=project_directory):
         plan = _load_plan(plan_path=_dataset_plan_path(dataset=dataset))
-        if plan is None:
+        if plan is None or plan.model_version != model_version:
             unplanned_units += 1
             continue
         planned_units += 1
