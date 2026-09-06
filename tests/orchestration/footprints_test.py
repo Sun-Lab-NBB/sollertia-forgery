@@ -865,6 +865,11 @@ def cindra_multi_recording_footprint(
     return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
 
+def assembly_mapped(samples: int, regions: int) -> int:
+    """Reports the megabytes an imaging assembly job holds mapped, which is the one trace array it opens at a time."""
+    return _bytes_to_megabytes(byte_count=regions * samples * _SINGLE_PRECISION_BYTES)
+
+
 def assembly_memory(
     samples: int, regions: int, tracked_regions: int | None = None, source_samples: Sequence[int] = ()
 ) -> int:
@@ -1785,7 +1790,9 @@ def test_dataset_stages_are_sized_from_the_processed_recordings_they_read(
     # it was handed. Half prevalence over two recordings keeps a cluster appearing in one of them, so the pooled
     # ceiling stands at four hundred, which the headroom the widest recording allows then caps at three hundred.
     assert estimates[FORGING_JOB_NAME, first.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=4000, regions=200, tracked_regions=300)
+        cores=1,
+        memory_mb=assembly_memory(samples=4000, regions=200, tracked_regions=300),
+        mapped_mb=assembly_mapped(samples=4000, regions=200),
     )
 
 
@@ -1810,7 +1817,9 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
     # The recording is written large enough that a second copy of its retained columns would push the reported
     # estimate from one whole gigabyte to two, which is the scale at which the copy count becomes visible.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=150_000, regions=48)
+        cores=1,
+        memory_mb=assembly_memory(samples=150_000, regions=48),
+        mapped_mb=assembly_mapped(samples=150_000, regions=48),
     )
 
 
@@ -1837,7 +1846,9 @@ def test_an_imaging_assembly_is_charged_the_sources_it_reads_at_their_own_height
     # afterwards. A camera running far faster than the imaging therefore holds an array far taller than the frame
     # that receives it, and charging that array at the imaging rate reserves a fraction of what the job holds.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,))
+        cores=1,
+        memory_mb=assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,)),
+        mapped_mb=assembly_mapped(samples=20_000, regions=48),
     )
     # Charging the same session no source family at all lands a whole gigabyte lower, so the assertion above could
     # not have been met by an estimate that omitted the term.
@@ -2199,7 +2210,9 @@ def test_the_tracked_region_bound_is_drawn_from_the_animals_whole_recording_set(
     # Half of five recordings rounds up to a cluster appearing in three of them, so the nine thousand pooled regions
     # bound the templates at three thousand.
     assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     # Dropping the widest recording from the set would pool four thousand regions over a minimum of two, which the
     # headroom ceiling then caps at fifteen hundred, a different gigabyte bucket rather than a saving the rounding
@@ -2229,7 +2242,9 @@ def test_a_complete_recording_set_bounds_the_assembly_and_an_unreadable_entry_is
     # The complete set is bounded over every recording the dataset names, which is the set the tracking runs over.
     complete = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
     assert complete[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
 
     # The widest recording keeps its session directory while the processed output the geometry is read from is gone.
@@ -2393,7 +2408,9 @@ def test_the_pooled_region_bound_is_not_narrowed_to_one_recordings_own_regions(
     # The most populated recording detected a thousand regions and the headroom allows half as many again, so the
     # multi-day columns are charged fifteen hundred templates.
     assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     # Narrowing to the widest recording's own count would charge a thousand templates, which is a different gigabyte
     # bucket rather than a difference the rounding absorbs, and it is an under-estimate of what the job attaches.
@@ -2501,13 +2518,17 @@ def test_a_stated_region_count_is_charged_in_place_of_the_tracked_region_bound(
     # holding a figure for it from outside this pass is better informed than the bound is. cindra's own
     # single-recording sizing takes a planned region count on the same terms.
     assert stated[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     # The same dataset without a stated count is charged the bound its recording set carries, which is the headroom
     # ceiling over the thousand regions each of its two recordings detected. The two calls differ in the stated count
     # alone, so that count is what the figure above is attributed to.
     assert size_dataset_jobs(dataset=dataset, jobs=jobs)[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     assert assembly_memory(samples=100_000, regions=1000, tracked_regions=400) != assembly_memory(
         samples=100_000, regions=1000, tracked_regions=1500
@@ -2522,7 +2543,9 @@ def test_a_stated_region_count_is_charged_in_place_of_the_tracked_region_bound(
     narrowed = size_dataset_jobs(dataset=dataset, jobs=jobs, planned_roi_count=400)
 
     assert narrowed[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
 
 
@@ -2679,7 +2702,9 @@ def test_an_assembly_job_carrying_an_animal_specifier_bounds_its_regions_at_one(
     # The animal directory resolves the recording, so the single-day columns are charged that recording's own two
     # thousand regions, while the multi-day columns are charged the single template an empty recording set allows.
     assert estimates[FORGING_JOB_NAME, "305"] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=2000, tracked_regions=1)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=2000, tracked_regions=1),
+        mapped_mb=assembly_mapped(samples=100_000, regions=2000),
     )
     # Charging the multi-day columns the recording's own regions instead would double the retained width into the
     # next gigabyte bucket, so the reported figure could not have come from a bound over a non-empty recording set.

@@ -330,8 +330,8 @@ class JobFootprint:
 
         The mapped term is the one field a dependency's record does not carry, because a dependency sizes the memory
         its stage allocates rather than the pages the host holds resident behind it. It stays zero for every stage
-        that reads its input through the file interface, and for the assembly stage, whose maps are read once and
-        released rather than held. A stage that holds a map open for the whole of its run states the bytes it maps.
+        that reads its input through the file interface. A stage that maps its input states the bytes it holds mapped
+        at its peak, which for a stage opening one array at a time is that array rather than the set it reads.
     """
 
     cores: int
@@ -1872,12 +1872,17 @@ def _size_forging_job(
     load_transient = _ASSEMBLY_LOAD_TRANSIENT_COLUMNS * geometry.regions * geometry.samples * _SINGLE_PRECISION_BYTES
     sub_datasets = geometry.samples * _SUB_DATASET_BYTES_PER_SAMPLE
     source_arrays = sum(source_samples) * _SOURCE_INPUT_BYTES_PER_SAMPLE
+    # The stage opens one trace array at a time as a map and selects its rows out of it, so the pages it holds are that
+    # one array rather than every array it reads. Measurement puts the stage's file-backed peak at that array plus the
+    # library image every job holds, which is what identifies the extent as one array rather than the set.
+    mapped = geometry.regions * geometry.samples * _SINGLE_PRECISION_BYTES
     return JobFootprint(
         cores=cores,
         memory_mb=_apply_tolerance(
             memory_mb=WORKER_MEMORY_MB
             + _bytes_to_megabytes(byte_count=columns + load_transient + sub_datasets + source_arrays)
         ),
+        mapped_mb=_bytes_to_megabytes(byte_count=mapped),
     )
 
 
