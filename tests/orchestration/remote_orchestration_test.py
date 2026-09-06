@@ -1171,7 +1171,7 @@ def test_the_scheduler_read_reports_an_unreported_allocation_as_unresolved(
     assert read_ledger().resolve_batch(batch_id="batch01") is not None, "a status read retired an outstanding batch"
 
 
-def test_cancelling_a_batch_names_every_allocation_it_holds(connected_server: Server, stub_ssh_transport: Any) -> None:
+def test_canceling_a_batch_names_every_allocation_it_holds(connected_server: Server, stub_ssh_transport: Any) -> None:
     """Verifies that one call carries the whole batch, which the scheduler applies to the queued and running allocations
     alone.
     """

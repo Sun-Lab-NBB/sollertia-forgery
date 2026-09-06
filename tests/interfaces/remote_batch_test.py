@@ -97,7 +97,7 @@ class _RemoteStub:
     """The batches whose snapshot raises, which is every batch when the failure above is set."""
     snapshotted: list[str] = field(default_factory=list)
     """The batches whose outcome the remediation snapshotted."""
-    cancelled: list[str] = field(default_factory=list)
+    canceled: list[str] = field(default_factory=list)
     """The allocations the cancellation named."""
     reset: list[tuple[str, str]] = field(default_factory=list)
     """The unit path and job identifier of every job whose tracker was reset."""
@@ -136,7 +136,7 @@ class _StubServer:
         if self._stub.cancel_error is not None:
             raise self._stub.cancel_error
         self._stub.actions.append("cancel")
-        self._stub.cancelled.extend(slurm_job_ids)
+        self._stub.canceled.extend(slurm_job_ids)
 
 
 @pytest.fixture
@@ -556,7 +556,7 @@ def test_a_batch_recorded_while_the_read_ran_is_named_rather_than_resolved(remot
 # Tests for the cancellation of an outstanding batch
 
 
-def test_cancelling_closes_only_the_batches_the_scheduler_released(remote: _RemoteStub) -> None:
+def test_canceling_closes_only_the_batches_the_scheduler_released(remote: _RemoteStub) -> None:
     """Verifies that a cancellation retires the batch the scheduler finished with and leaves the one it still holds."""
     _record_batch(batch_id="released")
     _record_batch(batch_id="queued", allocations=("2000",))
@@ -567,11 +567,11 @@ def test_cancelling_closes_only_the_batches_the_scheduler_released(remote: _Remo
 
     assert response["canceled"]
     assert response["canceled_jobs"] == 2
-    assert sorted(remote.cancelled) == ["1000", "2000"]
+    assert sorted(remote.canceled) == ["1000", "2000"]
     assert [batch.batch_id for batch in read_ledger().batches] == ["queued"]
 
 
-def test_cancelling_a_batch_the_ledger_does_not_hold_is_rejected(remote: _RemoteStub) -> None:
+def test_canceling_a_batch_the_ledger_does_not_hold_is_rejected(remote: _RemoteStub) -> None:
     """Verifies that a cancellation answers an unknown identifier the way its two sibling tools answer it."""
     _record_batch()
 
@@ -579,7 +579,7 @@ def test_cancelling_a_batch_the_ledger_does_not_hold_is_rejected(remote: _Remote
 
     assert not response["success"]
     assert "batch01" in response["error"]
-    assert not remote.cancelled
+    assert not remote.canceled
 
 
 def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStub) -> None:
@@ -594,11 +594,11 @@ def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStu
     assert "Unable to reach the remote compute server" in remote_batch_cancel()["error"]
     remote.connection_error = None
 
-    # A cancellation that never reached the scheduler leaves the work running, so its error says nothing was cancelled.
+    # A cancellation that never reached the scheduler leaves the work running, so its error says nothing was canceled.
     remote.cancel_error = RuntimeError("scancel: error: Invalid job id")
     refused = remote_batch_cancel()
     assert "Unable to cancel the allocations the named batches hold" in refused["error"]
-    assert "nothing was cancelled" in refused["error"]
+    assert "nothing was canceled" in refused["error"]
     remote.cancel_error = None
 
     # A read that fails behind an accepted cancellation leaves that cancellation standing, so the three errors
@@ -621,7 +621,7 @@ def test_each_failed_step_of_a_cancellation_reports_as_itself(remote: _RemoteStu
     assert "cancellation itself was issued" in closure["error"]
 
 
-def test_cancelling_leaves_a_batch_whose_job_its_tracker_still_claims_outstanding(remote: _RemoteStub) -> None:
+def test_canceling_leaves_a_batch_whose_job_its_tracker_still_claims_outstanding(remote: _RemoteStub) -> None:
     """Verifies that a cancellation closes what the resolution drops and leaves a stranded claim for remediation."""
     _record_batch()
     remote.statuses = {"1000": JobStatus.CANCELLED}
@@ -630,7 +630,7 @@ def test_cancelling_leaves_a_batch_whose_job_its_tracker_still_claims_outstandin
     response = remote_batch_cancel()
 
     assert response["canceled"]
-    assert remote.cancelled == ["1000"]
+    assert remote.canceled == ["1000"]
     # The scheduler has released this allocation, so the batch would settle on the reading alone. Its job's tracker
     # still claims the run the cancellation stopped, which only an explicit remediation clears.
     assert [batch.batch_id for batch in read_ledger().batches] == ["batch01"]
@@ -673,7 +673,7 @@ def test_remediating_a_stranded_batch_resets_snapshots_and_drops_it(remote: _Rem
     allocation = response["allocations"][0]
     assert allocation["verdict"] == STRANDED_ALLOCATION
     assert allocation["remediation"] == RESET_REMEDIATION
-    assert not allocation["cancelled"]
+    assert not allocation["canceled"]
     assert allocation["tracker_reset"]
     assert allocation["snapshot_recorded"]
     assert allocation["entry_dropped"]
@@ -735,8 +735,8 @@ def test_forcing_cancels_a_running_allocation_before_any_tracker_is_written(remo
 
     assert response["retired"]
     assert remote.actions == ["cancel", "reset", "snapshot"]
-    assert response["cancelled_allocations"] == ["1000"]
-    assert response["allocations"][0]["cancelled"]
+    assert response["canceled_allocations"] == ["1000"]
+    assert response["allocations"][0]["canceled"]
     assert response["allocations"][0]["tracker_reset"]
     assert response["allocations"][0]["remediation"] == CANCEL_REMEDIATION
     assert read_ledger().batches == []
@@ -757,9 +757,9 @@ def test_forcing_cancels_the_allocation_the_tracker_claims(remote: _RemoteStub) 
     # The recorded allocation is gone and the live one is the claim, which another machine may have submitted.
     # Naming the recorded allocation alone would leave that live allocation free to write into the tracker this
     # remediation then resets.
-    assert response["cancelled_allocations"] == ["2000"]
+    assert response["canceled_allocations"] == ["2000"]
     assert response["reset_jobs"] == 1
-    assert response["allocations"][0]["cancelled"]
+    assert response["allocations"][0]["canceled"]
     assert response["allocations"][0]["remediation"] == CANCEL_REMEDIATION
     assert response["allocations"][0]["tracker_reset"]
 
@@ -776,7 +776,7 @@ def test_forcing_never_clears_the_tracker_of_a_job_that_recorded_a_result(remote
     assert remote.actions == ["cancel", "snapshot"]
     assert response["reset_jobs"] == 0
     assert not response["allocations"][0]["tracker_reset"]
-    assert response["allocations"][0]["cancelled"]
+    assert response["allocations"][0]["canceled"]
     # The report names what ran rather than the sequence the flag is named for, since this tracker was left alone.
     assert response["allocations"][0]["remediation"] == DROP_REMEDIATION
 
@@ -876,7 +876,7 @@ def test_an_unreachable_server_refuses_the_remediation_until_both_waivers_are_gi
     retired = remote_batch_retire(batch_ids=["batch01"], force=True, drop_without_outcome=True)
     assert retired["retired"]
     assert retired["allocations"][0]["verdict"] == RUNNING_ALLOCATION
-    assert not retired["allocations"][0]["cancelled"]
+    assert not retired["allocations"][0]["canceled"]
     assert not retired["allocations"][0]["tracker_reset"]
     assert retired["allocations"][0]["entry_dropped"]
     assert read_ledger().batches == []
@@ -945,9 +945,9 @@ def test_a_job_running_outside_the_scheduler_is_refused_and_then_dropped_untouch
     assert forced["retired"]
     # Nothing here can cancel a process the scheduler does not carry, so waiving the refusal drops the ledger entry
     # and reports the drop it actually applied rather than a cancellation and a reset that never ran.
-    assert forced["cancelled_allocations"] == []
+    assert forced["canceled_allocations"] == []
     assert forced["reset_jobs"] == 0
-    assert not forced["allocations"][0]["cancelled"]
+    assert not forced["allocations"][0]["canceled"]
     assert not forced["allocations"][0]["tracker_reset"]
     assert forced["allocations"][0]["remediation"] == DROP_REMEDIATION
     assert read_ledger().batches == []

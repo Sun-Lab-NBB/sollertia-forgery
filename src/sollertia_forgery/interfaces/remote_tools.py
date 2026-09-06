@@ -186,7 +186,7 @@ retries them."""
 
 _CANCEL_ISSUE_FAILURE: str = (
     "Unable to cancel the allocations the named batches hold on the remote compute server's scheduler, so nothing was "
-    "cancelled and every named batch stays outstanding."
+    "canceled and every named batch stays outstanding."
 )
 """The cause reported when the cancellation itself fails. It is named apart from the reads that follow it, because a
 cancellation that never reached the scheduler leaves work running while the reads behind it leave the cancellation
@@ -194,7 +194,7 @@ standing."""
 
 _CLAIMED_CANCEL_FAILURE: str = (
     "Unable to cancel the further allocations the named batches' jobs claim on their own processing trackers, which "
-    "are the ones this machine's ledger never recorded. The allocations the ledger does record were cancelled, so a "
+    "are the ones this machine's ledger never recorded. The allocations the ledger does record were canceled, so a "
     "job may still be carried by the allocation another submitter started for it."
 )
 """The cause reported when the second cancellation, which names the allocations the resolution found held beyond the
@@ -266,7 +266,7 @@ def remote_batch_status(
     reports what remains outstanding afterwards rather than what was outstanding before. A batch holding an
     allocation whose remediation is anything else stays outstanding for ``retire_remote_batches_tool``, since closing
     it would drop a record while work is still held, a tracker still claims a run, or an allocation still needs
-    cancelling. That closure is a derivation from the verdicts reported here rather than a second reading, so what
+    canceling. That closure is a derivation from the verdicts reported here rather than a second reading, so what
     closes and what this reports cannot disagree. Each call rewrites the state artifacts of the projects it covers
     before reading them, because a job records its outcome on its own tracker and nothing else regenerates those
     artifacts while a batch runs. A read is therefore one server-side regeneration per project rather than a free
@@ -481,7 +481,7 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
         except Exception as exception:
             return error_response(message=_failure_message(cause=_CANCEL_ISSUE_FAILURE, exception=exception))
 
-        # Resolves the cancelled batches the way a status read resolves them, then closes the ones every entry of
+        # Resolves the canceled batches the way a status read resolves them, then closes the ones every entry of
         # which prescribes a plain drop, so a canceled run leaves the same durable record as a completed one.
         host = RemoteHost(server=server)
         try:
@@ -586,8 +586,8 @@ def remote_batch_retire(
         ``batch_id``, its ``covered_batch_ids``, its ``allocations``, and its ``outstanding_seconds``. It carries an
         ``allocations`` list as well, whose entries hold each allocation's identity, its ``scheduler_state``, its
         ``tracker_status``, its ``verdict``, and the ``remediation`` applied. Each allocation entry also reports whether
-        it was ``cancelled``, whether its ``tracker_reset`` ran, whether its ``snapshot_recorded``, and whether its
-        ``entry_dropped``. The response also carries ``cancelled_allocations``, a ``reset_jobs`` count, the ``outcomes``
+        it was ``canceled``, whether its ``tracker_reset`` ran, whether its ``snapshot_recorded``, and whether its
+        ``entry_dropped``. The response also carries ``canceled_allocations``, a ``reset_jobs`` count, the ``outcomes``
         closure recorded, and the ``outcome_directory`` on this machine holding those outcome files and the state
         snapshots they cite. It closes with a ``snapshot_error`` that is empty when every snapshot succeeded and names
         the batches that failed otherwise, and a ``message``. Returns an error when the ledger cannot be read or
@@ -666,16 +666,16 @@ def _remediate_batches(
     # The cancellation runs ahead of the tracker reset, the snapshot, and the drop, so no tracker is reset underneath
     # an allocation the scheduler was never told to stop. It names every allocation these entries leave held, the
     # recorded one and the one a job's tracker claims alike, because the allocation carrying the job is not always the
-    # one this ledger recorded. The verdicts are then resolved again against what this call actually cancelled, because
+    # one this ledger recorded. The verdicts are then resolved again against what this call actually canceled, because
     # the scheduler applies a cancellation asynchronously and a query issued straight afterwards reports the old state.
-    cancelled: list[str] = []
+    canceled: list[str] = []
     if running:
         try:
-            cancelled = cancel_allocations(server=server, allocations=resolve_live_allocations(resolutions=running))
+            canceled = cancel_allocations(server=server, allocations=resolve_live_allocations(resolutions=running))
         except Exception as exception:
             return error_response(message=_failure_message(cause=_CANCEL_FAILURE, exception=exception))
         resolutions = resolve_allocations(
-            batches=batches, reading=reading.cancelling(allocations=cancelled), claims=claims
+            batches=batches, reading=reading.canceling(allocations=canceled), claims=claims
         )
 
     try:
@@ -695,7 +695,7 @@ def _remediate_batches(
         batches=batches,
         resolutions=resolutions,
         outcomes=outcomes,
-        cancelled=cancelled,
+        canceled=canceled,
         reset=reset,
         snapshot_error=f"Unable to snapshot what the jobs of {', '.join(failures)} recorded." if failures else "",
         drop_without_outcome=drop_without_outcome,
@@ -709,7 +709,7 @@ def _remediate_unreadable(
 
     Notes:
         A reading that answered nothing holds every allocation, so every one of them resolves as running and the
-        refusal that names ``force`` is what a caller meets first. Nothing is cancelled and no tracker is written,
+        refusal that names ``force`` is what a caller meets first. Nothing is canceled and no tracker is written,
         because reaching either would need the connection that failed.
 
     Args:
@@ -730,7 +730,7 @@ def _remediate_unreadable(
         batches=batches,
         resolutions=resolutions,
         outcomes=[],
-        cancelled=[],
+        canceled=[],
         reset=set(),
         snapshot_error=reason,
         drop_without_outcome=drop_without_outcome,
@@ -741,7 +741,7 @@ def _drop_batches(
     batches: Sequence[SubmissionBatch],
     resolutions: Sequence[AllocationResolution],
     outcomes: list[dict[str, Any]],
-    cancelled: Sequence[str],
+    canceled: Sequence[str],
     reset: set[tuple[str, str]],
     snapshot_error: str,
     *,
@@ -753,7 +753,7 @@ def _drop_batches(
         batches: The recorded batches being remediated.
         resolutions: The resolutions on which the remediation acted.
         outcomes: The outcomes the snapshot recorded, one per covered batch it could read.
-        cancelled: The allocations the cancellation named.
+        canceled: The allocations the cancellation named.
         reset: The unit path and job identifier of each job whose tracker was reset.
         snapshot_error: What stopped a snapshot, or empty when every one of them succeeded.
         drop_without_outcome: Determines whether to drop the entries despite a failed snapshot.
@@ -789,11 +789,11 @@ def _drop_batches(
         ],
         allocations=[
             _render_remediation(
-                resolution=resolution, cancelled=set(cancelled), reset=reset, recorded=recorded, dropped=held
+                resolution=resolution, canceled=set(canceled), reset=reset, recorded=recorded, dropped=held
             )
             for resolution in resolutions
         ],
-        cancelled_allocations=sorted(set(cancelled)),
+        canceled_allocations=sorted(set(canceled)),
         reset_jobs=len(reset),
         outcomes=outcomes,
         outcome_directory=str(batch_directory()),
@@ -808,7 +808,7 @@ def _drop_batches(
 
 def _render_remediation(
     resolution: AllocationResolution,
-    cancelled: set[str],
+    canceled: set[str],
     reset: set[tuple[str, str]],
     recorded: set[str],
     dropped: set[str],
@@ -816,12 +816,12 @@ def _render_remediation(
     """Renders what one allocation had applied to it.
 
     Notes:
-        An entry counts as cancelled when either of the allocations it resolves was named, since the cancellation
+        An entry counts as canceled when either of the allocations it resolves was named, since the cancellation
         covers the allocation its job's tracker claims alongside the one the ledger recorded.
 
     Args:
         resolution: The resolution on which the remediation acted.
-        cancelled: The allocations the cancellation named.
+        canceled: The allocations the cancellation named.
         reset: The unit path and job identifier of each job whose tracker was reset.
         recorded: The batches whose snapshot was recorded.
         dropped: The batches the ledger held and dropped.
@@ -830,7 +830,7 @@ def _render_remediation(
         The allocation's report entry.
     """
     submission = resolution.submission
-    was_cancelled = submission.slurm_job_id in cancelled or resolution.tracker.allocation in cancelled
+    was_canceled = submission.slurm_job_id in canceled or resolution.tracker.allocation in canceled
     was_reset = (submission.unit_path, submission.job_id) in reset
     return {
         "batch_id": resolution.batch_id,
@@ -845,27 +845,27 @@ def _render_remediation(
         "tracker_status": resolution.tracker.status,
         "verdict": resolution.verdict,
         "remediation": _applied_remediation(
-            cancelled=was_cancelled, reset=was_reset, dropped=resolution.batch_id in dropped
+            canceled=was_canceled, reset=was_reset, dropped=resolution.batch_id in dropped
         ),
-        "cancelled": was_cancelled,
+        "canceled": was_canceled,
         "tracker_reset": was_reset,
         "snapshot_recorded": resolution.batch_id in recorded,
         "entry_dropped": resolution.batch_id in dropped,
     }
 
 
-def _applied_remediation(*, cancelled: bool, reset: bool, dropped: bool) -> str:
+def _applied_remediation(*, canceled: bool, reset: bool, dropped: bool) -> str:
     """Resolves the remediation one allocation actually had applied to it.
 
     Notes:
         This is composed from what ran rather than copied from the verdict. The verdict a caller was shown is the one
-        resolved before the cancellation, and the tracker of a cancelled allocation is written only when its
-        post-cancellation verdict is stranded. A cancelled allocation whose job recorded an outcome therefore reports
-        the drop it received rather than a reset it was deliberately spared, and the ``cancelled`` flag beside it is
+        resolved before the cancellation, and the tracker of a canceled allocation is written only when its
+        post-cancellation verdict is stranded. A canceled allocation whose job recorded an outcome therefore reports
+        the drop it received rather than a reset it was deliberately spared, and the ``canceled`` flag beside it is
         what says the scheduler was told to stop it.
 
     Args:
-        cancelled: Determines whether the cancellation named either of this allocation's identifiers.
+        canceled: Determines whether the cancellation named either of this allocation's identifiers.
         reset: Determines whether this job's tracker was returned to the scheduled state.
         dropped: Determines whether the ledger held this allocation's batch and dropped it.
 
@@ -875,7 +875,7 @@ def _applied_remediation(*, cancelled: bool, reset: bool, dropped: bool) -> str:
     if not dropped:
         return NO_REMEDIATION
     if reset:
-        return CANCEL_REMEDIATION if cancelled else RESET_REMEDIATION
+        return CANCEL_REMEDIATION if canceled else RESET_REMEDIATION
     return DROP_REMEDIATION
 
 

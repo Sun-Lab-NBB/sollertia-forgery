@@ -174,7 +174,7 @@ def test_job_renders_the_scheduler_script_it_submits() -> None:
 
 
 def test_job_renders_dependency_directives_for_a_sequenced_stage() -> None:
-    """Verifies that a job naming dependencies waits on every one of them and is cancelled when one cannot run."""
+    """Verifies that a job naming dependencies waits on every one of them and is canceled when one cannot run."""
     job = _build_job(working_directory=Path("/data/sollertia/scratch"), dependencies=("1000", "1001"))
 
     lines = job.command_script.splitlines()
@@ -390,7 +390,7 @@ def test_submit_job_raises_when_the_scheduler_rejects_the_script(
 
 
 def test_abort_job_cancels_a_running_allocation(connected_server: Server, stub_ssh_transport: StubSSHTransport) -> None:
-    """Verifies that an allocation that the scheduler still holds is cancelled."""
+    """Verifies that an allocation that the scheduler still holds is canceled."""
     stub_ssh_transport.job_statuses["1000"] = "RUNNING"
 
     connected_server.abort_job(slurm_job_id="1000")
@@ -401,7 +401,7 @@ def test_abort_job_cancels_a_running_allocation(connected_server: Server, stub_s
 def test_abort_job_leaves_a_settled_allocation_alone(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that an allocation that the scheduler has already finished is not cancelled again."""
+    """Verifies that an allocation that the scheduler has already finished is not canceled again."""
     stub_ssh_transport.job_statuses["1000"] = "COMPLETED"
 
     connected_server.abort_job(slurm_job_id="1000")
