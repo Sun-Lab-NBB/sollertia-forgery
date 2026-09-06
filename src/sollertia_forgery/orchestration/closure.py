@@ -138,7 +138,7 @@ def close_settled_batches(
 
     Notes:
         A batch closes here exactly when every entry the resolution holds for it prescribes ``drop``, which is the one
-        remediation that leaves every tracker as it stands and needs nothing cancelled. That is a derivation from the
+        remediation that leaves every tracker as it stands and needs nothing canceled. That is a derivation from the
         caller's own resolution rather than a second reading of the scheduler. It keeps this closure from diverging from
         the verdicts a caller is shown. The caller resolves once and hands the same entries to both, and nothing here
         consults a record of its own. An entry prescribing ``none`` holds its batch open because the work may still be

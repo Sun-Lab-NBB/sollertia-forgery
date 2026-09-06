@@ -182,12 +182,12 @@ def test_a_record_naming_no_allocation_holds_nothing() -> None:
     assert SchedulerReading(unreadable_reason="the queue is down").resolve_state(allocation="") == GONE_ALLOCATION
 
 
-def test_an_allocation_this_process_cancelled_is_the_schedulers_no_longer() -> None:
+def test_an_allocation_this_process_canceled_is_the_schedulers_no_longer() -> None:
     """Verifies that a cancellation this process issued settles the allocation without another query."""
     reading = SchedulerReading(statuses={"1000": JobStatus.RUNNING}, queued=frozenset({"1000"}))
 
     assert reading.resolve_state(allocation="1000") == HELD_ALLOCATION
-    assert reading.cancelling(allocations=["1000"]).resolve_state(allocation="1000") == SETTLED_ALLOCATION
+    assert reading.canceling(allocations=["1000"]).resolve_state(allocation="1000") == SETTLED_ALLOCATION
 
 
 def test_a_record_that_could_not_be_read_holds_every_allocation() -> None:

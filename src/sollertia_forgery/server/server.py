@@ -68,7 +68,7 @@ class JobStatus(StrEnum):
     FAILED = "FAILED"
     """The job terminated with a non-zero exit code."""
     CANCELLED = "CANCELLED"
-    """The job was cancelled by the user or administrator."""
+    """The job was canceled by the user or administrator."""
     TIMEOUT = "TIMEOUT"
     """The job exceeded its time limit."""
     NODE_FAIL = "NODE_FAIL"
@@ -842,7 +842,7 @@ def _parse_job_status(state: str) -> JobStatus:
     """Resolves one accounting state string into a JobStatus member.
 
     Notes:
-        SLURM decorates some states with a trailing marker or an attribution clause, reporting a cancelled job as
+        SLURM decorates some states with a trailing marker or an attribution clause, reporting a canceled job as
         'CANCELLED by 1234' and a truncated state as 'CANCELLED+'. Both name the same state, so the decoration is
         stripped before the state is matched.
 

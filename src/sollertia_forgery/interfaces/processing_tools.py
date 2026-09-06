@@ -712,8 +712,8 @@ def retire_remote_batches_tool(
         ``batch_id``, its ``covered_batch_ids``, its ``allocations``, and its ``outstanding_seconds``. It carries an
         ``allocations`` list as well, whose entries hold each allocation's identity, its ``scheduler_state``, its
         ``tracker_status``, its ``verdict``, and the ``remediation`` applied. Each allocation entry also reports
-        whether it was ``cancelled``, whether its ``tracker_reset`` ran, whether its ``snapshot_recorded``, and whether
-        its ``entry_dropped``. The response also carries ``cancelled_allocations``, a ``reset_jobs`` count, the
+        whether it was ``canceled``, whether its ``tracker_reset`` ran, whether its ``snapshot_recorded``, and whether
+        its ``entry_dropped``. The response also carries ``canceled_allocations``, a ``reset_jobs`` count, the
         ``outcomes`` closure recorded, the ``outcome_directory`` on this machine holding those outcome files and the
         state snapshots they cite, a ``snapshot_error`` that is empty when the snapshot succeeded, and a ``message``.
         Returns an error when the ledger cannot be read or written, when no batch is outstanding, when no identifier is

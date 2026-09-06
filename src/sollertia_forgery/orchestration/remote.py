@@ -65,7 +65,7 @@ Notes:
 
 SETTLED_ALLOCATION: str = "settled"
 """The scheduler state of an allocation that accounting reports in a state it never leaves and that the queue no longer
-carries, of one the queue reports as permanently blocked, and of one this reading has since cancelled. The scheduler
+carries, of one the queue reports as permanently blocked, and of one this reading has since canceled. The scheduler
 has finished with it, or will never start it, so nothing it holds can change again."""
 
 GONE_ALLOCATION: str = "gone"
@@ -107,7 +107,7 @@ RESET_REMEDIATION: str = "reset_and_drop"
 tracker before the snapshot and the drop."""
 
 CANCEL_REMEDIATION: str = "cancel_reset_and_drop"
-"""The remediation applied to an allocation a caller overriding the refusal cancelled and whose job the cancellation
+"""The remediation applied to an allocation a caller overriding the refusal canceled and whose job the cancellation
 left stranded on its own tracker. The cancellation runs before any tracker is written, so no tracker is reset underneath
 an allocation the scheduler was never told to stop."""
 
@@ -182,13 +182,13 @@ class SchedulerReading:
     """The state accounting reported for each queried allocation, keyed by its scheduler identifier."""
     queued: frozenset[str] = frozenset()
     """The allocations the queue currently holds, which is empty for a user whose queue holds none of them."""
-    cancelled: frozenset[str] = frozenset()
-    """The allocations this process has since cancelled. The scheduler applies a cancellation to the queued and
-    running allocations alike, so a cancelled allocation is the scheduler's no longer whatever the reading that
+    canceled: frozenset[str] = frozenset()
+    """The allocations this process has since canceled. The scheduler applies a cancellation to the queued and
+    running allocations alike, so a canceled allocation is the scheduler's no longer whatever the reading that
     preceded the cancellation said."""
     unreadable_reason: str = ""
     """What stopped one of the scheduler's records from being read, or empty when both answered. Every allocation this
-    reading has neither cancelled nor found permanently blocked resolves as held while this is set, because a record
+    reading has neither canceled nor found permanently blocked resolves as held while this is set, because a record
     that did not answer is no evidence that the scheduler has finished with an allocation."""
 
     def resolve_state(self, allocation: str) -> str:
@@ -220,7 +220,7 @@ class SchedulerReading:
         # A record naming no allocation holds nothing, whatever either source says about the allocations it does name.
         if not allocation:
             return GONE_ALLOCATION
-        if allocation in self.cancelled:
+        if allocation in self.canceled:
             return SETTLED_ALLOCATION
         status = self.statuses.get(allocation, JobStatus.UNRESOLVED)
         if status is JobStatus.BLOCKED:
@@ -244,8 +244,8 @@ class SchedulerReading:
         """
         return self.statuses.get(allocation, JobStatus.UNRESOLVED)
 
-    def cancelling(self, allocations: Sequence[str]) -> SchedulerReading:
-        """Returns this reading with the named allocations recorded as cancelled.
+    def canceling(self, allocations: Sequence[str]) -> SchedulerReading:
+        """Returns this reading with the named allocations recorded as canceled.
 
         Notes:
             A cancellation is issued rather than observed, since the scheduler applies it asynchronously and an
@@ -258,7 +258,7 @@ class SchedulerReading:
         Returns:
             The reading, which resolves every named allocation as settled.
         """
-        return replace(self, cancelled=self.cancelled | set(allocations))
+        return replace(self, canceled=self.canceled | set(allocations))
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,7 +550,7 @@ def read_scheduler_records(server: Server, allocations: Sequence[str]) -> Schedu
         output and reporting that as 'no row for anything' would resolve every allocation as gone at once.
 
         The queue is read second and a failure there is carried rather than raised, because the reading it leaves is
-        still usable. Every allocation the reading has neither cancelled nor found permanently blocked resolves as
+        still usable. Every allocation the reading has neither canceled nor found permanently blocked resolves as
         held, which is the reading that disturbs nothing.
 
     Args:
