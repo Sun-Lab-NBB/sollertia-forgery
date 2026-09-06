@@ -263,8 +263,8 @@ def inspect_job_resources_tool(
     A bare call reports the figures against which a batch is planned, alongside a ``breakdown`` naming every job type
     and how many of each the named sessions still have to run. A job that the units already recorded as succeeded, and a
     job that this run could not unblock, are both absent, so this reports what a batch would dispatch rather than the
-    whole universe. Naming a filter adds a page of jobs carrying their figures, and opting into detail adds the unit
-    each job reads, its prerequisite jobs, and the parameters it would use.
+    whole universe. Naming a filter adds a page of jobs carrying their figures and the unit each one reads, and opting
+    into detail adds its prerequisite jobs and the parameters it would use.
 
     Estimates each job's memory from the data it will process, so a long recording is not charged the same as a short
     one. The figures already carry the shared tolerance, so a caller plans a local batch against them or requests them
@@ -284,8 +284,8 @@ def inspect_job_resources_tool(
             every match.
         start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report the unit they read, their prerequisite jobs, and the
-            parameters they would use.
+        detailed: Determines whether the listed jobs report their prerequisite jobs and the parameters they would
+            use.
 
     Returns:
         A response dict with the ``pipeline`` inspected, the ``host`` that holds the data, ``total_units``, and a

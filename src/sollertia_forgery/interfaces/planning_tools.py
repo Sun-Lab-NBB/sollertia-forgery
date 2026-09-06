@@ -31,10 +31,10 @@ from ..orchestration import (
 )
 from .host_resolution import (
     HOST_LABELS,
-    reported_project_path,
     resolve_execution_host,
     resolve_readable_project,
     unsupported_host_message,
+    resolve_reported_project_path,
 )
 
 _PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name")
@@ -248,7 +248,7 @@ def read_project_plan_tool(
         )
 
     response = ok_response(
-        project_path=reported_project_path(project_path=project_path, directory=directory, host=host),
+        project_path=resolve_reported_project_path(project_path=project_path, directory=directory, host=host),
         plan_path=str(plan_path),
         **totals,
         breakdown=breakdown,
@@ -330,17 +330,17 @@ def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_
 def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
     """Summarizes a plan projection into the figures against which a submission is sized.
 
+    Notes:
+        Both memory terms are totaled, because a caller sizing work for this machine's pool budgets against the
+        anonymous term while a caller sizing a scheduler submission budgets against the resident one. Reporting the
+        anonymous total alone leaves the second caller under-requesting by whatever its jobs map.
+
     Args:
         frame: The whole plan projection.
 
     Returns:
         A dictionary with the total jobs, the summed and largest figure of both memory terms, and the widest core
         allocation.
-
-    Notes:
-        Both memory terms are totaled, because a caller sizing work for this machine's pool budgets against the
-        anonymous term while a caller sizing a scheduler submission budgets against the resident one. Reporting the
-        anonymous total alone leaves the second caller under-requesting by whatever its jobs map.
     """
     if frame.height == 0:
         return {

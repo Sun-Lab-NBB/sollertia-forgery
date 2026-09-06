@@ -118,7 +118,7 @@ _DECODER_BUFFER_MEMORY_MB: int = 96
 """The resident memory one decode worker holds for its codec reference frames and its decoder state, beyond the frame
 buffers the measurement itself retains."""
 
-_SPAWNED_SLF_CHILD_MEMORY_MB: int = 512
+_SPAWNED_PACKAGE_CHILD_MEMORY_MB: int = 512
 """The resident memory one child spawned inside this package holds before it touches data.
 
 Notes:
@@ -130,7 +130,7 @@ Notes:
     killing it.
 """
 
-_DEPENDENCY_CHILD_SURPLUS_MB: int = _SPAWNED_SLF_CHILD_MEMORY_MB - SPAWNED_CHILD_MEMORY_MB
+_DEPENDENCY_CHILD_SURPLUS_MB: int = _SPAWNED_PACKAGE_CHILD_MEMORY_MB - SPAWNED_CHILD_MEMORY_MB
 """The memory a dependency's own sizing pass leaves unmodeled for each child its stage spawns inside this package.
 
 Notes:
@@ -202,7 +202,7 @@ _CHECKSUM_CHUNK_MEMORY_MB: int = 8
 streams every file. The buffer is allocated once per file and reused for every chunk of it, so one worker holds one
 buffer at a time and that buffer is the whole data-dependent term the worker carries."""
 
-_CHECKSUM_READER_MEMORY_MB: int = _SPAWNED_SLF_CHILD_MEMORY_MB + _CHECKSUM_CHUNK_MEMORY_MB
+_CHECKSUM_READER_MEMORY_MB: int = _SPAWNED_PACKAGE_CHILD_MEMORY_MB + _CHECKSUM_CHUNK_MEMORY_MB
 """The resident memory one checksum worker holds.
 
 Notes:
@@ -751,7 +751,8 @@ def _size_camera_extraction_job(archive_path: Path) -> JobFootprint:
         archive_path: The path to the log archive the job reads.
 
     Returns:
-        The job's footprint, holding the library's own width and its memory at that width.
+        The job's footprint, holding the library's own width and its memory at that width, raised by the surplus each
+        child this package spawns holds above the child the library charges.
 
     Raises:
         FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
@@ -780,7 +781,8 @@ def _size_controller_extraction_job(archive_path: Path) -> JobFootprint:
         archive_path: The path to the log archive the job reads.
 
     Returns:
-        The job's footprint, holding the library's own width and its memory at that width.
+        The job's footprint, holding the library's own width and its memory at that width, raised by the surplus each
+        child this package spawns holds above the child the library charges.
 
     Raises:
         FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
@@ -1020,7 +1022,7 @@ def _size_motion_energy_job(recording: _EnergyRecording, cores: int) -> JobFootp
             memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB),
         )
 
-    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB
+    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB
     return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + chunks * per_worker))
 
 
@@ -1034,9 +1036,10 @@ def _size_two_photon_job(
     """Sizes one two-photon job through cindra's own per-stage sizing pass.
 
     Notes:
-        cindra reads the recording once and answers both halves of its model from that read, so the width at which a
-        stage runs is the width cindra declares for that stage rather than a figure this package repeats. Taking both
-        figures whole is what keeps a retune of either half reaching slf without a change here.
+        cindra reads the recording once and answers the cores and the anonymous memory of its model from that read,
+        while the bytes a mapping stage holds are resolved here. The width at which a stage runs is the width cindra
+        declares for that stage rather than a figure this package repeats. Taking cindra's figures whole is what keeps
+        a retune of either of them reaching this package without a change here.
 
         The binarization, registration and processing stages are sized from the recording's own geometry, and the two
         per-plane stages additionally from the plane their specifier names, so each of them receives a figure taken

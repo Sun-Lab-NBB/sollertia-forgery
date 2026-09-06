@@ -85,7 +85,7 @@ def resolve_readable_project(project_path: str, host: str) -> Path:
     return local_directory
 
 
-def reported_project_path(project_path: str, directory: Path, host: str) -> str:
+def resolve_reported_project_path(project_path: str, directory: Path, host: str) -> str:
     """Resolves the project path a read tool reports back to its caller.
 
     Notes:

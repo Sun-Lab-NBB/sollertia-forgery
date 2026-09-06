@@ -78,7 +78,7 @@ from sollertia_forgery.orchestration.footprints import (
     _SINGLE_PRECISION_BYTES,
     _UNRESOLVED_FRAME_COUNT,
     _DECODER_BUFFER_MEMORY_MB,
-    _SPAWNED_SLF_CHILD_MEMORY_MB,
+    _SPAWNED_PACKAGE_CHILD_MEMORY_MB,
     _ARCHIVE_DIRECTORY_BYTES_PER_MESSAGE,
     JobFootprint,
     _EnergyRecording,
@@ -687,7 +687,7 @@ def energy_memory(frame_pixels: int, frame_count: int, cores: int) -> int:
     chunks = cores if frame_count < 0 else len(_plan_chunks(frame_count=frame_count, workers=cores))
     if chunks == 1:
         return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB)
-    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB
+    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB
     return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + chunks * per_worker)
 
 
@@ -941,7 +941,7 @@ def test_a_checksum_reader_is_charged_the_spawned_child_it_is(experiment_session
     assert estimates[CHECKSUM_JOB_NAME, ""].memory_mb > _UNDERSTATED_CHECKSUM_WIDE_MEMORY_MB
     # Expressing the reader as this package's own child plus its buffer is what makes a retune of that figure reach
     # this model, so the reader can never again be modeled as cheaper than the child it runs in.
-    assert footprints_module._CHECKSUM_READER_MEMORY_MB >= footprints_module._SPAWNED_SLF_CHILD_MEMORY_MB
+    assert footprints_module._CHECKSUM_READER_MEMORY_MB >= footprints_module._SPAWNED_PACKAGE_CHILD_MEMORY_MB
 
 
 def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
@@ -1289,7 +1289,7 @@ def test_a_single_chunk_job_is_charged_no_spawned_child() -> None:
     # Charging that job the one child a pool would start reserves a whole gigabyte the job never holds.
     assert (
         _apply_tolerance(
-            memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB
+            memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB
         )
         == _UNCHUNKED_WIDE_WITH_CHILD_MEMORY_MB
     )
@@ -1317,7 +1317,7 @@ def test_the_decoders_a_motion_energy_job_is_charged_are_the_chunks_the_stage_pl
             if chunks == 1
             else _apply_tolerance(
                 memory_mb=WORKER_MEMORY_MB
-                + chunks * (frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB)
+                + chunks * (frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB)
             )
         )
         assert (
@@ -1425,7 +1425,7 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     energy = estimates[ENERGY_JOB_NAME, "51"]
     # No frame contributes no pixels, so the estimate covers the decoder buffers and the children alone.
     assert energy.memory_mb == _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB)
+        memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB)
     )
 
 
@@ -1565,7 +1565,7 @@ def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_ses
     )
 
     assert estimates[ENERGY_JOB_NAME, "51"].memory_mb == _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + 4 * (_DECODER_BUFFER_MEMORY_MB + _SPAWNED_SLF_CHILD_MEMORY_MB)
+        memory_mb=WORKER_MEMORY_MB + 4 * (_DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB)
     )
 
 
@@ -2830,12 +2830,17 @@ def test_a_session_planning_no_motion_energy_job_reads_no_camera_manifest(
 
 
 def test_a_footprint_that_maps_nothing_holds_only_its_anonymous_term_and_the_shared_image() -> None:
-    """Verifies that the resident figure adds the per-job library image to a stage that maps none of its input."""
-    footprint = JobFootprint(cores=4, memory_mb=3072)
+    """Verifies that the resident figure adds the per-job library image and its own margin to a stage that maps
+    none of its input.
+    """
+    # The anonymous figure is chosen so the margin moves the reported gigabyte. A figure the margin leaves in its own
+    # bucket would pass this assertion whether the margin were applied or dropped.
+    footprint = JobFootprint(cores=4, memory_mb=9216)
 
     assert footprint.mapped_mb == 0
-    assert footprint.resident_mb == footprints_module._round_to_gigabyte(
-        memory_mb=3072 + footprints_module._SHARED_LIBRARY_IMAGE_MB
+    assert footprint.resident_mb == 11264
+    assert footprint.resident_mb > footprints_module._round_to_gigabyte(
+        memory_mb=9216 + footprints_module._SHARED_LIBRARY_IMAGE_MB
     )
 
 

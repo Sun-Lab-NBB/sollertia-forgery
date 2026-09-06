@@ -92,11 +92,11 @@ from `.mcp_instance`. Return through the `ok_response` and `error_response` help
 `Returns` section that names the response keys in prose. Resolve every path the tool opens inside that envelope, so a
 directory the host does not supply answers with an error response rather than raising out of the session. A tool that
 reads a remote project opens that project's local mirror and reports the caller's own `project_path` back through
-`reported_project_path`, while the artifact path keys beside it name the mirror the read actually opened. Add a new tool
-module to the `[tool.coverage.run] omit` list in `pyproject.toml`, because tool modules reach infrastructure that only a
-live MCP session supplies. The batch tools that read, cancel, and remediate what the scheduler ran keep their
-implementations in `interfaces/remote_tools.py`, which registers no tool of its own. An `slf server` command and the
-tool beside it therefore answer a caller from one function. `get_processing_status_tool` and
+`resolve_reported_project_path`, while the artifact path keys beside it name the mirror the read actually opened. Add a
+new tool module to the `[tool.coverage.run] omit` list in `pyproject.toml`, because tool modules reach infrastructure
+that only a live MCP session supplies. The batch tools that read, cancel, and remediate what the scheduler ran keep
+their implementations in `interfaces/remote_tools.py`, which registers no tool of its own. An `slf server` command and
+the tool beside it therefore answer a caller from one function. `get_processing_status_tool` and
 `retire_remote_batches_tool` resolve every allocation through the one state table in `orchestration/remote.py` rather
 than each deciding for itself.
 
