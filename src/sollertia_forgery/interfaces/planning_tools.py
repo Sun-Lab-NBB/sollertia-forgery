@@ -233,12 +233,25 @@ def read_project_plan_tool(
             )
         )
 
-    frame = pl.read_ipc(source=plan_path, memory_map=True)
+    # A projection written by another model states a narrower column set than this reader totals, so the read and the
+    # totals answer through the envelope rather than raising out of the session.
+    try:
+        frame = pl.read_ipc(source=plan_path, memory_map=True)
+        totals = _plan_totals(frame=frame)
+        breakdown = frame_breakdown(frame=frame, axes=_PLAN_AXES)
+    except Exception as exception:
+        return error_response(
+            message=(
+                f"Unable to read the plan projection at '{plan_path}'. {exception} Regenerate it with "
+                f"generate_project_plan_tool, which rebuilds the table from the units' own caches."
+            )
+        )
+
     response = ok_response(
         project_path=reported_project_path(project_path=project_path, directory=directory, host=host),
         plan_path=str(plan_path),
-        **_plan_totals(frame=frame),
-        breakdown=frame_breakdown(frame=frame, axes=_PLAN_AXES),
+        **totals,
+        breakdown=breakdown,
     )
 
     singles: dict[str, str | None] = {"unit_kind": unit_kind, "animal": animal, "dataset": dataset}

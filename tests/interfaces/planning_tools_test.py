@@ -185,3 +185,21 @@ def test_status_counts_totals_every_job_and_groups_by_status() -> None:
     frame = pl.DataFrame({"status": ["SUCCEEDED", "SUCCEEDED", "FAILED", "SCHEDULED"]})
 
     assert _status_counts(frame=frame) == {"total": 4, "FAILED": 1, "SCHEDULED": 1, "SUCCEEDED": 2}
+
+
+def test_reading_a_projection_another_model_wrote_answers_through_the_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a projection missing a column this reader totals answers with an error rather than raising."""
+    project = tmp_path.joinpath("Project")
+    project.mkdir(parents=True)
+    plan_path = project_plan_path(project_directory=project)
+    # The narrower table is what a projection written before the resident term looks like on disk.
+    narrower = pl.DataFrame(data=[{k: v for k, v in _PLANNED_JOBS[0].items() if k != "resident_mb"}], strict=False)
+    narrower.write_ipc(file=plan_path)
+
+    response = read_project_plan_tool(project_path=str(project))
+
+    assert response["success"] is False
+    assert "Unable to read the plan projection" in response["error"]
+    assert "generate_project_plan_tool" in response["error"]
