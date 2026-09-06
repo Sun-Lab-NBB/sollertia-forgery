@@ -747,7 +747,9 @@ def pull_command(remote_path: str, destination: Path) -> None:
     """Copies a file or directory off the remote compute server onto this machine.
 
     A directory is copied whole. The copy lands inside the destination directory under the remote path's own final
-    component, which is how a session's processed data, one feather, or a batch's logs are brought back.
+    component, which is how a session's processed data, one feather, or a batch's logs are brought back. The
+    destination is created when it does not exist, and a destination that already holds a file of that name is
+    overwritten.
     """
     source = Path(remote_path)
     with Server(configuration=get_server_configuration()) as server:

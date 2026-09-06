@@ -201,9 +201,10 @@ Every job carries two memory figures, and the same sizing pass resolves both. Th
 job allocates, and the resident figure adds the pages the job maps and the shared library image its processes hold in
 common, above a margin. The local engine budgets against the anonymous figure, because anonymous pages are the ones a
 host cannot reclaim under pressure, and a SLURM allocation requests the resident figure, because the scheduler's memory
-cgroup charges a job for every page it holds. Only a stage that maps its input carries a non-zero mapped term, which
-covers the two-photon `binarization`, `registration`, and `processing` stages and the forging pipeline's
-`multiday_extraction` stage. Every other job's two figures differ by the shared image and the margin alone.
+cgroup charges a job for every page it holds. A stage carries a non-zero mapped term when it holds a map open at its
+peak rather than reading through one and releasing it, which covers the two-photon `binarization`, `registration`, and
+`processing` stages and the forging pipeline's `multiday_extraction` and `session_data_assembly` stages. Every other
+job's two figures differ by the shared image and the margin alone.
 
 Each job holds one of four statuses on its tracker, and a rerun resolves only the work still outstanding:
 

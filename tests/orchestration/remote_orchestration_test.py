@@ -837,6 +837,12 @@ def test_a_shallow_dataset_path_is_rejected_at_its_own_depth() -> None:
     with pytest.raises(ValueError, match="must name at least that many parents"):
         resolve_project_root(unit_paths=[Path()], unit_kind="dataset")
 
+    # A path naming one parent clears a dataset's depth and not a session's, so the depth is read per unit kind
+    # rather than shared. A path too shallow for both would hold whichever depth the refusal used.
+    assert resolve_project_root(unit_paths=[Path("/a_dataset")], unit_kind="dataset") == Path("/")
+    with pytest.raises(ValueError, match="must name at least that many parents"):
+        resolve_project_root(unit_paths=[Path("/a_session")], unit_kind="session")
+
 
 def test_a_batch_joins_the_state_table_to_the_planned_figures() -> None:
     """Verifies that state names which jobs exist and the plan sizes them, which is the whole descriptor."""

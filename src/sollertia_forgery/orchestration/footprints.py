@@ -1069,7 +1069,8 @@ def _size_two_photon_job(
         data_path: The raw imaging directory, consulted when the recording carries no output yet.
 
     Returns:
-        The job's footprint, holding cindra's own width for the stage and its memory at that width.
+        The job's footprint, holding cindra's own width for the stage, its anonymous memory at that width, and
+        the plane binaries a mapping stage holds.
 
     Raises:
         FileNotFoundError: If the recording carries neither pipeline output nor readable raw imaging data, in which
@@ -1153,6 +1154,36 @@ def _mapped_plane_megabytes(
     return _bytes_to_megabytes(byte_count=mapped)
 
 
+def _mapped_recording_megabytes(job_name: MultiRecordingJobNames, specifier: str, directories: tuple[Path, ...]) -> int:
+    """Resolves the binarized imaging data one cross-recording job maps, in megabytes.
+
+    Notes:
+        The extraction stage reads its recording's plane binaries through a memory map, so every byte of them stays
+        resident behind the job while it runs. Measurement puts the resident file-backed term of that stage at 99% of
+        those binaries, against an anonymous term under a tenth of it. The mapped bytes are therefore the figure that
+        decides how many of these jobs a host schedules at once.
+
+        The discovery stage reads the combined traces of every recording it spans through the file interface, so it
+        maps none of them and is charged nothing here. A recording whose binaries have been removed after
+        processing is the one input this pass cannot recover, since the stage that wrote them belongs to a pipeline
+        that has already completed. Charging it nothing would reserve a tenth of what the job holds, so it is refused
+        here on the terms every other unreadable input is refused.
+
+    Args:
+        job_name: The cindra stage the job runs.
+        specifier: The job's tracker specifier, which names a session for the extraction stage.
+        directories: The cindra output directory of every recording the job spans.
+
+    Returns:
+        The megabytes the job maps, which is zero for every stage that maps nothing.
+    """
+    if job_name is not MultiRecordingJobNames.EXTRACT:
+        return 0
+    mapped = [directory for directory in directories if specifier in directory.parts]
+    total = sum(binary.stat().st_size for directory in mapped for binary in directory.rglob(_PLANE_BINARY_PATTERN))
+    return _bytes_to_megabytes(byte_count=total)
+
+
 def _size_multi_recording_job(
     job_name: MultiRecordingJobNames,
     specifier: str,
@@ -1164,10 +1195,10 @@ def _size_multi_recording_job(
     """Sizes one cross-recording job through cindra's own per-stage sizing pass.
 
     Notes:
-        Both cross-recording stages read every recording of the animal over which they run, so the whole recording set
-        is handed to cindra whichever stage is being sized. Both halves of cindra's own figure come back from that one
-        read, and the mapped term is resolved here from the
-        plane binaries the recordings hold.
+        Both cross-recording stages read every recording of the animal over which they run, so the whole recording
+        set is handed to cindra whichever stage is being sized. The cores and the anonymous memory come back from that
+        one read, and the bytes the extraction stage maps are resolved here from the plane binaries its own recording
+        holds.
 
         A set that any recording leaves short draws a refusal from cindra rather than a figure sized from the
         recordings that happen to be complete, and that refusal propagates. A dataset whose recordings carry no
@@ -1190,7 +1221,8 @@ def _size_multi_recording_job(
             accept the bound cindra draws from the per-recording region counts.
 
     Returns:
-        The job's footprint, holding cindra's own width for the stage and its memory at that width.
+        The job's footprint, holding cindra's own width for the stage, its anonymous memory at that width, and
+        the plane binaries a mapping stage holds.
 
     Raises:
         FileNotFoundError: If the job spans no recording, if any recording it spans carries no combined metadata
@@ -1411,36 +1443,6 @@ def _session_marker(project_root: Path, animal: str, session: str) -> SessionDat
         The loaded session.
     """
     return SessionData.load(session_path=project_root.joinpath(animal, session))
-
-
-def _mapped_recording_megabytes(job_name: MultiRecordingJobNames, specifier: str, directories: tuple[Path, ...]) -> int:
-    """Resolves the binarized imaging data one cross-recording job maps, in megabytes.
-
-    Notes:
-        The extraction stage reads its recording's plane binaries through a memory map, so every byte of them stays
-        resident behind the job while it runs. Measurement puts the resident file-backed term of that stage at 99% of
-        those binaries, against an anonymous term under a tenth of it. The mapped bytes are therefore the figure that
-        decides how many of these jobs a host schedules at once.
-
-        The discovery stage reads the combined traces of every recording it spans through the file interface, so it
-        maps none of them and is charged nothing here. A recording whose binaries have been removed after
-        processing is the one input this pass cannot recover, since the stage that wrote them belongs to a pipeline
-        that has already completed. Charging it nothing would reserve a tenth of what the job holds, so it is refused
-        here on the terms every other unreadable input is refused.
-
-    Args:
-        job_name: The cindra stage the job runs.
-        specifier: The job's tracker specifier, which names a session for the extraction stage.
-        directories: The cindra output directory of every recording the job spans.
-
-    Returns:
-        The megabytes the job maps, which is zero for every stage that maps nothing.
-    """
-    if job_name is not MultiRecordingJobNames.EXTRACT:
-        return 0
-    mapped = [directory for directory in directories if specifier in directory.parts]
-    total = sum(binary.stat().st_size for directory in mapped for binary in directory.rglob(_PLANE_BINARY_PATTERN))
-    return _bytes_to_megabytes(byte_count=total)
 
 
 def _animal_recording_directories(dataset: DatasetData, animal: str, project_root: Path) -> tuple[Path, ...]:

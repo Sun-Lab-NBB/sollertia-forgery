@@ -105,6 +105,9 @@ def test_reading_a_projection_reports_the_figures_a_submission_is_sized_against(
     assert response["total_jobs"] == len(_PLANNED_JOBS)
     assert response["summed_memory_mb"] == 11300
     assert response["largest_job_memory_mb"] == 6000
+    # A caller sizing a scheduler submission reads the resident totals, so both terms are summed and both maxima taken.
+    assert response["summed_resident_mb"] == 15396
+    assert response["largest_job_resident_mb"] == 7024
     assert response["widest_job_cores"] == 16
     # Every planned job is modeled from its own input or its target is dropped, so the projection reports no count of
     # jobs carrying an unmodeled figure.

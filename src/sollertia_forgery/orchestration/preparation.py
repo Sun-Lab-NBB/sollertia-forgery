@@ -57,8 +57,9 @@ def prepare_batch(
         The prepared batch document.
 
     Raises:
-        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, or if the named units
-            span more than one project.
+        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, if the named units
+            span more than one project, or if a named unit sits too few directory levels below its project for that
+            project to be resolved from it.
         FileNotFoundError: If the host holds no plan table for the units' project.
         RuntimeError: If a step fails on the host.
     """

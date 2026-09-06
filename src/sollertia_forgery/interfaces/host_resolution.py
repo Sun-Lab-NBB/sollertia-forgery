@@ -92,7 +92,7 @@ def resolve_reported_project_path(project_path: str, directory: Path, host: str)
         A remote read opens the project's mirror, but the project itself sits on the server, and every write tool
         takes the server path. Reporting the mirror under the key the caller filled with a server path would hand
         back a path that names a different machine than the one it was given, so the caller's own argument is echoed
-        instead. The artifact keys beside it keep the mirror, because that is where the artifact was read from.
+        instead. The artifact keys beside it name the mirror, because the mirror is what the read opened.
 
     Args:
         project_path: The project path the caller supplied.

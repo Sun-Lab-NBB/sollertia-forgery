@@ -306,8 +306,8 @@ def test_an_unwritable_link_directory_names_the_permission_remedy(
 
 @pytest.mark.xdist_group(name="worker_pool")
 def test_the_post_link_verification_runs_a_fresh_interpreter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies that the loader search path is read once per process, so only a new interpreter reports whether the link
-    took.
+    """Verifies that the verification runs in an interpreter other than this one, which is what lets it read a loader
+    search path this process has already fixed.
     """
     # The runtime the module names is a macOS dylib, so loading it here would assert a precondition of the host rather
     # than the behavior of the call. The substituted script answers with the exit status the call reads, and answers
