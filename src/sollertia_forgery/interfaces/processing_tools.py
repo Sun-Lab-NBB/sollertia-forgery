@@ -386,7 +386,7 @@ def execute_jobs_tool(
         submission covered, ``walltime_minutes``, and the ``batch_directory`` on the server. It also adds a
         ``withheld_jobs`` list naming each job it neither submitted nor adopted alongside the executor its tracker
         claims, and a ``submissions`` list pairing each job with the allocation that runs it, its ``cores``, and
-        the ``memory_mb`` that allocation requested, which is the job's resident figure. Either host adds an
+        the ``resident_mb`` that allocation requested. Either host adds an
         ``invalid_jobs`` list when a recorded descriptor could not be built into a job. Returns an error when the
         prepared-batch registry cannot be read, when an identifier resolves to no prepared batch, or when no batch is
         named. Returns an error as well when the named batches mix hosts, when every prepared job is blocked or already
@@ -1175,7 +1175,7 @@ def _execute_remote_batch(
                 "unit_path": submission.unit_path,
                 "unit_name": submission.unit_name,
                 "cores": submission.cores,
-                "memory_mb": submission.memory_mb,
+                "resident_mb": submission.resident_mb,
             }
             for submission in submissions
         ],

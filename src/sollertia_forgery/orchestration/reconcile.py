@@ -219,7 +219,7 @@ def _resolve_recorded_submissions(
             unit_path=str(job.unit_path),
             unit_name=job.name,
             cores=job.core_weight,
-            memory_mb=job.memory_mb,
+            resident_mb=job.resident_mb,
         )
         for job in jobs
     ]

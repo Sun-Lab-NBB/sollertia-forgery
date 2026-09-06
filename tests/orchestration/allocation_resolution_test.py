@@ -143,7 +143,7 @@ def _build_submission(
         unit_path=unit_path,
         unit_name=Path(unit_path).name if unit_path else "",
         cores=4,
-        memory_mb=2048,
+        resident_mb=2048,
     )
 
 

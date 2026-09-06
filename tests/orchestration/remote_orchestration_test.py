@@ -140,7 +140,7 @@ def build_submission(slurm_job_id: str, job_id: str = "job") -> RemoteSubmission
         unit_path="/data/Project/Animal/Session",
         unit_name="Session",
         cores=16,
-        memory_mb=4096,
+        resident_mb=4096,
         output_log="/server/root/processing_batches/batch01/0000.out",
         error_log="/server/root/processing_batches/batch01/0000.err",
     )
@@ -616,7 +616,7 @@ def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
             unit_name="Session",
             cores=16,
             # The record states the figure the allocation was given, which is the job's resident term.
-            memory_mb=5120,
+            resident_mb=5120,
             output_log=str(batch_directory.joinpath("0000-Session-motion_energy-1.out")),
             error_log=str(batch_directory.joinpath("0000-Session-motion_energy-1.err")),
         )

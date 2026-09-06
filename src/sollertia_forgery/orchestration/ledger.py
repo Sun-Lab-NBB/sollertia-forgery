@@ -50,7 +50,7 @@ class RemoteSubmission:
     """The name of the processing unit on which this job operates."""
     cores: int = 1
     """The cores the allocation requested."""
-    memory_mb: int = 0
+    resident_mb: int = 0
     """The resident memory estimate that sized this allocation, in megabytes. The scheduler packs a node by what each
     allocation declares and reclaims the shortfall from a job that declares less than it holds, so it is given the
     resident figure. The request itself is this figure rounded up to whole gigabytes and floored at one."""

@@ -941,7 +941,7 @@ def _submit_ordered_jobs(
                 unit_path=str(job.unit_path),
                 unit_name=job.name,
                 cores=job.core_weight,
-                memory_mb=job.resident_mb,
+                resident_mb=job.resident_mb,
                 output_log=str(output_log),
                 error_log=str(error_log),
             )

@@ -96,7 +96,7 @@ _REMOTE_STATUS_DETAIL_FIELDS: tuple[str, ...] = (
     "claimed_allocation",
     "claim_state",
     "cores",
-    "memory_mb",
+    "resident_mb",
     "slurm_job_name",
     "unit_path",
     "output_log",
