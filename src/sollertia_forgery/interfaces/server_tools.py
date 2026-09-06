@@ -739,8 +739,9 @@ def pull_remote_path_tool(remote_path: str, destination: str) -> dict[str, Any]:
     """Copies a file or directory off the compute server onto this machine.
 
     The server holds every artifact a remote run produces, and the project-state readers mirror only the manifest, the
-    job table, and the plan. This carries anything else back, which covers a session's processed data, one feather, and
-    the standard output and error a batch's allocations wrote.
+    job table, and the plan. Carries anything else back, which covers a session's processed data, one feather, and the
+    standard output and
+    error a batch's allocations wrote.
 
     A directory is copied whole, with its tree beneath it. The copy lands inside the destination directory under the
     remote path's own final component, and the destination is created when it does not exist.

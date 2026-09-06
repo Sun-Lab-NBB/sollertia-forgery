@@ -130,8 +130,9 @@ _RESOURCE_SEMI_FIELDS: tuple[str, ...] = (
     "resident_mb",
 )
 """The job fields a semi-detail resource listing carries, which are the job's identity, the unit it reads, and its
-planned figures. The unit path rides every row because a job identifier derives from the job name and the specifier
-alone, so the units of one call share the identifier of the same stage and nothing else in the row separates them."""
+planned figures. The unit path rides every row, because a job identifier derives from the job name and the specifier
+alone. The units of one call therefore share the identifier of the same stage, and nothing else in the row separates
+them."""
 
 _RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "options")
 """The job fields detail adds, naming the job's prerequisite jobs and the parameters it would use."""
@@ -391,10 +392,9 @@ def execute_jobs_tool(
         named. Returns an error as well when the named batches mix hosts, when every prepared job is blocked or already
         succeeded, and when no recorded descriptor builds into a job. A local dispatch also returns an error when a
         batch is already running in this process, since one pool holds one batch, and when the recorded state of the
-        dispatched jobs cannot be cleared. A remote dispatch reports each of its
-        own steps as itself. It returns an error when the server cannot be reached, when the reconciliation cannot
-        resolve what already runs, when the host refuses to clear the dispatched jobs' records, and when the scheduler
-        rejects the submission.
+        dispatched jobs cannot be cleared. A remote dispatch reports each of its own steps as itself. It returns an
+        error when the server cannot be reached, when the reconciliation cannot resolve what already runs, when the
+        host refuses to clear the dispatched jobs' records, and when the scheduler rejects the submission.
     """
     try:
         documents, missing = read_prepared_batches(batch_ids=batch_ids)
@@ -1227,15 +1227,20 @@ def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
     """Renders one reconciled job as the descriptor a submission dispatches.
 
     Notes:
-        Both memory figures are carried, because the descriptor is read back into a job before it is submitted and the
-        scheduler is given the resident one. Rendering the anonymous figure alone leaves the read-back falling to its
-        own default and every allocation requesting the anonymous term.
+            Both memory figures are carried, because the descriptor is read back into a job before it is submitted and
+            the
+            scheduler is given the resident one. Notes:
+            Both memory figures are carried, because the descriptor is read back into a job that the read-back requires
+            both of, and the scheduler is given the resident one.
+
+    Or, avoiding the stranded preposition: "Both memory figures are carried, because the read-back requires each of
+    them and the scheduler is given the resident one."
 
     Args:
-        job: The job to render.
+            job: The job to render.
 
     Returns:
-        The job descriptor.
+            The job descriptor.
     """
     return {
         "job_id": job.job_id,

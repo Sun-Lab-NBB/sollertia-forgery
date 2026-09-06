@@ -119,8 +119,8 @@ def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
 
     depth = _UNIT_DEPTHS[unit_kind]
 
-    # Indexing the parents of a path that holds fewer than this many raises an IndexError, which every caller of this
-    # function guards against as a ValueError, so the shallow path is refused here under the documented error instead.
+    # Indexing the parents of a path shallower than this depth raises an IndexError, and every caller documents a
+    # ValueError for this failure, so a shallow path is refused here under the documented error.
     shallow = sorted(str(unit_path) for unit_path in unit_paths if len(unit_path.parents) < depth)
     if shallow:
         message = (

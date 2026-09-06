@@ -111,15 +111,17 @@ always covers the whole batch, so a batch of any size reports its totals while n
 remediation report is uncapped instead, because it is the last moment at which those identifiers can be read at all."""
 
 _FINISHED_BATCH_GUIDANCE: str = (
-    "Read what a finished run produced from the outcome closure recorded on the batch, which the MCP tools "
-    "get_processing_status_tool and read_project_jobs_tool report with host='remote'."
+    "Read what a finished run produced from the outcome closure recorded on the batch, which "
+    "get_processing_status_tool reports and 'slf server batches' prints, or from the project's own job artifact, "
+    "which the MCP tool read_project_jobs_tool reads with host='remote'."
 )
 """The guidance appended wherever a caller reaches for a batch the ledger no longer holds. The ledger names outstanding
 allocations alone, so the answer for a finished batch is its recorded outcome or the project's own job artifact.
 
 Notes:
-    The command line raises this same guidance, and neither reader it names carries a command of its own, so both are
-    marked as MCP tools. A caller reading this in a terminal otherwise searches for a command that does not exist.
+    The outcome reader is named as both a tool and a command, because one function answers each of them. The job
+    artifact reader is marked as an MCP tool alone, because it carries no command, and a caller reading this in a
+    terminal would otherwise search for one that does not exist.
 """
 
 _NOTHING_OUTSTANDING: str = f"No remote batch is outstanding. {_FINISHED_BATCH_GUIDANCE}"

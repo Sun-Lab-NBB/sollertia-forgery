@@ -14,8 +14,10 @@ from cindra import (
     SPAWNED_CHILD_MEMORY_MB,
     MultiRecordingJobNames,
     SingleRecordingJobNames,
+    parse_plane_specifier,
     size_multi_recording_job,
     size_single_recording_job,
+    resolve_recording_geometry,
 )
 import pandas as pd
 import polars as pl
@@ -117,20 +119,29 @@ _REGION_LINES: list[list[int]] = [[1, 100], [101, 300], []]
 """The per-region line spans declared by the synthetic acquisition parameters. The parameters name no roi_number, so
 cindra reads the recording as single-region and discards every span."""
 
+_BINARY_ELEMENT_BYTES: int = 2
+"""The bytes one pixel occupies in a plane binary, which is the imaging library's default element width."""
+
+_MAPPING_STAGES: frozenset[SingleRecordingJobNames] = frozenset(
+    {SingleRecordingJobNames.BINARIZE, SingleRecordingJobNames.REGISTER, SingleRecordingJobNames.PROCESS}
+)
+"""The two-photon stages that hold a plane binary open, stated here rather than imported, so a stage wrongly added to
+or dropped from the model's own roster fails the comparison instead of moving both sides of it together."""
+
 _SAMPLING_RATE: float = 10.0
 """The volume acquisition rate declared by the synthetic acquisition parameters, from which cindra derives a per-plane
 rate of half this figure across the two declared planes."""
 
 _CHECKSUM_READER_MEMORY_MB: int = 520
 """The resident memory the checksum model charges one reader, which is the cost of one child spawned inside this
-package plus the eight-megabyte buffer that child streams every file through. The tunable terms of a model this
-package owns are stated here rather than imported back out of it, so that retuning one moves this expectation instead
-of moving both sides of the comparison together."""
+package plus the eight-megabyte buffer through which that child streams every file. The tunable terms of a model
+this package owns are stated here rather than imported back out of it, so that retuning one moves this expectation
+instead of moving both sides of the comparison together."""
 
 _UNDERSTATED_CHECKSUM_READER_MEMORY_MB: int = 208
 """The figure one reader would carry were it modeled as the bare interpreter a dependency charges rather than as the
-child of this package that it is. The comparison below names
-it so the assertion states which candidate model the reported memory came from."""
+child of this package that it is. The comparison below names it so the assertion states which candidate model the
+reported memory came from."""
 
 _CHECKSUM_WIDE_CORES: int = 16
 """The cores the wider of the two synthetic checksum jobs declares. Every estimate is reported at a whole gigabyte,
@@ -142,8 +153,8 @@ _CHECKSUM_WIDE_MEMORY_MB: int = 10240
 does not move with the model it checks."""
 
 _UNDERSTATED_CHECKSUM_WIDE_MEMORY_MB: int = 5120
-"""The memory the same job would report were its readers modeled below the shared spawned-child cost, which is one
-whole gigabyte less than the memory those readers hold."""
+"""The memory the same job would report were its readers modeled as the bare interpreter a dependency charges, which
+is half the memory those readers hold."""
 
 _ASSEMBLY_SINGLE_DAY_COLUMNS: int = 4
 """The fluorescence columns the per-session assembly model charges at the recording's own detected region count,
@@ -785,7 +796,8 @@ def cindra_single_recording_footprint(
         specifier: The job's tracker specifier, which names a plane for the per-plane stages.
 
     Returns:
-        cindra's own width for the stage and its memory, rounded up to the whole gigabyte on which every estimate lands.
+        cindra's own width for the stage, its memory rounded up to the whole gigabyte on which every estimate lands,
+        and the plane binaries a mapping stage holds.
     """
     resolve_configuration = resolve_single_recording_configuration_resolver(system=session.acquisition_system)
     locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
@@ -796,15 +808,28 @@ def cindra_single_recording_footprint(
         configuration=resolve_configuration(session),
         data_path=locate_two_photon_data(session=session),
     )
+    # The mapped extent is derived here from cindra's geometry rather than taken from the pass under test, so a pass
+    # that selects the wrong plane, drops the second channel, or maps a stage that holds nothing fails the comparison.
+    geometry = resolve_recording_geometry(
+        output_root=session.processed_data_path,
+        data_path=locate_two_photon_data(session=session),
+        ignored_file_names=tuple(resolve_configuration(session).file_io.ignored_file_names),
+    )
+    mapped_bytes = 0
+    if job_name in _MAPPING_STAGES:
+        index = parse_plane_specifier(specifier=specifier)
+        channels = 2 if geometry.two_channels else 1
+        # The conversion stage writes every binary at the imaging library's own element width, so the expectation
+        # states that width rather than the width the source carried.
+        mapped_bytes = sum(
+            plane.height * plane.width * plane.frame_count * _BINARY_ELEMENT_BYTES * channels
+            for plane in geometry.planes
+            if index is None or plane.index == index
+        )
     return JobFootprint(
         cores=sizing.cores,
         memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb),
-        mapped_mb=footprints_module._mapped_plane_megabytes(
-            job_name=job_name.value,
-            specifier=specifier,
-            output_root=session.processed_data_path,
-            data_path=locate_two_photon_data(session=session),
-        ),
+        mapped_mb=_bytes_to_megabytes(byte_count=mapped_bytes),
     )
 
 
@@ -826,7 +851,8 @@ def cindra_multi_recording_footprint(
             bound from the per-recording region counts.
 
     Returns:
-        cindra's own width for the stage and its memory, rounded up to the whole gigabyte on which every estimate lands.
+        cindra's own width for the stage, its memory rounded up to the whole gigabyte on which every estimate lands,
+        and the plane binaries a mapping stage holds.
     """
     resolve_configuration = resolve_multi_recording_configuration_resolver(system=dataset.acquisition_system)
     sizing = size_multi_recording_job(
@@ -2813,7 +2839,7 @@ def test_a_discovery_job_maps_none_of_the_recordings_it_spans(tmp_path: Path) ->
     )
 
     assert discovery == 0
-    # The conversion rounds a byte count up to whole megabytes, so three mapped megabytes are charged as four.
+    # The conversion truncates to whole megabytes and adds one, so a three-megabyte binary is charged as four.
     assert extraction == 4
 
 

@@ -78,8 +78,8 @@ _BLINK_FRACTION: float = 0.5
 _MINIMUM_FIT_EXTENT_PX: float = 1e-6
 """The smallest fitted ellipse extent, in pixels, a division may treat as a measurement rather than as a collapsed
 fit. A ring whose points all fall on one position fits an extent of least-squares round-off, on the order of a
-trillionth of a pixel at face-camera coordinate magnitudes, rather than an exact zero, so a guard reading only for an
-exact zero divides one round-off residue by another and reports their meaningless ratio. This floor sits six orders of
+trillionth of a pixel at face-camera coordinate magnitudes. A guard reading only for an exact zero therefore divides
+one round-off residue by another and reports their meaningless ratio. This floor sits six orders of
 magnitude above that round-off and six below the smallest extent a real ring spans, so it rejects every collapsed fit
 while leaving every well-formed one untouched."""
 

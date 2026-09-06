@@ -796,6 +796,8 @@ def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
         "unit_name": planned.name,
         "job_count": 2,
         "summed_memory_mb": 4608,
+        # Both figures are totaled, because the caller sizing a scheduler submission budgets against the resident one.
+        "summed_resident_mb": 6656,
     }
     assert summarized[1]["job_count"] == 0
     assert "holds no job for this unit" in summarized[1]["error"]

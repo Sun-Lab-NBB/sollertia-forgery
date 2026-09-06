@@ -339,10 +339,9 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
     """Builds one job descriptor into the pending job that both backends dispatch.
 
     Args:
-        job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, ``memory_mb``, ``resident_mb``, and
-            optionally
-            ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``,
-            ``options``, ``status``, and ``executor_id``.
+        job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, ``memory_mb``, and ``resident_mb``, and
+            optionally ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``,
+            ``prerequisite_ids``, ``options``, ``status``, and ``executor_id``.
 
     Returns:
         The pending job.

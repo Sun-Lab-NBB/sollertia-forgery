@@ -372,8 +372,8 @@ def test_a_submission_requests_the_cores_and_memory_the_job_was_prepared_at() ->
 
     assert "#SBATCH --cpus-per-task=16" in script
     # The scheduler packs a node by what each allocation declares, so it is given the job's resident figure of 6024
-    # megabytes rather than its anonymous 5000, and that rounds up to six gigabytes because understating a request
-    # leaves the host reclaiming the shortfall from a job that is holding it.
+    # megabytes rather than its anonymous 5000. That rounds up to six gigabytes, because a host reclaims the shortfall
+    # of an understated request from a job that is holding it.
     assert "#SBATCH --mem=6G" in script
     assert "#SBATCH --time=08:00:00" in script
 
@@ -827,7 +827,7 @@ def test_units_spanning_two_projects_are_rejected() -> None:
 
 
 def test_a_unit_path_holding_too_few_parents_is_rejected() -> None:
-    """Verifies that a path shallower than its kind sits below its project is refused under the documented error."""
+    """Verifies that a path holding fewer parents than its unit kind requires is refused under the documented error."""
     with pytest.raises(ValueError, match="must name at least that many parents"):
         resolve_project_root(unit_paths=[Path("/2024_11_04")], unit_kind="session")
 
@@ -1105,7 +1105,7 @@ def test_preparing_a_batch_covering_no_unit_is_rejected() -> None:
 
 def test_a_batch_that_queued_nothing_is_still_recorded(connected_server: Server) -> None:
     """Verifies that a batch reaches the ledger before its first allocation, so a submission the host kills partway
-    through leaves a record the remote tools still answer for.
+    through leaves a record the remote tools still resolve.
     """
     assert submit_batch(server=connected_server, jobs=[], batch_id="batch01") == []
 
@@ -1335,6 +1335,31 @@ def test_mirroring_without_regeneration_pulls_the_artifacts_as_the_server_last_w
     assert [command for command in stub_ssh_transport.commands if not command.startswith("find -L ")] == []
 
 
+def test_a_submission_the_scheduler_refuses_outright_still_leaves_a_batch_the_ledger_names() -> None:
+    """Verifies that the batch reaches the ledger before the first allocation is queued, so a submission that queues
+    nothing at all still leaves a record the remote tools resolve.
+    """
+
+    class RefusingServer(StubServer):
+        """Stands in for a scheduler that refuses the first job it is offered."""
+
+        def submit_job(self, job: Job, *, verbose: bool = False) -> Job:  # noqa: ARG002
+            message = "The scheduler refused this allocation."
+            raise RuntimeError(message)
+
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
+
+    with pytest.raises(RuntimeError, match="refused this allocation"):
+        submit_batch(server=RefusingServer(), jobs=jobs, batch_id="batch01")
+
+    # The record is what the remote tools resolve the batch through, so it has to survive a submission that queued
+    # nothing. Writing it only on the way out would leave this batch invisible.
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    assert recorded.batch_id == "batch01"
+    assert recorded.submissions == []
+
+
 def test_the_placeholder_record_carries_forward_an_earlier_attempts_allocations(connected_server: Server) -> None:
     """Verifies that the record written before a submission merges rather than replaces, so re-running a batch the
     scheduler only partly accepted keeps the allocations the first attempt queued.
@@ -1343,8 +1368,16 @@ def test_the_placeholder_record_carries_forward_an_earlier_attempts_allocations(
     first = submit_batch(server=connected_server, jobs=jobs, batch_id="batch01")
     assert len(first) == 1
 
-    submit_batch(server=connected_server, jobs=[], batch_id="batch01")
+    # The second attempt queues a different job of the same batch, so the merge is what keeps the first allocation.
+    # A placeholder that replaced instead of merging would drop it here.
+    second = submit_batch(
+        server=connected_server,
+        jobs=[build_descriptor(job_id="rename", job_name="camera_timestamp_rename")],
+        batch_id="batch01",
+    )
 
     recorded = read_ledger().resolve_batch(batch_id="batch01")
     assert recorded is not None
-    assert [entry.slurm_job_id for entry in recorded.submissions] == [first[0].slurm_job_id]
+    assert sorted(entry.slurm_job_id for entry in recorded.submissions) == sorted(
+        [first[0].slurm_job_id, second[0].slurm_job_id]
+    )

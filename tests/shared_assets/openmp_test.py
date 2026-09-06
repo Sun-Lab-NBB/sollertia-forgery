@@ -311,7 +311,7 @@ def test_the_post_link_verification_runs_a_fresh_interpreter(monkeypatch: pytest
     """
     # The runtime the module names is a macOS dylib, so loading it here would assert a precondition of the host rather
     # than the behavior of the call. The substituted script answers with the exit status the call reads, and answers
-    # it from a process this one is not, which is the whole of what the verification establishes.
+    # it from a process other than this one, which is the whole of what the verification establishes.
     monkeypatch.setattr(
         openmp_module, "_VERIFICATION_SCRIPT", f"import os; raise SystemExit(0 if os.getpid() != {os.getpid()} else 1)"
     )

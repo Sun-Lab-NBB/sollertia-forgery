@@ -350,8 +350,8 @@ remote half of every job, so it holds this library and the processing libraries 
 ### Running a Remote Batch
 
 The remote path runs the same prepared jobs that the local batch engine runs, so one job graph, one core table, and one
-memory model serve both, each backend taking the memory figure it schedules on. A run has three steps, each exposed as a
-Model Context Protocol tool and carried out on the server by the `slf` CLI:
+memory model serve both. The local engine schedules on the anonymous figure and the remote engine on the resident one.
+A run has three steps, each exposed as a Model Context Protocol tool and carried out on the server by the `slf` CLI:
 
 1. **Prepare.** `prepare_batch_tool` with `host='remote'` refreshes the plan and state tables on the server and pulls
    them, which is one state table per project for a session batch and one per named dataset for a dataset batch.
@@ -363,12 +363,11 @@ Model Context Protocol tool and carried out on the server by the `slf` CLI:
    on the server. The plan and state records join on the job identifier and become one descriptor per job, registered
    under a batch identifier.
 2. **Submit.** `execute_jobs_tool` renders each job as its own shell script, transfers it over SFTP, and submits it as
-   its own SLURM allocation, requesting the resident memory that job's own estimate reports, in dependency order. It
+   its own SLURM allocation, requesting the resident memory the job's own estimate reports, in dependency order. It
    takes no host of its own, because a batch runs where it was prepared. Each script carries an SBATCH directive block,
-   activates the configured conda
-   environment, and then runs the `slf` command for its job. Each job declares an `afterok` dependency on the
-   allocations of the upstream jobs held by the batch, so the scheduler sequences the graph and the batch finishes with
-   nothing running locally.
+   activates the configured conda environment, and then runs the `slf` command for its job. Each job declares an
+   `afterok` dependency on the allocations of the upstream jobs held by the batch, so the scheduler sequences the
+   graph and the batch finishes with nothing running locally.
 3. **Read.** `get_processing_status_tool` with `host='remote'` reports what the scheduler observed while a run is in
    flight. `generate_project_manifest_tool` and `generate_dataset_state_tool`, each with `host='remote'`, regenerate the
    project's manifest, job table, and dataset state on the server. Every read tool called with `host='remote'` then
@@ -544,7 +543,7 @@ The server tools author the compute server's credentials and read what that serv
 | `write_server_configuration_tool` | Creates or replaces the server configuration YAML in that same configuration subdirectory                  |
 | `discover_remote_project_tool`    | Enumerates the sessions and forged datasets a project holds on the compute server, with their server paths |
 | `read_scheduler_jobs_tool`        | Reads the compute server's own record of its allocations, queued or already settled                        |
-| `pull_remote_path_tool`           | Copies a file or directory off the compute server onto this machine, a directory whole with its tree       |
+| `pull_remote_path_tool`           | Copies a file or directory off the compute server onto this machine, taking a directory whole |
 
 ### Skills
 

@@ -126,11 +126,12 @@ Notes:
     costs several times the bare interpreter that ``SPAWNED_CHILD_MEMORY_MB`` charges. That figure describes a child
     holding nothing but the interpreter, and the library exporting it opens no pool of its own, so a pool whose
     children carry this package's own imports is measured here instead. A sixteen-worker job charged the bare figure
-    was allocated 6 GB against a measured peak near 10 GB, which the scheduler's memory cgroup answered by killing it.
+    was allocated 6 GB against a measured anonymous peak of 6.4 GB, which the scheduler's memory cgroup answered by
+    killing it.
 """
 
 _DEPENDENCY_CHILD_SURPLUS_MB: int = _SPAWNED_SLF_CHILD_MEMORY_MB - SPAWNED_CHILD_MEMORY_MB
-"""The memory a dependency's own sizing pass leaves unmodelled for each child its stage spawns inside this package.
+"""The memory a dependency's own sizing pass leaves unmodeled for each child its stage spawns inside this package.
 
 Notes:
     A dependency sizes its stage against the interpreter that dependency alone fills, which is the whole model while
@@ -144,8 +145,9 @@ _RESIDENT_ESTIMATE_TOLERANCE: float = 1.10
 """The margin every resident estimate carries above the terms it sums.
 
 Notes:
-    The mapped term is derived from the geometry the acquisition configured rather than measured off the files a
-    stage writes, so it lands within a couple of percent of the extent either way. A stage whose mapped term dominates
+    A two-photon stage's mapped term is derived from the geometry the acquisition configured rather than measured off
+    the binaries the conversion writes, so it lands within a couple of percent of the extent either way, while the
+    cross-recording term is measured off those binaries and carries no such error. A stage whose mapped term dominates
     its anonymous one therefore inherits that error directly, and the conversion stage measured four percent of
     headroom without this margin. The margin holds every stage above ten percent, which is the floor a resident figure
     is held to because the host answers a shortfall by stalling the job rather than by failing it.
@@ -158,6 +160,11 @@ _PLANE_MAPPING_STAGES: frozenset[SingleRecordingJobNames] = frozenset(
 
 _TWO_CHANNEL_COUNT: int = 2
 """The channels a recording holds when its acquisition configured a second one, which doubles every plane binary."""
+
+_PLANE_BINARY_ELEMENT_BYTES: int = 2
+"""The bytes one pixel occupies in a plane binary. The conversion stage builds every binary at the imaging library's
+default element width whatever the width its source carried, so the extent a later stage maps follows this figure
+rather than the source geometry's own."""
 
 _PLANE_BINARY_PATTERN: str = "*_data.bin"
 """The glob matching the binarized plane files the imaging library writes, which are the files a cross-recording
@@ -199,7 +206,8 @@ _CHECKSUM_READER_MEMORY_MB: int = _SPAWNED_SLF_CHILD_MEMORY_MB + _CHECKSUM_CHUNK
 """The resident memory one checksum worker holds.
 
 Notes:
-    The pool that opens the workers is spawn-started and it is opened here, so each worker re-imports this package
+    The pool that opens the workers is spawn-started inside the data-structures library this package calls, and a
+    spawned child re-runs this package's own entry point as its main module, so each worker re-imports this package
     rather than the library exporting the bare spawned-child figure, and each holds its own read buffer above that.
     Charging the bare figure left an eight-worker job modeled at 3072 MB against a measured 2966 MB of anonymous
     memory, which is under four percent of headroom on the one term a scheduler kills a job over.
@@ -322,7 +330,8 @@ class JobFootprint:
 
         The mapped term is the one field a dependency's record does not carry, because a dependency sizes the memory
         its stage allocates rather than the pages the host holds resident behind it. It stays zero for every stage
-        that reads its input through the file interface, and a stage that maps its input states the bytes it maps.
+        that reads its input through the file interface, and for the assembly stage, whose maps are read once and
+        released rather than held. A stage that holds a map open for the whole of its run states the bytes it maps.
     """
 
     cores: int
@@ -330,7 +339,7 @@ class JobFootprint:
     memory_mb: int
     """The anonymous memory the job holds at its peak, in megabytes, which is the term a local pool schedules on."""
     mapped_mb: int = 0
-    """The bytes the job memory-maps, in megabytes, which stay resident behind it without being anonymous."""
+    """The file-backed memory the job maps, in megabytes, which stays resident behind it beside the anonymous term."""
 
     @property
     def resident_mb(self) -> int:
@@ -406,8 +415,10 @@ def size_session_jobs(
         bound those jobs share, and the model that charges it names what it would take to make it per-job.
 
         Every term is read from the session's raw acquisition data, so a footprint is available before any stage has
-        run. Estimates cover anonymous memory, the term that forces a host to swap and a scheduler to kill a job, so
-        the reclaimable pages a memory-mapped stage leaves resident are excluded.
+        run. Each footprint carries two figures. The anonymous one covers the memory a job allocates, which is the
+        term that forces a host to swap and a scheduler to kill a job, and a local process pool budgets against it.
+        The resident one adds the pages a mapping stage holds, which a scheduler is given because it packs a node by
+        what each allocation declares and reclaims the shortfall from a job declaring less than it holds.
 
         The stages that a dependency owns are sized by that dependency's own sizing pass, which reads the job's input
         once and answers both halves of its model from that read. It picks the width at which the stage actually
@@ -522,12 +533,13 @@ def size_dataset_jobs(
         that carry two-photon data.
 
         Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
-        per job. The two cross-recording stages belong to cindra, so both halves of their figures are cindra's own
-        sizing pass, which refuses a dataset that any recording leaves short rather than sizing it from the recordings
-        that happen to be complete. That refusal propagates, because a stage that cindra will not size is a stage the
-        dataset cannot run until its recordings are complete. The recording set handed to that pass is the set the
-        dataset names. An animal whose sessions this host does not all hold is refused here on the same terms rather
-        than measured over the subset the host happens to carry.
+        per job. The two cross-recording stages belong to cindra, so the cores and the anonymous memory of their
+        figures come from cindra's own sizing pass, while the bytes the extraction stage maps are measured here off
+        the recording's binaries. That pass refuses a dataset that any recording leaves short rather than sizing it
+        from the recordings that happen to be complete, and the refusal propagates, because a stage cindra will not
+        size is a stage the dataset cannot run until its recordings are complete. The recording set handed to that
+        pass is the set the dataset names. An animal whose sessions this host does not all hold is refused here on the
+        same terms rather than measured over the subset the host happens to carry.
 
         The per-session assembly stage is this package's own, so no dependency models it and its projection stays
         here. Its width holds one value whatever data it reads, so it reports the allocation its type declared. Which
@@ -1073,21 +1085,33 @@ def _size_two_photon_job(
         cores=sizing.cores,
         memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb),
         mapped_mb=_mapped_plane_megabytes(
-            job_name=job_name, specifier=specifier, output_root=output_root, data_path=data_path
+            job_name=job_name,
+            specifier=specifier,
+            output_root=output_root,
+            configuration=configuration,
+            data_path=data_path,
         ),
     )
 
 
-def _mapped_plane_megabytes(job_name: str, specifier: str, output_root: Path, data_path: Path | None) -> int:
+def _mapped_plane_megabytes(
+    job_name: str,
+    specifier: str,
+    output_root: Path,
+    configuration: SingleRecordingConfiguration,
+    data_path: Path | None,
+) -> int:
     """Resolves the plane binaries one two-photon stage memory-maps, in megabytes.
 
     Notes:
         The three stages that hold a plane binary open map every byte of it. The conversion stage creates one map per
         plane and writes the whole recording through it, and the two per-plane stages map the one plane their
-        specifier names. A stage denied those pages does not fail, it stalls, because the host answers the shortfall
-        by writing dirty pages back synchronously. Measurement puts the conversion stage at 67 seconds holding its
-        binaries against 58 minutes to 2 hours charged a gigabyte, for the same five and a half minutes of processor
-        time, which is what makes these bytes a demand rather than a convenience.
+        specifier names. A stage denied those pages stalls, because the host answers the shortfall by writing dirty
+        pages back
+        synchronously. Measurement puts the conversion stage at 67 seconds while it holds its binaries. The same stage
+        charged a
+        gigabyte takes 58 minutes to 2 hours for the same five and a half minutes of processor time, which makes
+        these bytes a demand rather than a convenience.
 
         The extent is derived from the acquisition metadata and one source file header, so it answers before the
         conversion stage has written anything. That reading reports the frame count the acquisition configured, which
@@ -1100,6 +1124,8 @@ def _mapped_plane_megabytes(job_name: str, specifier: str, output_root: Path, da
         job_name: The tracker job name identifying the stage.
         specifier: The plane specifier for a per-plane stage, empty for the whole-recording stages.
         output_root: The output root the recording's cindra configuration was given.
+        configuration: The recording's resolved processing configuration, whose excluded source files the geometry
+            read leaves out, so this figure spans the frames the conversion stage actually writes.
         data_path: The raw imaging directory from which the geometry is read.
 
     Returns:
@@ -1110,12 +1136,16 @@ def _mapped_plane_megabytes(job_name: str, specifier: str, output_root: Path, da
         return 0
 
     # An unreadable acquisition resolves to no plane at all, so the sum below answers zero without a guard of its own.
-    geometry = resolve_recording_geometry(output_root=output_root, data_path=data_path)
+    geometry = resolve_recording_geometry(
+        output_root=output_root,
+        data_path=data_path,
+        ignored_file_names=tuple(configuration.file_io.ignored_file_names),
+    )
     index = parse_plane_specifier(specifier=specifier)
     planes = tuple(plane for plane in geometry.planes if index is None or plane.index == index)
     channels = _TWO_CHANNEL_COUNT if geometry.two_channels else 1
     mapped = sum(
-        plane.height * plane.width * plane.frame_count * geometry.source_element_bytes * channels for plane in planes
+        plane.height * plane.width * plane.frame_count * _PLANE_BINARY_ELEMENT_BYTES * channels for plane in planes
     )
     return _bytes_to_megabytes(byte_count=mapped)
 
@@ -1132,7 +1162,9 @@ def _size_multi_recording_job(
 
     Notes:
         Both cross-recording stages read every recording of the animal over which they run, so the whole recording set
-        is handed to cindra whichever stage is being sized. Both halves of the figure come back from that one read.
+        is handed to cindra whichever stage is being sized. Both halves of cindra's own figure come back from that one
+        read, and the mapped term is resolved here from the
+        plane binaries the recordings hold.
 
         A set that any recording leaves short draws a refusal from cindra rather than a figure sized from the
         recordings that happen to be complete, and that refusal propagates. A dataset whose recordings carry no
@@ -1384,12 +1416,14 @@ def _mapped_recording_megabytes(job_name: MultiRecordingJobNames, specifier: str
     Notes:
         The extraction stage reads its recording's plane binaries through a memory map, so every byte of them stays
         resident behind the job while it runs. Measurement puts the resident file-backed term of that stage at 99% of
-        those binaries, against an anonymous term under a tenth of it, which is what makes the mapped bytes the figure
-        that decides how many of these jobs a host schedules at once.
+        those binaries, against an anonymous term under a tenth of it. The mapped bytes are therefore the figure that
+        decides how many of these jobs a host schedules at once.
 
         The discovery stage reads the combined traces of every recording it spans through the file interface, so it
-        maps none of them and is charged nothing here. A recording whose binaries are absent is charged nothing
-        either, because the stage that writes them is scheduled ahead of this one and the plan is read before it runs.
+        maps none of them and is charged nothing here. A recording whose binaries have been removed after
+        processing is the one input this pass cannot recover, since the stage that wrote them belongs to a pipeline
+        that has already completed. Charging it nothing would reserve a tenth of what the job holds, so it is refused
+        here on the terms every other unreadable input is refused.
 
     Args:
         job_name: The cindra stage the job runs.

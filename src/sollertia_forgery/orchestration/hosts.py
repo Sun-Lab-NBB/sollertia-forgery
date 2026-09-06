@@ -161,7 +161,8 @@ class LocalHost:
 
         Returns:
             One entry per named unit, carrying its ``unit_path``, ``unit_name``, ``job_count``, and
-            ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. An
+            ``summed_memory_mb``, and ``summed_resident_mb``, or its ``unit_path``, a ``job_count`` of zero, and the
+            ``error`` that stopped it. An
             entry whose plan recorded a sizing refusal also carries ``unsized_jobs``, mapping each refusal to the
             reason it gave. A refusal raised for one job is keyed by its pipeline and job, and a refusal that ended a
             pipeline's one-pass sizing is keyed by that pipeline and ``all jobs``.
@@ -180,6 +181,7 @@ class LocalHost:
                 "unit_name": unit_plan.unit_name,
                 "job_count": len(unit_plan.entries),
                 "summed_memory_mb": sum(entry.memory_mb for entry in unit_plan.entries),
+                "summed_resident_mb": sum(entry.resident_mb for entry in unit_plan.entries),
             }
             if unit_plan.unsized_jobs:
                 summary["unsized_jobs"] = dict(unit_plan.unsized_jobs)
@@ -408,7 +410,8 @@ class RemoteHost:
 
         Returns:
             One entry per named unit, carrying its ``unit_path``, ``unit_name``, ``job_count``, and
-            ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it.
+            ``summed_memory_mb``, and ``summed_resident_mb``, or its ``unit_path``, a ``job_count`` of zero, and
+            the ``error`` that stopped it.
 
         Raises:
             RuntimeError: If the server-side commands fail.
@@ -741,6 +744,7 @@ def _summarize_planned_units(
                 "unit_name": unit_path.name,
                 "job_count": len(planned),
                 "summed_memory_mb": sum(int(row["memory_mb"]) for row in planned),
+                "summed_resident_mb": sum(int(row["resident_mb"]) for row in planned),
             }
         )
     return summarized
