@@ -83,3 +83,23 @@ def resolve_readable_project(project_path: str, host: str) -> Path:
     with connect_to_server() as server:
         sync_project_state(server=server, project=project, local_directory=local_directory, regenerate=False)
     return local_directory
+
+
+def resolve_reported_project_path(project_path: str, directory: Path, host: str) -> str:
+    """Resolves the project path a read tool reports back to its caller.
+
+    Notes:
+        A remote read opens the project's mirror, but the project itself sits on the server, and every write tool
+        takes the server path. Reporting the mirror under the key the caller filled with a server path would hand
+        back a path that names a different machine than the one it was given, so the caller's own argument is echoed
+        instead. The artifact keys beside it name the mirror, because the mirror is what the read opened.
+
+    Args:
+        project_path: The project path the caller supplied.
+        directory: The directory the read opened, which is the mirror for a remote read.
+        host: Either ``local`` for this machine or ``remote`` for the configured compute server.
+
+    Returns:
+        The path to report, which is the caller's own argument for a remote read and the opened directory otherwise.
+    """
+    return project_path if host == REMOTE_HOST_LABEL else str(directory)

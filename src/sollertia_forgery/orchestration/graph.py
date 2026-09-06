@@ -37,7 +37,13 @@ class PendingJob:
     is per job rather than per type, so two jobs of one type legitimately differ here, and dispatch only caps this
     width at what the executing host can supply."""
     memory_mb: int = 0
-    """The memory this job occupies while it runs, estimated from the data it will process."""
+    """The anonymous memory this job occupies while it runs, estimated from the data it will process. This is the
+    term a local process pool schedules on, because anonymous pages are the ones a host cannot reclaim under
+    pressure."""
+    resident_mb: int = 0
+    """The resident memory this job holds while it runs, which adds the pages it maps to the anonymous term. This is
+    the term SLURM schedules on, because the scheduler packs a node by the memory each allocation declares and a job
+    that declares less than it holds resident drives the node into reclaim."""
     prerequisite_ids: tuple[str, ...] = ()
     """The identifiers of the jobs that must succeed before this job may be dispatched. Resolved from the pipeline's
     own job ordering, and empty for a job that depends on nothing."""
@@ -333,9 +339,9 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
     """Builds one job descriptor into the pending job that both backends dispatch.
 
     Args:
-        job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, and ``memory_mb``, and optionally
-            ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``,
-            ``options``, ``status``, and ``executor_id``.
+        job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, ``memory_mb``, and ``resident_mb``, and
+            optionally ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``,
+            ``prerequisite_ids``, ``options``, ``status``, and ``executor_id``.
 
     Returns:
         The pending job.
@@ -353,6 +359,7 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         pipeline=job.get("pipeline", ""),
         core_weight=int(job["cores"]),
         memory_mb=int(job["memory_mb"]),
+        resident_mb=int(job["resident_mb"]),
         prerequisite_ids=tuple(job.get("prerequisite_ids", ())),
         options=dict(job.get("options") or {}),
         status=job.get("status") or "",
@@ -399,6 +406,7 @@ def _build_job_descriptor(
         "tracker_path": tracker_path,
         "cores": int(plan_row["cores"]),
         "memory_mb": int(plan_row["memory_mb"]),
+        "resident_mb": int(plan_row["resident_mb"]),
         "prerequisite_ids": [
             prerequisite for prerequisite in (plan_row["prerequisite_ids"] or []) if prerequisite in trackable_ids
         ],

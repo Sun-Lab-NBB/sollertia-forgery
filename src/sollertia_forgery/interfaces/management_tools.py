@@ -43,6 +43,7 @@ from .host_resolution import (
     HOST_LABELS,
     resolve_readable_project,
     unsupported_host_message,
+    resolve_reported_project_path,
 )
 
 _MANIFEST_DETAIL_FIELDS: tuple[str, ...] = ("notes",)
@@ -177,7 +178,7 @@ def read_project_manifest_tool(
 
     frame = pl.read_ipc(source=manifest_path, memory_map=True)
     response = ok_response(
-        project_path=str(directory),
+        project_path=resolve_reported_project_path(project_path=project_path, directory=directory, host=host),
         manifest_path=str(manifest_path),
         total_sessions=frame.height,
         breakdown=frame_breakdown(frame=frame, axes=MANIFEST_AXES),
@@ -276,7 +277,7 @@ def read_project_jobs_tool(
 
     frame = pl.read_ipc(source=jobs_path, memory_map=True)
     response = ok_response(
-        project_path=str(directory),
+        project_path=resolve_reported_project_path(project_path=project_path, directory=directory, host=host),
         jobs_path=str(jobs_path),
         total_jobs=frame.height,
         breakdown=frame_breakdown(frame=frame, axes=_JOB_AXES),
@@ -344,7 +345,7 @@ def get_manifest_status_tool(project_path: str, host: str = "local") -> dict[str
     jobs_path = project_jobs_path(project_directory=directory)
 
     response: dict[str, Any] = {
-        "project_path": str(directory),
+        "project_path": resolve_reported_project_path(project_path=project_path, directory=directory, host=host),
         "tracker_path": str(tracker_path),
         "manifest_path": str(manifest_path),
         "jobs_path": str(jobs_path),

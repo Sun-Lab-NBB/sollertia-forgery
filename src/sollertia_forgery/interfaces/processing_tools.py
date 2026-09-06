@@ -120,13 +120,22 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
 """The job fields detail adds, which are the resources the job occupies, its timing and provenance, its runtime
 parameters, and its prerequisite jobs."""
 
-_RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "cores", "memory_mb")
-"""The job fields a semi-detail resource listing carries, which are the job's identity and its planned figures. The unit
-path is left off a semi-detail row because the unit entry already names it, and detail adds it back for a caller
-reading one job closely."""
+_RESOURCE_SEMI_FIELDS: tuple[str, ...] = (
+    "job_id",
+    "job_name",
+    "specifier",
+    "unit_path",
+    "cores",
+    "memory_mb",
+    "resident_mb",
+)
+"""The job fields a semi-detail resource listing carries, which are the job's identity, the unit it reads, and its
+planned figures. The unit path rides every row, because a job identifier derives from the job name and the specifier
+alone. The units of one call therefore share the identifier of the same stage, and nothing else in the row separates
+them."""
 
-_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "unit_path", "options")
-"""The job fields detail adds, naming the unit the job reads, its prerequisite jobs, and the parameters it would use."""
+_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "options")
+"""The job fields detail adds, naming the job's prerequisite jobs and the parameters it would use."""
 
 _STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in ProcessingStatus)
 """The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the values
@@ -254,8 +263,8 @@ def inspect_job_resources_tool(
     A bare call reports the figures against which a batch is planned, alongside a ``breakdown`` naming every job type
     and how many of each the named sessions still have to run. A job that the units already recorded as succeeded, and a
     job that this run could not unblock, are both absent, so this reports what a batch would dispatch rather than the
-    whole universe. Naming a filter adds a page of jobs carrying their figures, and opting into detail adds the unit
-    each job reads, its prerequisite jobs, and the parameters it would use.
+    whole universe. Naming a filter adds a page of jobs carrying their figures and the unit each one reads, and opting
+    into detail adds its prerequisite jobs and the parameters it would use.
 
     Estimates each job's memory from the data it will process, so a long recording is not charged the same as a short
     one. The figures already carry the shared tolerance, so a caller plans a local batch against them or requests them
@@ -275,12 +284,14 @@ def inspect_job_resources_tool(
             every match.
         start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report the unit they read, their prerequisite jobs, and the
-            parameters they would use.
+        detailed: Determines whether the listed jobs report their prerequisite jobs and the parameters they would
+            use.
 
     Returns:
         A response dict with the ``pipeline`` inspected, the ``host`` that holds the data, ``total_units``, and a
-        ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``, and ``summed_memory_mb``.
+        ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``, ``summed_memory_mb``,
+        ``largest_job_resident_mb``, and ``summed_resident_mb``. A caller sizing this machine's pool budgets against
+        the anonymous totals, and a caller sizing a scheduler submission budgets against the resident ones.
         Carries a ``breakdown`` per job type and a ``units`` list naming each session and how many jobs it resolved.
         Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a
         filter is named or the listing is requested. For ``local`` it also carries this machine's ``total_memory_mb``
@@ -305,6 +316,8 @@ def inspect_job_resources_tool(
             "widest_job_cores": max((int(job["cores"]) for job in jobs), default=0),
             "largest_job_memory_mb": max((int(job["memory_mb"]) for job in jobs), default=0),
             "summed_memory_mb": sum(int(job["memory_mb"]) for job in jobs),
+            "largest_job_resident_mb": max((int(job["resident_mb"]) for job in jobs), default=0),
+            "summed_resident_mb": sum(int(job["resident_mb"]) for job in jobs),
         },
         breakdown={"job_name": count_values(values=[job["job_name"] for job in jobs])},
     )
@@ -372,15 +385,16 @@ def execute_jobs_tool(
         remote dispatch adds the ``batch_id`` under which its scripts and logs are filed, the ``batch_ids`` the
         submission covered, ``walltime_minutes``, and the ``batch_directory`` on the server. It also adds a
         ``withheld_jobs`` list naming each job it neither submitted nor adopted alongside the executor its tracker
-        claims, and a ``submissions`` list pairing each job with the allocation that runs it. Either host adds an
+        claims, and a ``submissions`` list pairing each job with the allocation that runs it, its ``cores``, and
+        the ``resident_mb`` that allocation requested. Either host adds an
         ``invalid_jobs`` list when a recorded descriptor could not be built into a job. Returns an error when the
         prepared-batch registry cannot be read, when an identifier resolves to no prepared batch, or when no batch is
         named. Returns an error as well when the named batches mix hosts, when every prepared job is blocked or already
         succeeded, and when no recorded descriptor builds into a job. A local dispatch also returns an error when a
-        batch is already running in this process, since one pool holds one batch. A remote dispatch reports each of its
-        own steps as itself. It returns an error when the server cannot be reached, when the reconciliation cannot
-        resolve what already runs, when the host refuses to clear the dispatched jobs' records, and when the scheduler
-        rejects the submission.
+        batch is already running in this process, since one pool holds one batch, and when the recorded state of the
+        dispatched jobs cannot be cleared. A remote dispatch reports each of its own steps as itself. It returns an
+        error when the server cannot be reached, when the reconciliation cannot resolve what already runs, when the
+        host refuses to clear the dispatched jobs' records, and when the scheduler rejects the submission.
     """
     try:
         documents, missing = read_prepared_batches(batch_ids=batch_ids)
@@ -796,8 +810,8 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
     Returns:
         A response dict with ``pipeline``, ``host``, ``total_paths`` removed, ``removed_bytes`` freed across every
         unit, and a ``removed`` list carrying each path and the bytes it held. Returns an error when a batch is running
-        locally, since removing the output of a job in flight would fail that job. It also returns an error when the
-        pipeline or the host is not supported, and when the host cannot carry out the removal.
+        in this process, since removing the output of a job in flight would fail that job. It also returns an error
+        when the pipeline or the host is not supported, and when the host cannot carry out the removal.
     """
     if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
@@ -809,7 +823,10 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: 
     running = state is not None and state.manager_thread is not None and state.manager_thread.is_alive()
     if host == LOCAL_HOST_LABEL and running:
         return error_response(
-            message="A batch is currently running. Wait for it to finish or cancel it before cleaning output."
+            message=(
+                "A batch is currently running in this process. Wait for it to finish or cancel it before cleaning "
+                "output."
+            )
         )
 
     try:
@@ -979,11 +996,21 @@ def _execute_local_batch(
     running = _LOCAL_RUN.state
     if running is not None and running.manager_thread is not None and running.manager_thread.is_alive():
         return error_response(
-            message="A batch is already running. Wait for it to finish or cancel it before starting another."
+            message=(
+                "A batch is already running in this process. Wait for it to finish or cancel it before starting "
+                "another."
+            )
         )
 
     reconciliation = reconcile_local_jobs(jobs=pending)
-    _reset_batch_jobs(host=host, jobs=reconciliation.resettable)
+
+    # The reset takes each unit's tracker lock, which a concurrent writer can hold past the acquisition timeout, so the
+    # dispatch reports that contention rather than raising out of the tool.
+    try:
+        _reset_batch_jobs(host=host, jobs=reconciliation.resettable)
+    except Exception as exception:
+        return error_response(message=f"Unable to clear the recorded state of the batch's jobs. {exception}")
+
     dispatchable = reconciliation.dispatchable
 
     core_budget = resolve_worker_count(requested_workers=core_budget_override, reserved_cores=RESERVED_CORES)
@@ -1140,7 +1167,16 @@ def _execute_remote_batch(
             for job in reconciliation.withheld
         ],
         submissions=[
-            {"job_id": submission.job_id, "slurm_job_id": submission.slurm_job_id, "job_name": submission.job_name}
+            {
+                "job_id": submission.job_id,
+                "slurm_job_id": submission.slurm_job_id,
+                "job_name": submission.job_name,
+                "specifier": submission.specifier,
+                "unit_path": submission.unit_path,
+                "unit_name": submission.unit_name,
+                "cores": submission.cores,
+                "resident_mb": submission.resident_mb,
+            }
             for submission in submissions
         ],
     )
@@ -1190,11 +1226,21 @@ def _close_finished_batches(server: Server, host: ExecutionHost, batch_id: str) 
 def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
     """Renders one reconciled job as the descriptor a submission dispatches.
 
+    Notes:
+            Both memory figures are carried, because the descriptor is read back into a job before it is submitted and
+            the
+            scheduler is given the resident one. Notes:
+            Both memory figures are carried, because the descriptor is read back into a job that the read-back requires
+            both of, and the scheduler is given the resident one.
+
+    Or, avoiding the stranded preposition: "Both memory figures are carried, because the read-back requires each of
+    them and the scheduler is given the resident one."
+
     Args:
-        job: The job to render.
+            job: The job to render.
 
     Returns:
-        The job descriptor.
+            The job descriptor.
     """
     return {
         "job_id": job.job_id,
@@ -1206,6 +1252,7 @@ def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
         "tracker_path": str(job.tracker_path),
         "cores": job.core_weight,
         "memory_mb": job.memory_mb,
+        "resident_mb": job.resident_mb,
         "prerequisite_ids": list(job.prerequisite_ids),
         "options": dict(job.options),
     }

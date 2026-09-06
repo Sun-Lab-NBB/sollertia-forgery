@@ -201,6 +201,7 @@ def _make_job(
             "tracker_path": str(tracker_path),
             "cores": 4,
             "memory_mb": 1024,
+            "resident_mb": 2048,
             "prerequisite_ids": list(prerequisite_ids),
             "options": {},
             "status": status,

@@ -14,8 +14,10 @@ from cindra import (
     SPAWNED_CHILD_MEMORY_MB,
     MultiRecordingJobNames,
     SingleRecordingJobNames,
+    parse_plane_specifier,
     size_multi_recording_job,
     size_single_recording_job,
+    resolve_recording_geometry,
 )
 import pandas as pd
 import polars as pl
@@ -76,6 +78,7 @@ from sollertia_forgery.orchestration.footprints import (
     _SINGLE_PRECISION_BYTES,
     _UNRESOLVED_FRAME_COUNT,
     _DECODER_BUFFER_MEMORY_MB,
+    _SPAWNED_PACKAGE_CHILD_MEMORY_MB,
     _ARCHIVE_DIRECTORY_BYTES_PER_MESSAGE,
     JobFootprint,
     _EnergyRecording,
@@ -89,6 +92,7 @@ from sollertia_forgery.orchestration.footprints import (
     _read_pose_table_shape,
     _size_motion_energy_job,
     _resolve_tracked_regions,
+    _dependency_child_surplus,
 )
 
 if TYPE_CHECKING:
@@ -115,32 +119,42 @@ _REGION_LINES: list[list[int]] = [[1, 100], [101, 300], []]
 """The per-region line spans declared by the synthetic acquisition parameters. The parameters name no roi_number, so
 cindra reads the recording as single-region and discards every span."""
 
+_BINARY_ELEMENT_BYTES: int = 2
+"""The bytes one pixel occupies in a plane binary, which is the imaging library's default element width."""
+
+_MAPPING_STAGES: frozenset[SingleRecordingJobNames] = frozenset(
+    {SingleRecordingJobNames.BINARIZE, SingleRecordingJobNames.REGISTER, SingleRecordingJobNames.PROCESS}
+)
+"""The two-photon stages that hold a plane binary open, stated here rather than imported, so a stage wrongly added to
+or dropped from the model's own roster fails the comparison instead of moving both sides of it together."""
+
 _SAMPLING_RATE: float = 10.0
 """The volume acquisition rate declared by the synthetic acquisition parameters, from which cindra derives a per-plane
 rate of half this figure across the two declared planes."""
 
-_CHECKSUM_READER_MEMORY_MB: int = 208
-"""The resident memory the checksum model charges one reader, which is the shared cost of one spawned child plus the
-eight-megabyte buffer that child streams every file through. The tunable terms of a model this package owns are
-stated here rather than imported back out of it, so that retuning one moves this expectation instead of moving both
-sides of the comparison together."""
+_CHECKSUM_READER_MEMORY_MB: int = 520
+"""The resident memory the checksum model charges one reader, which is the cost of one child spawned inside this
+package plus the eight-megabyte buffer through which that child streams every file. The tunable terms of a model
+this package owns are stated here rather than imported back out of it, so that retuning one moves this expectation
+instead of moving both sides of the comparison together."""
 
-_UNDERSTATED_CHECKSUM_READER_MEMORY_MB: int = 190
-"""The figure one reader would carry were it modeled below the shared spawned-child cost. The comparison below names
-it so the assertion states which candidate model the reported memory came from."""
+_UNDERSTATED_CHECKSUM_READER_MEMORY_MB: int = 208
+"""The figure one reader would carry were it modeled as the bare interpreter a dependency charges rather than as the
+child of this package that it is. The comparison below names it so the assertion states which candidate model the
+reported memory came from."""
 
 _CHECKSUM_WIDE_CORES: int = 16
 """The cores the wider of the two synthetic checksum jobs declares. Every estimate is reported at a whole gigabyte,
 and a reader's whole cost is a fraction of that quantum, so the two candidate reader figures land in one bucket at the
 narrower width and in different buckets only here."""
 
-_CHECKSUM_WIDE_MEMORY_MB: int = 5120
+_CHECKSUM_WIDE_MEMORY_MB: int = 10240
 """The memory the checksum model reports for the wider job, stated outright rather than recomputed, so the expectation
 does not move with the model it checks."""
 
-_UNDERSTATED_CHECKSUM_WIDE_MEMORY_MB: int = 4096
-"""The memory the same job would report were its readers modeled below the shared spawned-child cost, which is one
-whole gigabyte less than the memory those readers hold."""
+_UNDERSTATED_CHECKSUM_WIDE_MEMORY_MB: int = 5120
+"""The memory the same job would report were its readers modeled as the bare interpreter a dependency charges, which
+is half the memory those readers hold."""
 
 _ASSEMBLY_SINGLE_DAY_COLUMNS: int = 4
 """The fluorescence columns the per-session assembly model charges at the recording's own detected region count,
@@ -313,7 +327,7 @@ _SINGLE_CHUNK_FRAME_COUNT: int = 4
 """The frames the shorter synthetic recording holds, which is far below the shared chunk minimum, so the stage decodes
 it in the job's own process and opens no pool at all."""
 
-_WIDE_ENERGY_FRAME_PIXELS: int = 1280 * 1024
+_WIDE_ENERGY_FRAME_PIXELS: int = 2560 * 1440
 """The pixels one frame of the wider camera of the direct model comparison holds. The frame buffers are a small share
 of a decode worker's cost, so the two frames compared below are set far enough apart to report different whole
 gigabytes once every worker the allocation permits is open."""
@@ -325,11 +339,11 @@ _FULL_WIDTH_ENERGY_CORES: int = 52
 """The cores the direct model comparison declares. The frame term only clears a gigabyte boundary once enough decoders
 are open to multiply it, which is the width at which the recording set below is compared."""
 
-_WIDE_ENERGY_MEMORY_MB: int = 19456
+_WIDE_ENERGY_MEMORY_MB: int = 38912
 """The memory the motion-energy model reports for the wider frame at that width, stated outright rather than
 recomputed, so the expectation does not move with the model it checks."""
 
-_NARROW_ENERGY_MEMORY_MB: int = 18432
+_NARROW_ENERGY_MEMORY_MB: int = 37888
 """The memory the same model reports for the narrower frame at the same width, one whole gigabyte below the wider
 frame's, which is the figure a job charged the wrong camera's frame would report."""
 
@@ -337,10 +351,10 @@ _SINGLE_CHUNK_ENERGY_MEMORY_MB: int = 1024
 """The memory the same model reports for the narrower frame when the recording is too short to plan more than one
 decode chunk. The job decodes in its own process, so it holds one decoder and starts no child at all."""
 
-_FULL_CHUNK_ENERGY_MEMORY_MB: int = 6144
+_FULL_CHUNK_ENERGY_MEMORY_MB: int = 12288
 """The memory the same model reports for the same frame once the recording is long enough to fill every chunk the
-allocation permits. It is six times the single-chunk figure, which is what charging the allocation rather than the
-chunk plan reserved for every short clip a rig records."""
+allocation permits. It is twelve times the single-chunk figure, which is what charging the allocation rather than
+the chunk plan reserved for every short clip a rig records."""
 
 _UNCHUNKED_WIDE_FRAME_PIXELS: int = 52_500_000
 """The pixels one frame of the recording that proves a single-chunk job starts no child holds. One spawned child costs
@@ -673,7 +687,7 @@ def energy_memory(frame_pixels: int, frame_count: int, cores: int) -> int:
     chunks = cores if frame_count < 0 else len(_plan_chunks(frame_count=frame_count, workers=cores))
     if chunks == 1:
         return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB)
-    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB
+    per_worker = frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB
     return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + chunks * per_worker)
 
 
@@ -724,10 +738,14 @@ def camera_library_footprint(archive: Path) -> JobFootprint:
         archive: The log archive the extraction job reads.
 
     Returns:
-        The library's cores and its memory, rounded up to the whole gigabyte on which every estimate lands.
+        The library's cores and its memory, carrying the surplus this package's own children hold and
+        rounded up to the whole gigabyte on which every estimate lands.
     """
     sizing = size_camera_extraction_job(archive_path=archive)
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb + _dependency_child_surplus(cores=sizing.cores)),
+    )
 
 
 def controller_library_footprint(archive: Path) -> JobFootprint:
@@ -737,10 +755,14 @@ def controller_library_footprint(archive: Path) -> JobFootprint:
         archive: The log archive the extraction job reads.
 
     Returns:
-        The library's cores and its memory, rounded up to the whole gigabyte on which every estimate lands.
+        The library's cores and its memory, carrying the surplus this package's own children hold and
+        rounded up to the whole gigabyte on which every estimate lands.
     """
     sizing = size_controller_extraction_job(archive_path=archive)
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb + _dependency_child_surplus(cores=sizing.cores)),
+    )
 
 
 def write_sized_archive(path: Path, size_bytes: int) -> Path:
@@ -774,7 +796,8 @@ def cindra_single_recording_footprint(
         specifier: The job's tracker specifier, which names a plane for the per-plane stages.
 
     Returns:
-        cindra's own width for the stage and its memory, rounded up to the whole gigabyte on which every estimate lands.
+        cindra's own width for the stage, its memory rounded up to the whole gigabyte on which every estimate lands,
+        and the plane binaries a mapping stage holds.
     """
     resolve_configuration = resolve_single_recording_configuration_resolver(system=session.acquisition_system)
     locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
@@ -785,7 +808,29 @@ def cindra_single_recording_footprint(
         configuration=resolve_configuration(session),
         data_path=locate_two_photon_data(session=session),
     )
-    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+    # The mapped extent is derived here from cindra's geometry rather than taken from the pass under test, so a pass
+    # that selects the wrong plane, drops the second channel, or maps a stage that holds nothing fails the comparison.
+    geometry = resolve_recording_geometry(
+        output_root=session.processed_data_path,
+        data_path=locate_two_photon_data(session=session),
+        ignored_file_names=tuple(resolve_configuration(session).file_io.ignored_file_names),
+    )
+    mapped_bytes = 0
+    if job_name in _MAPPING_STAGES:
+        index = parse_plane_specifier(specifier=specifier)
+        channels = 2 if geometry.two_channels else 1
+        # The conversion stage writes every binary at the imaging library's own element width, so the expectation
+        # states that width rather than the width the source carried.
+        mapped_bytes = sum(
+            plane.height * plane.width * plane.frame_count * _BINARY_ELEMENT_BYTES * channels
+            for plane in geometry.planes
+            if index is None or plane.index == index
+        )
+    return JobFootprint(
+        cores=sizing.cores,
+        memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb),
+        mapped_mb=_bytes_to_megabytes(byte_count=mapped_bytes),
+    )
 
 
 def cindra_multi_recording_footprint(
@@ -806,7 +851,8 @@ def cindra_multi_recording_footprint(
             bound from the per-recording region counts.
 
     Returns:
-        cindra's own width for the stage and its memory, rounded up to the whole gigabyte on which every estimate lands.
+        cindra's own width for the stage, its memory rounded up to the whole gigabyte on which every estimate lands,
+        and the plane binaries a mapping stage holds.
     """
     resolve_configuration = resolve_multi_recording_configuration_resolver(system=dataset.acquisition_system)
     sizing = size_multi_recording_job(
@@ -817,6 +863,11 @@ def cindra_multi_recording_footprint(
         planned_roi_count=planned_roi_count,
     )
     return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
+
+
+def assembly_mapped(samples: int, regions: int) -> int:
+    """Reports the megabytes an imaging assembly job holds mapped, which is the one trace array it opens at a time."""
+    return _bytes_to_megabytes(byte_count=regions * samples * _SINGLE_PRECISION_BYTES)
 
 
 def assembly_memory(
@@ -870,8 +921,8 @@ def test_checksum_memory_scales_with_the_readers_a_job_opens(experiment_session:
 
 
 def test_a_checksum_reader_is_charged_the_spawned_child_it_is(experiment_session: SessionData) -> None:
-    """Verifies that a checksum worker is charged the shared cost of a spawned child plus the buffer it streams files
-    through, rather than a figure standing below that shared cost.
+    """Verifies that a checksum worker is charged the cost of a child spawned inside this package plus the buffer it
+    streams files through, rather than the bare interpreter a dependency charges.
     """
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.CHECKSUM,
@@ -879,18 +930,18 @@ def test_a_checksum_reader_is_charged_the_spawned_child_it_is(experiment_session
         jobs=[(CHECKSUM_JOB_NAME, "", _CHECKSUM_WIDE_CORES)],
     )
 
-    # The pool that opens the workers is spawn-started, so each worker pays the interpreter and import graph the
-    # shared figure covers and holds its read buffer above it.
+    # The pool that opens the workers is spawn-started and is opened here, so each worker re-imports this package
+    # and holds its read buffer above that.
     assert estimates[CHECKSUM_JOB_NAME, ""].memory_mb == _CHECKSUM_WIDE_MEMORY_MB
-    # A reader modeled below the shared spawned-child cost reserves the job a whole gigabyte less than it holds.
+    # A reader modeled as the bare interpreter reserves the job half of what it holds.
     assert (
         _apply_tolerance(memory_mb=WORKER_MEMORY_MB + _CHECKSUM_WIDE_CORES * _UNDERSTATED_CHECKSUM_READER_MEMORY_MB)
         == _UNDERSTATED_CHECKSUM_WIDE_MEMORY_MB
     )
     assert estimates[CHECKSUM_JOB_NAME, ""].memory_mb > _UNDERSTATED_CHECKSUM_WIDE_MEMORY_MB
-    # Expressing the reader as the shared figure plus its buffer is what makes a retune of that shared figure reach
+    # Expressing the reader as this package's own child plus its buffer is what makes a retune of that figure reach
     # this model, so the reader can never again be modeled as cheaper than the child it runs in.
-    assert footprints_module._CHECKSUM_READER_MEMORY_MB >= SPAWNED_CHILD_MEMORY_MB
+    assert footprints_module._CHECKSUM_READER_MEMORY_MB >= footprints_module._SPAWNED_PACKAGE_CHILD_MEMORY_MB
 
 
 def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
@@ -1238,7 +1289,7 @@ def test_a_single_chunk_job_is_charged_no_spawned_child() -> None:
     # Charging that job the one child a pool would start reserves a whole gigabyte the job never holds.
     assert (
         _apply_tolerance(
-            memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB
+            memory_mb=WORKER_MEMORY_MB + frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB
         )
         == _UNCHUNKED_WIDE_WITH_CHILD_MEMORY_MB
     )
@@ -1266,7 +1317,7 @@ def test_the_decoders_a_motion_energy_job_is_charged_are_the_chunks_the_stage_pl
             if chunks == 1
             else _apply_tolerance(
                 memory_mb=WORKER_MEMORY_MB
-                + chunks * (frame_buffers + _DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
+                + chunks * (frame_buffers + _DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB)
             )
         )
         assert (
@@ -1374,7 +1425,7 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     energy = estimates[ENERGY_JOB_NAME, "51"]
     # No frame contributes no pixels, so the estimate covers the decoder buffers and the children alone.
     assert energy.memory_mb == _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
+        memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB)
     )
 
 
@@ -1514,7 +1565,7 @@ def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_ses
     )
 
     assert estimates[ENERGY_JOB_NAME, "51"].memory_mb == _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + 4 * (_DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
+        memory_mb=WORKER_MEMORY_MB + 4 * (_DECODER_BUFFER_MEMORY_MB + _SPAWNED_PACKAGE_CHILD_MEMORY_MB)
     )
 
 
@@ -1613,7 +1664,7 @@ def test_a_plane_job_naming_a_plane_the_recording_does_not_hold_is_refused(exper
     write_surgery_metadata(session=experiment_session)
     write_raw_imaging(session=experiment_session)
 
-    with pytest.raises(ValueError, match="does not hold"):
+    with pytest.raises(ValueError, match=r"does\s+not\s+hold"):
         two_photon_estimates(
             session=experiment_session,
             jobs=[(str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}99", 8)],
@@ -1739,7 +1790,9 @@ def test_dataset_stages_are_sized_from_the_processed_recordings_they_read(
     # it was handed. Half prevalence over two recordings keeps a cluster appearing in one of them, so the pooled
     # ceiling stands at four hundred, which the headroom the widest recording allows then caps at three hundred.
     assert estimates[FORGING_JOB_NAME, first.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=4000, regions=200, tracked_regions=300)
+        cores=1,
+        memory_mb=assembly_memory(samples=4000, regions=200, tracked_regions=300),
+        mapped_mb=assembly_mapped(samples=4000, regions=200),
     )
 
 
@@ -1764,7 +1817,9 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
     # The recording is written large enough that a second copy of its retained columns would push the reported
     # estimate from one whole gigabyte to two, which is the scale at which the copy count becomes visible.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=150_000, regions=48)
+        cores=1,
+        memory_mb=assembly_memory(samples=150_000, regions=48),
+        mapped_mb=assembly_mapped(samples=150_000, regions=48),
     )
 
 
@@ -1791,7 +1846,9 @@ def test_an_imaging_assembly_is_charged_the_sources_it_reads_at_their_own_height
     # afterwards. A camera running far faster than the imaging therefore holds an array far taller than the frame
     # that receives it, and charging that array at the imaging rate reserves a fraction of what the job holds.
     assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,))
+        cores=1,
+        memory_mb=assembly_memory(samples=20_000, regions=48, source_samples=(4_000_000,)),
+        mapped_mb=assembly_mapped(samples=20_000, regions=48),
     )
     # Charging the same session no source family at all lands a whole gigabyte lower, so the assertion above could
     # not have been met by an estimate that omitted the term.
@@ -2153,7 +2210,9 @@ def test_the_tracked_region_bound_is_drawn_from_the_animals_whole_recording_set(
     # Half of five recordings rounds up to a cluster appearing in three of them, so the nine thousand pooled regions
     # bound the templates at three thousand.
     assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     # Dropping the widest recording from the set would pool four thousand regions over a minimum of two, which the
     # headroom ceiling then caps at fifteen hundred, a different gigabyte bucket rather than a saving the rounding
@@ -2183,7 +2242,9 @@ def test_a_complete_recording_set_bounds_the_assembly_and_an_unreadable_entry_is
     # The complete set is bounded over every recording the dataset names, which is the set the tracking runs over.
     complete = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
     assert complete[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=3000),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
 
     # The widest recording keeps its session directory while the processed output the geometry is read from is gone.
@@ -2347,7 +2408,9 @@ def test_the_pooled_region_bound_is_not_narrowed_to_one_recordings_own_regions(
     # The most populated recording detected a thousand regions and the headroom allows half as many again, so the
     # multi-day columns are charged fifteen hundred templates.
     assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     # Narrowing to the widest recording's own count would charge a thousand templates, which is a different gigabyte
     # bucket rather than a difference the rounding absorbs, and it is an under-estimate of what the job attaches.
@@ -2455,13 +2518,17 @@ def test_a_stated_region_count_is_charged_in_place_of_the_tracked_region_bound(
     # holding a figure for it from outside this pass is better informed than the bound is. cindra's own
     # single-recording sizing takes a planned region count on the same terms.
     assert stated[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     # The same dataset without a stated count is charged the bound its recording set carries, which is the headroom
     # ceiling over the thousand regions each of its two recordings detected. The two calls differ in the stated count
     # alone, so that count is what the figure above is attributed to.
     assert size_dataset_jobs(dataset=dataset, jobs=jobs)[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=1500),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
     assert assembly_memory(samples=100_000, regions=1000, tracked_regions=400) != assembly_memory(
         samples=100_000, regions=1000, tracked_regions=1500
@@ -2476,7 +2543,9 @@ def test_a_stated_region_count_is_charged_in_place_of_the_tracked_region_bound(
     narrowed = size_dataset_jobs(dataset=dataset, jobs=jobs, planned_roi_count=400)
 
     assert narrowed[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=1000, tracked_regions=400),
+        mapped_mb=assembly_mapped(samples=100_000, regions=1000),
     )
 
 
@@ -2633,7 +2702,9 @@ def test_an_assembly_job_carrying_an_animal_specifier_bounds_its_regions_at_one(
     # The animal directory resolves the recording, so the single-day columns are charged that recording's own two
     # thousand regions, while the multi-day columns are charged the single template an empty recording set allows.
     assert estimates[FORGING_JOB_NAME, "305"] == JobFootprint(
-        cores=1, memory_mb=assembly_memory(samples=100_000, regions=2000, tracked_regions=1)
+        cores=1,
+        memory_mb=assembly_memory(samples=100_000, regions=2000, tracked_regions=1),
+        mapped_mb=assembly_mapped(samples=100_000, regions=2000),
     )
     # Charging the multi-day columns the recording's own regions instead would double the retained width into the
     # next gigabyte bucket, so the reported figure could not have come from a bound over a non-empty recording set.
@@ -2756,3 +2827,65 @@ def test_a_session_planning_no_motion_energy_job_reads_no_camera_manifest(
     )
 
     assert estimates[RENAME_JOB_NAME, ""] == JobFootprint(cores=1, memory_mb=_WORKER_ONLY_MB)
+
+
+def test_a_footprint_that_maps_nothing_holds_only_its_anonymous_term_and_the_shared_image() -> None:
+    """Verifies that the resident figure adds the per-job library image and its own margin to a stage that maps
+    none of its input.
+    """
+    # The anonymous figure is chosen so the margin moves the reported gigabyte. A figure the margin leaves in its own
+    # bucket would pass this assertion whether the margin were applied or dropped.
+    footprint = JobFootprint(cores=4, memory_mb=9216)
+
+    assert footprint.mapped_mb == 0
+    assert footprint.resident_mb == 11264
+    assert footprint.resident_mb > footprints_module._round_to_gigabyte(
+        memory_mb=9216 + footprints_module._SHARED_LIBRARY_IMAGE_MB
+    )
+
+
+def test_a_footprint_that_maps_its_input_carries_those_bytes_into_its_resident_term() -> None:
+    """Verifies that the mapped bytes reach the resident figure while leaving the anonymous figure untouched."""
+    mapped = JobFootprint(cores=16, memory_mb=15360, mapped_mb=61664)
+    unmapped = JobFootprint(cores=16, memory_mb=15360)
+
+    assert mapped.memory_mb == unmapped.memory_mb
+    assert mapped.resident_mb - unmapped.resident_mb == 68608
+    assert mapped.resident_mb > mapped.memory_mb * 4
+
+
+def test_a_discovery_job_maps_none_of_the_recordings_it_spans(tmp_path: Path) -> None:
+    """Verifies that only the extraction stage is charged the plane binaries, since discovery maps none of them."""
+    recording = tmp_path.joinpath("2026-01-02-03-04-05-000006", "processed_data", "cindra", "plane_0")
+    recording.mkdir(parents=True)
+    recording.joinpath("channel_1_data.bin").write_bytes(b"\x00" * (3 * 1024 * 1024))
+    directories = (recording.parent,)
+
+    discovery = footprints_module._mapped_recording_megabytes(
+        job_name=MultiRecordingJobNames.DISCOVER, specifier="2026-01-02-03-04-05-000006", directories=directories
+    )
+    extraction = footprints_module._mapped_recording_megabytes(
+        job_name=MultiRecordingJobNames.EXTRACT, specifier="2026-01-02-03-04-05-000006", directories=directories
+    )
+
+    assert discovery == 0
+    # The conversion truncates to whole megabytes and adds one, so a three-megabyte binary is charged as four.
+    assert extraction == 4
+
+
+def test_an_extraction_job_is_charged_only_the_recording_its_specifier_names(tmp_path: Path) -> None:
+    """Verifies that a job spanning an animal's recordings maps the one recording it extracts."""
+    directories = []
+    for session, megabytes in (("2026-01-02-03-04-05-000006", 3), ("2026-01-03-03-04-05-000007", 7)):
+        plane = tmp_path.joinpath(session, "processed_data", "cindra", "plane_0")
+        plane.mkdir(parents=True)
+        plane.joinpath("channel_1_data.bin").write_bytes(b"\x00" * (megabytes * 1024 * 1024))
+        directories.append(plane.parent)
+
+    charged = footprints_module._mapped_recording_megabytes(
+        job_name=MultiRecordingJobNames.EXTRACT,
+        specifier="2026-01-03-03-04-05-000007",
+        directories=tuple(directories),
+    )
+
+    assert charged == 8

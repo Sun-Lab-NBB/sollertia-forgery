@@ -89,12 +89,16 @@ JSON-RPC messages. `interfaces/mcp_server.py` runs the server, and its import di
 
 **When adding an MCP tool**, place it in the `*_tools.py` module that owns its domain and decorate it with `@mcp.tool()`
 from `.mcp_instance`. Return through the `ok_response` and `error_response` helpers in `.responses`, and give the tool a
-`Returns` section that names the response keys in prose. Add a new tool module to the `[tool.coverage.run] omit` list in
-`pyproject.toml`, because tool modules reach infrastructure that only a live MCP session supplies. The batch tools that
-read, cancel, and remediate what the scheduler ran keep their implementations in `interfaces/remote_tools.py`, which
-registers no tool of its own. An `slf server` command and the tool beside it therefore answer a caller from one
-function. `get_processing_status_tool` and `retire_remote_batches_tool` resolve every allocation through the one state
-table in `orchestration/remote.py` rather than each deciding for itself.
+`Returns` section that names the response keys in prose. Resolve every path the tool opens inside that envelope, so a
+directory the host does not supply answers with an error response rather than raising out of the session. A tool that
+reads a remote project opens that project's local mirror and reports the caller's own `project_path` back through
+`resolve_reported_project_path`, while the artifact path keys beside it name the mirror the read actually opened. Add a
+new tool module to the `[tool.coverage.run] omit` list in `pyproject.toml`, because tool modules reach infrastructure
+that only a live MCP session supplies. The batch tools that read, cancel, and remediate what the scheduler ran keep
+their implementations in `interfaces/remote_tools.py`, which registers no tool of its own. An `slf server` command and
+the tool beside it therefore answer a caller from one function. `get_processing_status_tool` and
+`retire_remote_batches_tool` resolve every allocation through the one state table in `orchestration/remote.py` rather
+than each deciding for itself.
 
 ## Downstream library integration
 
@@ -167,11 +171,14 @@ preference.
 
 Work reaches a host as a **job**, and every pipeline models its jobs the same way. `slf plan session` and
 `slf plan dataset` read a unit's acquisition data, register on its processing tracker every job that unit is able to
-run, and record each job's cores, memory, and upstream jobs. Preparation joins the tracker state to those records into
-one descriptor per job under a batch identifier, and dispatch runs the batch either on this machine's process pool or as
-one SLURM allocation per job. Each job holds a `ProcessingStatus` on the tracker, one of `SCHEDULED`, `RUNNING`,
-`SUCCEEDED`, or `FAILED`. A rerun therefore resolves only the work still outstanding. The run reports a job as blocked
-rather than dispatched when it can neither queue that job's upstream stage nor confirm that the stage already succeeded.
+run, and record each job's cores, its two memory figures, and its upstream jobs. `memory_mb` is the anonymous memory the
+job allocates, which is the term this machine's process pool budgets against, and `resident_mb` adds to it the pages the
+job maps and the file-backed library image every job holds, which is the term one SLURM allocation requests. Preparation
+joins the tracker state to those records into one descriptor per job under a batch identifier, and dispatch runs the
+batch either on this machine's process pool or as one SLURM allocation per job. Each job holds a `ProcessingStatus` on
+the tracker, one of `SCHEDULED`, `RUNNING`, `SUCCEEDED`, or `FAILED`. A rerun therefore resolves only the work still
+outstanding. The run reports a job as blocked rather than dispatched when it can neither queue that job's upstream stage
+nor confirm that the stage already succeeded.
 
 A remote allocation outlives this process, so `orchestration/remote.py` resolves each recorded one against scheduler
 accounting, the scheduler queue, and the job's own tracker. That resolution yields a `scheduler_state`, a `verdict`,
@@ -218,7 +225,9 @@ resolves the system from the session or dataset it opens.
 
 **When adding a processing stage**, define or reuse its job name, emit it from the pipeline's job discovery, order it in
 the prerequisite mapping, and give it both a `_JOB_CORE_ALLOCATIONS` entry and a sizing model in `footprints.py`. A job
-type missing either one is a hard error rather than a job admitted at a default size.
+type missing either one is a hard error rather than a job admitted at a default size. A sizing model states the
+anonymous memory its stage allocates, and a stage that holds its input memory-mapped states those bytes beside it as
+the footprint's `mapped_mb`, because the resident figure a SLURM allocation requests is derived from the two together.
 
 **When adding a processing pipeline**, add its `ProcessingPipelines` member and tracker entry in
 `shared_assets/pipelines.py`, its category package, and both its `BATCH_PIPELINES` membership and its `PipelineDispatch`

@@ -118,12 +118,17 @@ def list_prepared_batches_tool(
         ``blocked_count``, and ``outcome_recorded``. A settled batch carries the counts its outcome recorded and no
         ``unit_count``, and it reports none of the detail fields. A detailed entry adds its ``options``, its
         ``job_names`` counts, and the ``unit_names`` it covers. Returns an error when the host is not supported, when
-        the registry cannot be read, or when a named identifier is not held.
+        the platform working directory does not resolve, when the registry cannot be read, or when a named identifier
+        is not held.
     """
     if host is not None and host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
 
-    directory = batch_directory()
+    try:
+        directory = batch_directory()
+    except Exception as exception:
+        return error_response(message=f"Unable to resolve the prepared-batch directory. {exception}")
+
     try:
         records = _read_recorded_batches(directory=directory)
     except Exception as exception:
@@ -179,7 +184,8 @@ def forget_prepared_batches_tool(batch_ids: list[str]) -> dict[str, Any]:
     Returns:
         A response dict with ``batch_directory``, the ``forgotten`` identifiers this host held and removed,
         ``total_forgotten``, and the ``unknown`` identifiers for which it recorded nothing. Returns an error when no
-        identifier is named or the registry cannot be written.
+        identifier is named, when the platform working directory does not resolve, or when the registry cannot be
+        written.
     """
     if not batch_ids:
         return error_response(
@@ -189,7 +195,11 @@ def forget_prepared_batches_tool(batch_ids: list[str]) -> dict[str, Any]:
             )
         )
 
-    directory = batch_directory()
+    try:
+        directory = batch_directory()
+    except Exception as exception:
+        return error_response(message=f"Unable to resolve the prepared-batch directory. {exception}")
+
     try:
         forgotten = forget_batch_records(batch_ids=batch_ids)
     except Exception as exception:

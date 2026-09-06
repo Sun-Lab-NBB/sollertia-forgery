@@ -96,7 +96,7 @@ _REMOTE_STATUS_DETAIL_FIELDS: tuple[str, ...] = (
     "claimed_allocation",
     "claim_state",
     "cores",
-    "memory_mb",
+    "resident_mb",
     "slurm_job_name",
     "unit_path",
     "output_log",
@@ -112,10 +112,17 @@ remediation report is uncapped instead, because it is the last moment at which t
 
 _FINISHED_BATCH_GUIDANCE: str = (
     "Read what a finished run produced from the outcome closure recorded on the batch, which "
-    "get_processing_status_tool reports, or from read_project_jobs_tool with host='remote'."
+    "get_processing_status_tool reports and 'slf server batches' prints, or from the project's own job artifact, "
+    "which the MCP tool read_project_jobs_tool reads with host='remote'."
 )
 """The guidance appended wherever a caller reaches for a batch the ledger no longer holds. The ledger names outstanding
-allocations alone, so the answer for a finished batch is its recorded outcome or the project's own job artifact."""
+allocations alone, so the answer for a finished batch is its recorded outcome or the project's own job artifact.
+
+Notes:
+    The outcome reader is named as both a tool and a command, because one function answers each of them. The job
+    artifact reader is marked as an MCP tool alone, because it carries no command, and a caller reading this in a
+    terminal would otherwise search for one that does not exist.
+"""
 
 _NOTHING_OUTSTANDING: str = f"No remote batch is outstanding. {_FINISHED_BATCH_GUIDANCE}"
 """The message reported when the ledger holds no batch, which means every submitted batch has finished, was retired, or
@@ -977,10 +984,19 @@ def _batch_remedy(batch_id: str, progress: str, stranded: int) -> str:
             f"allocations resolves as running.{released}"
         )
     if progress == AWAITING_CLOSURE_BATCH:
+        # Closure releases a job whose tracker no longer claims an allocation, and a stranded job is exactly the job
+        # whose tracker still claims one. Advising a re-read while any job is stranded therefore names a step that
+        # cannot close this batch however many times it runs, so the retirement leads instead.
+        if stranded:
+            return (
+                f"Every allocation of this batch has settled, and {stranded} of its job(s) remain stranded on their "
+                f"own trackers, which closure does not release. Remediate it with "
+                f"retire_remote_batches_tool(batch_ids=['{batch_id}']), or with 'slf server retire-batch "
+                f"-b {batch_id}'.{released}"
+            )
         return (
             f"Every allocation of this batch has settled, so read this status again to close it. Remediate it with "
-            f"retire_remote_batches_tool(batch_ids=['{batch_id}']) if it holds a job the closure may not release or "
-            f"if that closure keeps failing.{released}"
+            f"retire_remote_batches_tool(batch_ids=['{batch_id}']) if that closure keeps failing."
         )
     return (
         "Wait. At least one allocation of this batch resolves as running, so the run may still advance. Cancel the "

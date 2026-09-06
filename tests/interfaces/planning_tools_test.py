@@ -28,6 +28,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "51",
         "cores": 16,
         "memory_mb": 4000,
+        "resident_mb": 5024,
         "prerequisite_ids": ["camera_timestamp_rename-"],
     },
     {
@@ -41,6 +42,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "",
         "cores": 1,
         "memory_mb": 400,
+        "resident_mb": 1424,
     },
     {
         "unit_kind": SESSION_UNIT,
@@ -53,6 +55,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "",
         "cores": 8,
         "memory_mb": 900,
+        "resident_mb": 1924,
     },
     {
         "unit_kind": DATASET_UNIT,
@@ -65,6 +68,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "specifier": "2026-01-02-03-04-05-000006",
         "cores": 1,
         "memory_mb": 6000,
+        "resident_mb": 7024,
     },
 ]
 """A projection holding both unit kinds, two jobs of one pipeline for one session, and one job waiting on another."""
@@ -101,6 +105,9 @@ def test_reading_a_projection_reports_the_figures_a_submission_is_sized_against(
     assert response["total_jobs"] == len(_PLANNED_JOBS)
     assert response["summed_memory_mb"] == 11300
     assert response["largest_job_memory_mb"] == 6000
+    # A caller sizing a scheduler submission reads the resident totals, so both terms are summed and both maxima taken.
+    assert response["summed_resident_mb"] == 15396
+    assert response["largest_job_resident_mb"] == 7024
     assert response["widest_job_cores"] == 16
     # Every planned job is modeled from its own input or its target is dropped, so the projection reports no count of
     # jobs carrying an unmodeled figure.
@@ -181,3 +188,21 @@ def test_status_counts_totals_every_job_and_groups_by_status() -> None:
     frame = pl.DataFrame({"status": ["SUCCEEDED", "SUCCEEDED", "FAILED", "SCHEDULED"]})
 
     assert _status_counts(frame=frame) == {"total": 4, "FAILED": 1, "SCHEDULED": 1, "SUCCEEDED": 2}
+
+
+def test_reading_a_projection_another_model_wrote_answers_through_the_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a projection missing a column this reader totals answers with an error rather than raising."""
+    project = tmp_path.joinpath("Project")
+    project.mkdir(parents=True)
+    plan_path = project_plan_path(project_directory=project)
+    # The narrower table is what a projection written before the resident term looks like on disk.
+    narrower = pl.DataFrame(data=[{k: v for k, v in _PLANNED_JOBS[0].items() if k != "resident_mb"}], strict=False)
+    narrower.write_ipc(file=plan_path)
+
+    response = read_project_plan_tool(project_path=str(project))
+
+    assert response["success"] is False
+    assert "Unable to read the plan projection" in response["error"]
+    assert "generate_project_plan_tool" in response["error"]

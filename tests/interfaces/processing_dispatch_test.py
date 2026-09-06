@@ -12,7 +12,7 @@ import pytest
 
 from sollertia_forgery.video import CAMERA_EXTRACTION_JOB_NAME
 from sollertia_forgery.interfaces import processing_tools
-from sollertia_forgery.orchestration import GenericPendingJob
+from sollertia_forgery.orchestration import GenericPendingJob, build_pending_job
 from sollertia_forgery.interfaces.processing_tools import (
     _LocalRun,
     _execute_local_batch,
@@ -295,3 +295,25 @@ def test_a_status_call_naming_no_batch_of_a_process_that_never_ran_one_says_so(
 
     assert not response["active"]
     assert "outcomes" not in response
+
+
+def test_a_rendered_descriptor_carries_both_memory_figures_through_the_round_trip() -> None:
+    """Verifies that the resident figure survives the render and read-back a remote submission performs."""
+    job = GenericPendingJob(
+        tracker_path=Path("/nonexistent/project/305/a_session/tracker.yaml"),
+        job_id="a1b2c3d4e5f60718",
+        unit_path=Path("/nonexistent/project/305/a_session"),
+        job_name=CAMERA_EXTRACTION_JOB_NAME,
+        name="a_session",
+        specifier="51",
+        pipeline="video",
+        core_weight=8,
+        memory_mb=7168,
+        resident_mb=8192,
+    )
+
+    restored = build_pending_job(job=processing_tools._render_descriptor(job=job))
+
+    # The scheduler is given the resident figure, so a round trip that drops it silently requests the anonymous one.
+    assert restored.memory_mb == 7168
+    assert restored.resident_mb == 8192

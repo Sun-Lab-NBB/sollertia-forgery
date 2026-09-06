@@ -362,7 +362,7 @@ def test_resolving_jobs_reports_a_recording_carrying_no_parameters(
     """Verifies a recording whose acquisition parameters resolve nowhere is refused as holding no imaging data."""
     session = stubbed_recording(plane_count=None)
 
-    with pytest.raises(FileNotFoundError, match="carries the acquisition parameters"):
+    with pytest.raises(FileNotFoundError, match=r"carries\s+the\s+acquisition\s+parameters"):
         discover_two_photon_jobs(session_path=_session_path(session))
 
 

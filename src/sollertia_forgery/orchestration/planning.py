@@ -60,6 +60,7 @@ PROJECT_PLAN_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType]
     "specifier": pl.String,
     "cores": pl.UInt16,
     "memory_mb": pl.UInt32,
+    "resident_mb": pl.UInt32,
     "memory_modeled": pl.Boolean,
     "prerequisite_ids": pl.List(pl.String),
 }
@@ -90,7 +91,9 @@ class _JobPlanEntry:
     the width that dependency picked for this job's input, and every other stage takes its type's declared
     allocation."""
     memory_mb: int = 0
-    """The memory this job occupies, as its own sizing pass modeled it from the data the job will read."""
+    """The anonymous memory this job occupies, as its own sizing pass modeled it from the data the job will read."""
+    resident_mb: int = 0
+    """The resident memory this job holds, which adds the pages the job maps to its anonymous term."""
     memory_modeled: bool = False
     """Determines whether a model of this job's own input produced the recorded memory. The plan records an entry only
     for a job the sizing pass modeled, so a recorded entry always answers True."""
@@ -259,10 +262,14 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     rows: list[dict[str, Any]] = []
     planned_units = 0
     unplanned_units = 0
+    # A cache stamped by another model states figures this model never produced, so it counts as unplanned along
+    # with a unit that carries no cache at all. Projecting it would publish figures the sizing pass would not
+    # answer with today, and a scheduler reads those figures.
+    model_version = resolve_model_version()
 
     for session in iterate_sessions(root_path=project_directory):
         plan = _load_plan(plan_path=_session_plan_path(session=session))
-        if plan is None:
+        if plan is None or plan.model_version != model_version:
             unplanned_units += 1
             continue
         planned_units += 1
@@ -273,7 +280,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
 
     for dataset in discover_project_datasets(project_root=project_directory):
         plan = _load_plan(plan_path=_dataset_plan_path(dataset=dataset))
-        if plan is None:
+        if plan is None or plan.model_version != model_version:
             unplanned_units += 1
             continue
         planned_units += 1
@@ -454,6 +461,7 @@ def _resolve_unit_plan(
                 specifier=specifier,
                 cores=footprint.cores,
                 memory_mb=footprint.memory_mb,
+                resident_mb=footprint.resident_mb,
                 memory_modeled=True,
                 prerequisite_ids=[
                     ProcessingTracker.generate_job_id(job_name=upstream_name, specifier=upstream_specifier)
@@ -725,6 +733,7 @@ def _projection_row(
         "specifier": entry.specifier,
         "cores": entry.cores,
         "memory_mb": entry.memory_mb,
+        "resident_mb": entry.resident_mb,
         "memory_modeled": entry.memory_modeled,
         "prerequisite_ids": list(entry.prerequisite_ids),
     }

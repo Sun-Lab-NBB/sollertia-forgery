@@ -34,6 +34,7 @@ from .host_resolution import (
     resolve_execution_host,
     resolve_readable_project,
     unsupported_host_message,
+    resolve_reported_project_path,
 )
 
 _PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name")
@@ -49,8 +50,11 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "specifier",
     "cores",
     "memory_mb",
+    "resident_mb",
 )
-"""The job fields a semi-detail listing carries, which are the job's subject, its identity, and its figures."""
+"""The job fields a semi-detail listing carries, which are the job's subject, its identity, and its figures. Both
+memory figures are carried, because a local pool is budgeted against the anonymous one while the scheduler is given
+the resident one, so a reader sizing a batch needs whichever matches the host it targets."""
 
 _PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "memory_modeled", "prerequisite_ids")
 """The job fields detail adds, which are the tracked job's identifier, whether a model of the job's own input produced
@@ -81,8 +85,9 @@ def plan_session_jobs_tool(
     Returns:
         A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
         Carries a ``units`` list, whose entries hold each session's ``unit_path``, ``unit_name``, ``job_count``, and
-        ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. A
-        ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
+        ``summed_memory_mb``, and ``summed_resident_mb``, or its ``unit_path``, a ``job_count`` of zero, and the
+        ``error`` that stopped it. A ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass
+        recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -107,8 +112,9 @@ def plan_dataset_jobs_tool(
     Returns:
         A response dict with ``host``, ``total_units``, ``total_jobs``, and the ``elapsed_seconds`` planning took.
         Carries a ``units`` list, whose entries hold each dataset's ``unit_path``, ``unit_name``, ``job_count``, and
-        ``summed_memory_mb``, or its ``unit_path``, a ``job_count`` of zero, and the ``error`` that stopped it. A
-        ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass recorded, mapped to their reasons.
+        ``summed_memory_mb``, and ``summed_resident_mb``, or its ``unit_path``, a ``job_count`` of zero, and the
+        ``error`` that stopped it. A ``local`` entry also holds the ``unsized_jobs`` refusals its sizing pass
+        recorded, mapped to their reasons.
     """
     return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -130,7 +136,8 @@ def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[s
 
     Returns:
         A response dict with ``project_path``, ``host``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
-        ``largest_job_memory_mb``, ``widest_job_cores``, a per-unit-kind and per-pipeline ``pipeline_totals``, and the
+        ``largest_job_memory_mb``, ``summed_resident_mb``, ``largest_job_resident_mb``, ``widest_job_cores``, a
+        per-unit-kind and per-pipeline ``pipeline_totals``, and the
         ``elapsed_seconds`` the projection took. Returns an error when the project cannot be read.
     """
     if host not in HOST_LABELS:
@@ -226,12 +233,25 @@ def read_project_plan_tool(
             )
         )
 
-    frame = pl.read_ipc(source=plan_path, memory_map=True)
+    # A projection written by another model states a narrower column set than this reader totals, so the read and the
+    # totals answer through the envelope rather than raising out of the session.
+    try:
+        frame = pl.read_ipc(source=plan_path, memory_map=True)
+        totals = _plan_totals(frame=frame)
+        breakdown = frame_breakdown(frame=frame, axes=_PLAN_AXES)
+    except Exception as exception:
+        return error_response(
+            message=(
+                f"Unable to read the plan projection at '{plan_path}'. {exception} Regenerate it with "
+                f"generate_project_plan_tool, which rebuilds the table from the units' own caches."
+            )
+        )
+
     response = ok_response(
-        project_path=str(directory),
+        project_path=resolve_reported_project_path(project_path=project_path, directory=directory, host=host),
         plan_path=str(plan_path),
-        **_plan_totals(frame=frame),
-        breakdown=frame_breakdown(frame=frame, axes=_PLAN_AXES),
+        **totals,
+        breakdown=breakdown,
     )
 
     singles: dict[str, str | None] = {"unit_kind": unit_kind, "animal": animal, "dataset": dataset}
@@ -310,18 +330,33 @@ def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_
 def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
     """Summarizes a plan projection into the figures against which a submission is sized.
 
+    Notes:
+        Both memory terms are totaled, because a caller sizing work for this machine's pool budgets against the
+        anonymous term while a caller sizing a scheduler submission budgets against the resident one. Reporting the
+        anonymous total alone leaves the second caller under-requesting by whatever its jobs map.
+
     Args:
         frame: The whole plan projection.
 
     Returns:
-        A dictionary with the total jobs, the summed and largest memory, and the widest core allocation.
+        A dictionary with the total jobs, the summed and largest figure of both memory terms, and the widest core
+        allocation.
     """
     if frame.height == 0:
-        return {"total_jobs": 0, "summed_memory_mb": 0, "largest_job_memory_mb": 0, "widest_job_cores": 0}
+        return {
+            "total_jobs": 0,
+            "summed_memory_mb": 0,
+            "largest_job_memory_mb": 0,
+            "summed_resident_mb": 0,
+            "largest_job_resident_mb": 0,
+            "widest_job_cores": 0,
+        }
     return {
         "total_jobs": frame.height,
         "summed_memory_mb": int(frame["memory_mb"].sum()),
         "largest_job_memory_mb": int(frame["memory_mb"].max()),  # type: ignore[arg-type]
+        "summed_resident_mb": int(frame["resident_mb"].sum()),
+        "largest_job_resident_mb": int(frame["resident_mb"].max()),  # type: ignore[arg-type]
         "widest_job_cores": int(frame["cores"].max()),  # type: ignore[arg-type]
     }
 
@@ -333,8 +368,8 @@ def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
         frame: The whole plan projection.
 
     Returns:
-        A list of entries, each carrying the unit kind, the pipeline, its job count, its summed memory, and its widest
-        core allocation, ordered by unit kind and then by pipeline.
+        A list of entries, each carrying the unit kind, the pipeline, its job count, both of its summed memory
+        figures, and its widest core allocation, ordered by unit kind and then by pipeline.
     """
     if frame.height == 0:
         return []
@@ -343,6 +378,7 @@ def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
         .agg(
             pl.len().alias("jobs"),
             pl.col("memory_mb").sum().alias("summed_memory_mb"),
+            pl.col("resident_mb").sum().alias("summed_resident_mb"),
             pl.col("cores").max().alias("widest_job_cores"),
         )
         .sort("unit_kind", "pipeline")

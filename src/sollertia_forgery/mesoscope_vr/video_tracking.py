@@ -75,6 +75,14 @@ and guards a ring that samples the ellipse less evenly."""
 _BLINK_FRACTION: float = 0.5
 """The fraction of the session-median eye openness below which a frame is flagged as a blink."""
 
+_MINIMUM_FIT_EXTENT_PX: float = 1e-6
+"""The smallest fitted ellipse extent, in pixels, a division may treat as a measurement rather than as a collapsed
+fit. A ring whose points all fall on one position fits an extent of least-squares round-off, on the order of a
+trillionth of a pixel at face-camera coordinate magnitudes. A guard reading only for an exact zero therefore divides
+one round-off residue by another and reports their meaningless ratio. This floor sits six orders of
+magnitude above that round-off and six below the smallest extent a real ring spans, so it rejects every collapsed fit
+while leaving every well-formed one untouched."""
+
 _COORDINATES: tuple[str, str, str] = ("x", "y", "likelihood")
 """The three DLC per-bodypart coordinate channels, in the order each bodypart's columns are read into its per-frame
 ``(x, y, likelihood)`` array."""
@@ -336,9 +344,14 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     eye_semi_width, eye_semi_height = _norm(vectors=eye_fit.semi_a), _norm(vectors=eye_fit.semi_b)
     eye_width, eye_height = 2.0 * eye_semi_width, 2.0 * eye_semi_height
     # Eye openness is the eye's vertical-to-horizontal aspect ratio, which is invariant to camera distance. A
-    # zero-width eye is a degenerate fit rather than a closed eye, so it yields NaN instead of dividing.
+    # zero-width eye is a degenerate fit rather than a closed eye, so it yields NaN instead of dividing. A collapsed
+    # ring fits a width of least-squares round-off rather than an exact zero, so the guard reads for the smallest
+    # width the fit resolves rather than for zero.
     eye_openness = np.divide(
-        eye_height, eye_width, out=np.full_like(a=eye_height, fill_value=np.nan), where=eye_width > 0.0
+        eye_height,
+        eye_width,
+        out=np.full_like(a=eye_height, fill_value=np.nan),
+        where=eye_width >= _MINIMUM_FIT_EXTENT_PX,
     )
 
     # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline against which to
@@ -379,13 +392,14 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     pupil_reflection_offset = pupil_fit.center - reflection
     pupil_reflection_offset = np.where((pupil_measured & reflection_valid)[:, None], pupil_reflection_offset, np.nan)
     # Normalizes the pupil's offset to the eye's semi-axes. A degenerate zero-extent eye divides to NaN on the
-    # collapsed axis rather than to an infinity, matching how eye openness handles the same fit.
+    # collapsed axis rather than to an infinity, matching how eye openness handles the same fit. The collapsed axis
+    # carries least-squares round-off rather than an exact zero, so the same resolution floor gates it.
     eye_semi_axes = np.stack([eye_semi_width, eye_semi_height], axis=1)
     pupil_in_eye = np.divide(
         pupil_fit.center - eye_fit.center,
         eye_semi_axes,
         out=np.full_like(a=eye_semi_axes, fill_value=np.nan),
-        where=eye_semi_axes > 0.0,
+        where=eye_semi_axes >= _MINIMUM_FIT_EXTENT_PX,
     )
     pupil_in_eye = np.where((pupil_measured & eye_fit.valid)[:, None], pupil_in_eye, np.nan)
 

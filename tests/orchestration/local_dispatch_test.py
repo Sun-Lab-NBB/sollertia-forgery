@@ -297,6 +297,7 @@ def build_descriptor(
         "pipeline": pipeline,
         "cores": cores,
         "memory_mb": 4096,
+        "resident_mb": 5120,
         "prerequisite_ids": [],
         "options": dict(options or {}),
     }

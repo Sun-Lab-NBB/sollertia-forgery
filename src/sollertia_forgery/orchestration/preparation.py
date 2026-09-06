@@ -57,8 +57,9 @@ def prepare_batch(
         The prepared batch document.
 
     Raises:
-        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, or if the named units
-            span more than one project.
+        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, if the named units
+            span more than one project, or if a named unit sits too few directory levels below its project for that
+            project to be resolved from it.
         FileNotFoundError: If the host holds no plan table for the units' project.
         RuntimeError: If a step fails on the host.
     """
@@ -110,13 +111,25 @@ def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
         The path to the project root.
 
     Raises:
-        ValueError: If no unit is named, or if the named units span more than one project.
+        ValueError: If no unit is named, if a named unit's path holds fewer parent directories than its kind sits
+            below its project, or if the named units span more than one project.
     """
     if not unit_paths:
         message = "Unable to resolve the project of a batch. No processing unit was named."
         console.error(message=message, error=ValueError)
 
     depth = _UNIT_DEPTHS[unit_kind]
+
+    # Indexing the parents of a path shallower than this depth raises an IndexError, and every caller documents a
+    # ValueError for this failure, so a shallow path is refused here under the documented error.
+    shallow = sorted(str(unit_path) for unit_path in unit_paths if len(unit_path.parents) < depth)
+    if shallow:
+        message = (
+            f"Unable to resolve the project of a batch from the {unit_kind} path(s) {shallow}. A {unit_kind} sits "
+            f"{depth} directory level(s) below its project, so each path must name at least that many parents."
+        )
+        console.error(message=message, error=ValueError)
+
     roots = {unit_path.parents[depth - 1] for unit_path in unit_paths}
     if len(roots) > 1:
         message = (

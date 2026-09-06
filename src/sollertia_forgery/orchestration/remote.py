@@ -310,6 +310,12 @@ def submit_batch(
     Notes:
         The scheduler sequences the graph itself, so this process may exit as soon as the last job is queued.
 
+        The batch is recorded before the first allocation is queued, so a submission that does not return still
+        leaves a batch the remote tools name and resolve. A submission the scheduler refuses partway through records
+        the allocations it had accepted, because the record is written on the way out of the submission either way. A
+        submission the host kills outright records none of them, and the batch it leaves resolves through the jobs'
+        own trackers and the scheduler queue rather than from allocations the ledger names.
+
         Every accepted allocation is recorded in the submission ledger, including when the scheduler rejects a later
         job of the same batch, since the allocations it already accepted stay queued.
 
@@ -352,6 +358,25 @@ def submit_batch(
 
     submissions: list[RemoteSubmission] = []
     allocation_of_job: dict[tuple[str, str], str] = dict(adopted or {})
+    covered = list(covered_batch_ids) if covered_batch_ids else [batch_id]
+    submitted_at = current_timestamp()
+
+    # The batch reaches the ledger before the first allocation is queued, so a submission that never returns still
+    # leaves a batch the remote tools name. The record carries no allocation yet, because the allocations are written
+    # on the way out, so this names the batch rather than its contents. The empty resubmission list takes the merge
+    # path, which carries forward every allocation an earlier attempt recorded.
+    record_batch(
+        batch=SubmissionBatch(
+            batch_id=batch_id,
+            batch_ids=covered,
+            batch_directory=str(batch_directory),
+            submitted_at=submitted_at,
+            walltime_minutes=walltime_minutes,
+            submissions=[],
+        ),
+        resubmitted=[],
+    )
+
     try:
         _submit_ordered_jobs(
             server=server,
@@ -367,9 +392,9 @@ def submit_batch(
             record_batch(
                 batch=SubmissionBatch(
                     batch_id=batch_id,
-                    batch_ids=list(covered_batch_ids) if covered_batch_ids else [batch_id],
+                    batch_ids=covered,
                     batch_directory=str(batch_directory),
-                    submitted_at=current_timestamp(),
+                    submitted_at=submitted_at,
                     walltime_minutes=walltime_minutes,
                     submissions=submissions,
                 ),
@@ -895,7 +920,7 @@ def _submit_ordered_jobs(
             working_directory=batch_directory,
             conda_environment=server.environment,
             cpu_threads=job.core_weight,
-            ram=max(1, ceil(job.memory_mb / _MEGABYTES_PER_GIGABYTE)),
+            ram=max(1, ceil(job.resident_mb / _MEGABYTES_PER_GIGABYTE)),
             time=walltime_minutes,
             dependencies=dependencies,
         )
@@ -916,7 +941,7 @@ def _submit_ordered_jobs(
                 unit_path=str(job.unit_path),
                 unit_name=job.name,
                 cores=job.core_weight,
-                memory_mb=job.memory_mb,
+                resident_mb=job.resident_mb,
                 output_log=str(output_log),
                 error_log=str(error_log),
             )

@@ -48,7 +48,7 @@ from sollertia_forgery.orchestration.planning import (
     _dataset_plan_path,
     _session_plan_path,
 )
-from sollertia_forgery.orchestration.footprints import _POSE_TABLE_COPIES, JobFootprint
+from sollertia_forgery.orchestration.footprints import _POSE_TABLE_COPIES, JobFootprint, resolve_model_version
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -269,7 +269,9 @@ def make_document(host: str = "workstation", pipeline: str = "checksum") -> Batc
         host=host,
         options={"regenerate_checksum": True},
         units=[{"unit_path": "/nonexistent/session", "unit_name": "session", "job_count": 1, "blocked_count": 1}],
-        jobs=[{"job_id": "a_job", "unit_path": "/nonexistent/session", "cores": 8, "memory_mb": 1024}],
+        jobs=[
+            {"job_id": "a_job", "unit_path": "/nonexistent/session", "cores": 8, "memory_mb": 1024, "resident_mb": 2048}
+        ],
         blocked_jobs=[{"job_id": "a_blocked_job", "unsatisfied_prerequisite_ids": ["a_job"]}],
     )
 
@@ -597,6 +599,7 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
             "specifier": "downstream",
             "cores": _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME],
             "memory_mb": 3200,
+            "resident_mb": 4096,
             "memory_modeled": True,
             "prerequisite_ids": [upstream_id],
         },
@@ -611,6 +614,7 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
             "specifier": "upstream",
             "cores": _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME],
             "memory_mb": 3200,
+            "resident_mb": 4096,
             "memory_modeled": True,
             "prerequisite_ids": [],
         },
@@ -717,7 +721,7 @@ def test_projecting_a_project_that_does_not_exist_is_rejected(tmp_path: Path) ->
     """Verifies that a missing project holds neither a unit to read nor a writable location, so it is named here
     rather than surfacing as a walk failure partway through the projection.
     """
-    with pytest.raises(FileNotFoundError, match="does not name an existing directory"):
+    with pytest.raises(FileNotFoundError, match=r"does\s+not\s+name\s+an\s+existing\s+directory"):
         generate_project_plan(project_directory=tmp_path.joinpath("NeverCreated"))
 
 
@@ -1146,3 +1150,48 @@ def test_an_empty_set_of_batches_names_no_host(isolated_working_directory: Path)
     """Verifies that executing nothing names no host, which stops the run rather than guessing one."""
     with pytest.raises(ValueError, match="empty set of prepared batches"):
         resolve_batch_host(documents=[])
+
+
+def test_the_projection_treats_a_cache_another_model_stamped_as_unplanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a cache stamped by another model contributes no row, so the table never publishes figures the
+    sizing pass would not answer with today.
+    """
+    project = tmp_path.joinpath("Project")
+    session = make_session(root=project.joinpath("305", "2026-01-02-03-04-05-000006"))
+    dataset = make_dataset(root=project.joinpath("ds_stale"))
+
+    plan_unit(
+        unit_path=project.joinpath("ds_stale"),
+        unit_kind=DATASET_UNIT,
+        dispatches=[
+            make_dispatch(
+                pipeline=ProcessingPipelines.FORGING,
+                unit=dataset,
+                universe=_RUNTIME_JOBS,
+                memory_mb=6400,
+                unit_kind=DATASET_UNIT,
+            )
+        ],
+    )
+
+    # The cache is restamped rather than rewritten, so its figures stay readable and only its provenance changes.
+    cache = project.joinpath("ds_stale", "job_plan.yaml")
+    cache.write_text(cache.read_text().replace(resolve_model_version(), "0123456789ab"))
+
+    monkeypatch.setattr(
+        target=planning_module,
+        name="iterate_sessions",
+        value=lambda root_path: [session],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="discover_project_datasets",
+        value=lambda project_root: [dataset],  # noqa: ARG005
+    )
+
+    frame = pl.read_ipc(source=generate_project_plan(project_directory=project), memory_map=True)
+
+    # A projected stale row would reach a scheduler as a memory figure this model never produced.
+    assert frame.height == 0
