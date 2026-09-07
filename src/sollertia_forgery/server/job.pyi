@@ -4,6 +4,8 @@ from collections.abc import Sequence
 
 from _typeshed import Incomplete
 
+from ..shared_assets import posix_text as posix_text
+
 _SECONDS_PER_DAY: int
 _SECONDS_PER_HOUR: int
 _SECONDS_PER_MINUTE: int

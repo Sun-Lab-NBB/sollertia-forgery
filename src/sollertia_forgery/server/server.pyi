@@ -9,6 +9,7 @@ from paramiko.client import SSHClient
 from paramiko.sftp_client import SFTPClient
 
 from .job import Job as Job
+from ..shared_assets import posix_text as posix_text
 from .server_configuration import ServerConfiguration as ServerConfiguration
 
 _BLOCKED_QUEUE_REASON: str

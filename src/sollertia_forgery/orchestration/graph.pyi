@@ -3,6 +3,8 @@ from pathlib import Path
 from dataclasses import field, dataclass
 from collections.abc import Sequence
 
+from ..shared_assets import posix_text as posix_text
+
 @dataclass(slots=True)
 class PendingJob:
     tracker_path: Path

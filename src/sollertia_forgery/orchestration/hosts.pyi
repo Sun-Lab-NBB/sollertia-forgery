@@ -25,6 +25,7 @@ from .maintenance import (
     reset_tracked_jobs as reset_tracked_jobs,
     clean_pipeline_output as clean_pipeline_output,
 )
+from ..shared_assets import posix_text as posix_text
 
 class ExecutionHost(Protocol):
     @property

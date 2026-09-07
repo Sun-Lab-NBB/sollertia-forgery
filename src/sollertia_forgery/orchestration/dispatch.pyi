@@ -54,6 +54,7 @@ from ..two_photon import (
 )
 from ..shared_assets import (
     ProcessingPipelines as ProcessingPipelines,
+    posix_text as posix_text,
     resolve_session_tracker_path as resolve_session_tracker_path,
 )
 from ..microcontrollers import (

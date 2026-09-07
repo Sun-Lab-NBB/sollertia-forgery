@@ -22,6 +22,7 @@ from ..orchestration import (
     SESSION_UNIT as SESSION_UNIT,
     connect_to_server as connect_to_server,
 )
+from ..shared_assets import posix_text as posix_text
 
 _MASKED_PASSWORD: str
 _DISCOVERY_UNIT_KINDS: frozenset[str]

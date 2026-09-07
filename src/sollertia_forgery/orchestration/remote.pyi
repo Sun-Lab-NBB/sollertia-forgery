@@ -40,6 +40,7 @@ from ..managing import (
     project_manifest_path as project_manifest_path,
 )
 from .preparation import resolve_project_root as resolve_project_root
+from ..shared_assets import posix_text as posix_text
 
 REMOTE_JOB_WALLTIME_MINUTES: int
 _BATCH_DIRECTORY_NAME: str

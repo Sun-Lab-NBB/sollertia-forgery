@@ -56,6 +56,7 @@ from ..orchestration import (
     resolve_queried_allocations as resolve_queried_allocations,
     resolve_concurrency_reservations as resolve_concurrency_reservations,
 )
+from ..shared_assets import posix_text as posix_text
 from .host_resolution import (
     HOST_LABELS as HOST_LABELS,
     resolve_execution_host as resolve_execution_host,

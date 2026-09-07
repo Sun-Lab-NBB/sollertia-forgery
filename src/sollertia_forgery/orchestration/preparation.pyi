@@ -16,6 +16,7 @@ from .dispatch import (
     SESSION_UNIT as SESSION_UNIT,
     resolve_dispatch as resolve_dispatch,
 )
+from ..shared_assets import posix_text as posix_text
 
 _UNIT_DEPTHS: dict[str, int]
 

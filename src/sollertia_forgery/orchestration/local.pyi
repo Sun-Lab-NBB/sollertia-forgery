@@ -13,6 +13,7 @@ from .graph import (
     PendingJob as PendingJob,
     resolve_dispatch_priorities as resolve_dispatch_priorities,
 )
+from ..shared_assets import posix_text as posix_text
 
 RESERVED_CORES: int
 _WORKER_THREAD_CEILING: int

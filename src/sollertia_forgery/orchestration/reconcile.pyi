@@ -23,6 +23,7 @@ from .remote import (
     resolve_queried_allocations as resolve_queried_allocations,
 )
 from ..server import Server as Server
+from ..shared_assets import posix_text as posix_text
 
 LOCAL_HOST_LABEL: str
 REMOTE_HOST_LABEL: str
