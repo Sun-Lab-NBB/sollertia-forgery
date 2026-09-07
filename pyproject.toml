@@ -130,9 +130,18 @@ dev = [
     "platformdirs>=4,<5",
 ]
 
-# Specifies the tracked directories the source-code distribution leaves out.
+# Names the directories that the source distribution omits. Hatchling reads the root .gitignore alone, so a directory
+# that git leaves untracked still reaches the archive and is named here. The '.claude', '.codegraph', and
+# '.import_linter_cache' directories hold machine-local state, and a running daemon rewrites the codegraph database
+# under the build, failing the sdist walk that reads it.
 [tool.hatch.build.targets.sdist]
-exclude = [".github", "recipe"]
+exclude = [
+    ".claude",
+    ".codegraph",
+    ".github",
+    ".import_linter_cache",
+    "recipe",
+]
 
 # Specifies the library structure.
 [tool.hatch.build.targets.wheel]
