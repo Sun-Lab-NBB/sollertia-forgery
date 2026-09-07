@@ -60,7 +60,7 @@ from ..two_photon import (
     two_photon_job_prerequisites,
     run_two_photon_processing_pipeline,
 )
-from ..shared_assets import ProcessingPipelines, resolve_session_tracker_path
+from ..shared_assets import ProcessingPipelines, posix_text, resolve_session_tracker_path
 from ..microcontrollers import (
     PARSE_JOB_NAME,
     CONTROLLER_EXTRACTION_JOB_NAME,
@@ -545,7 +545,7 @@ def _checksum_command(job: GenericPendingJob) -> tuple[str, ...]:
     Returns:
         The command as an argument vector.
     """
-    command = ["slf", "checksum", "-sp", str(job.unit_path), "-w", str(job.core_weight), "-np"]
+    command = ["slf", "checksum", "-sp", posix_text(path=job.unit_path), "-w", str(job.core_weight), "-np"]
     if job.options.get("regenerate_checksum", False):
         command.append("-rc")
     return tuple(command)
@@ -618,7 +618,7 @@ def _forging_command(job: GenericPendingJob) -> tuple[str, ...]:
         "-dn",
         job.unit_path.name,
         "-pp",
-        str(job.unit_path.parent),
+        posix_text(path=job.unit_path.parent),
         "-id",
         job.job_id,
         "-w",
@@ -636,7 +636,7 @@ def _session_command_preamble(job: GenericPendingJob) -> tuple[str, ...]:
     Returns:
         The shared leading arguments of the command.
     """
-    return "slf", "process", "-sp", str(job.unit_path), "-w", str(job.core_weight), "-np"
+    return "slf", "process", "-sp", posix_text(path=job.unit_path), "-w", str(job.core_weight), "-np"
 
 
 def _load_session(session_path: Path) -> SessionData:

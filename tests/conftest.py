@@ -7,7 +7,7 @@ import shlex
 from types import SimpleNamespace
 import shutil
 from typing import TYPE_CHECKING, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 from dataclasses import field, fields, dataclass
 
@@ -701,8 +701,10 @@ class StubSSHTransport:
         """
         self._responses[prefix] = (stdout, stderr, return_code)
 
-    def local_path(self, remote_path: str | Path) -> Path:
+    def local_path(self, remote_path: str | PurePosixPath) -> Path:
         """Resolves one absolute server path to its location inside the temporary server-side filesystem.
+
+        The server is POSIX, so its paths are read as POSIX ones however this host spells its own.
 
         Args:
             remote_path: The absolute path as the server sees it.
@@ -710,7 +712,7 @@ class StubSSHTransport:
         Returns:
             The corresponding local path under the transport's remote root.
         """
-        path = Path(remote_path)
+        path = PurePosixPath(remote_path)
         relative = path.relative_to(path.anchor) if path.is_absolute() else path
         return self.remote_root.joinpath(relative)
 
@@ -793,7 +795,7 @@ class StubSSHTransport:
             A tuple of the NUL-separated records, the standard error, and the exit code.
         """
         tokens = shlex.split(command)
-        start = Path(tokens[2])
+        start = PurePosixPath(tokens[2])
         minimum = int(tokens[tokens.index("-mindepth") + 1])
         maximum = int(tokens[tokens.index("-maxdepth") + 1])
         names = {tokens[index + 1] for index, argument in enumerate(tokens) if argument == "-name"}
@@ -811,7 +813,7 @@ class StubSSHTransport:
             for entry in directory.iterdir():
                 # 'exists' follows the link and reports a dangling one as absent, which is what '! -type l' does.
                 if minimum <= depth + 1 <= maximum and entry.name in names and entry.exists():
-                    records.append(str(start.joinpath(entry.relative_to(root))))
+                    records.append(str(start.joinpath(entry.relative_to(root).as_posix())))
                 if entry.is_dir():
                     pending.append((entry, depth + 1))
 

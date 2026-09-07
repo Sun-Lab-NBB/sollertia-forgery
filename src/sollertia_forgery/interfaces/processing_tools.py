@@ -63,6 +63,7 @@ from ..orchestration import (
     resolve_queried_allocations,
     resolve_concurrency_reservations,
 )
+from ..shared_assets import posix_text
 from .host_resolution import (
     HOST_LABELS,
     resolve_execution_host,
@@ -1163,7 +1164,7 @@ def _execute_remote_batch(
             for (unit_path, job_id), allocation in sorted(reconciliation.adopted.items())
         ],
         withheld_jobs=[
-            {"unit_path": str(job.unit_path), "job_id": job.job_id, "executor_id": job.executor_id}
+            {"unit_path": posix_text(path=job.unit_path), "job_id": job.job_id, "executor_id": job.executor_id}
             for job in reconciliation.withheld
         ],
         submissions=[
@@ -1246,10 +1247,10 @@ def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
         "job_id": job.job_id,
         "job_name": job.job_name,
         "specifier": job.specifier,
-        "unit_path": str(job.unit_path),
+        "unit_path": posix_text(path=job.unit_path),
         "unit_name": job.name,
         "pipeline": job.pipeline,
-        "tracker_path": str(job.tracker_path),
+        "tracker_path": posix_text(path=job.tracker_path),
         "cores": job.core_weight,
         "memory_mb": job.memory_mb,
         "resident_mb": job.resident_mb,
@@ -1311,8 +1312,8 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
                 "pipeline": job.pipeline,
                 "job_name": job.job_name,
                 "specifier": job.specifier,
-                "session_path": str(job.unit_path),
-                "tracker_path": str(tracker_path),
+                "session_path": posix_text(path=job.unit_path),
+                "tracker_path": posix_text(path=tracker_path),
                 "status": status,
                 "cores": job.core_weight,
                 "memory_mb": job.memory_mb,

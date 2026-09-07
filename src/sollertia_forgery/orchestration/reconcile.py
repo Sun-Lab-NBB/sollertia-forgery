@@ -17,6 +17,7 @@ from .remote import (
     resolve_slurm_allocation,
     resolve_queried_allocations,
 )
+from ..shared_assets import posix_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -216,7 +217,7 @@ def _resolve_recorded_submissions(
             pipeline=job.pipeline,
             job_name=job.job_name,
             specifier=job.specifier,
-            unit_path=str(job.unit_path),
+            unit_path=posix_text(path=job.unit_path),
             unit_name=job.name,
             cores=job.core_weight,
             resident_mb=job.resident_mb,

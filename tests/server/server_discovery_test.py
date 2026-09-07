@@ -221,7 +221,7 @@ def test_discover_project_markers_reads_both_marker_names_in_one_search(
 
     assert stub_ssh_transport.commands == [
         (
-            f"find -L {connected_server.root.joinpath(_PROJECT)} -mindepth 2 -maxdepth 4 "
+            f"find -L {connected_server.root.joinpath(_PROJECT).as_posix()} -mindepth 2 -maxdepth 4 "
             f"'(' -name dataset.yaml -o -name session_data.yaml ')' '!' -type l -print0"
         )
     ]

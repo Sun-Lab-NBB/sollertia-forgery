@@ -139,7 +139,7 @@ def test_a_write_fault_marks_the_job_failed_before_it_propagates(training_sessio
 
     # Occupying the stored value's location with a directory faults the write inside the calculation itself, which is
     # the one place this pipeline's failure envelope has to cover.
-    with pytest.raises(IsADirectoryError):
+    with pytest.raises(OSError, match=r"ax_checksum\.txt") as failure:
         run_checksum_processing_pipeline(
             session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
         )
@@ -147,7 +147,9 @@ def test_a_write_fault_marks_the_job_failed_before_it_propagates(training_sessio
     status, error_message = _read_job_state(session=training_session)
     assert status == "FAILED"
     assert error_message is not None
-    assert error_message.startswith("IsADirectoryError: ")
+    # The platform decides which OSError a write onto an occupied location raises, and the tracker records the one
+    # that propagated rather than one of its own choosing.
+    assert error_message.startswith(f"{type(failure.value).__name__}: ")
 
 
 def test_discovery_reports_the_single_job_the_pipeline_owns(training_session: SessionData) -> None:

@@ -257,7 +257,9 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
     runtime_output = runtime_directory.joinpath("runtime_data.feather")
     runtime_output.write_bytes(b"runtime")
 
-    assert lock_path.is_file(), "the tracker did not leave the lock file the cleanup is expected to remove"
+    # A tracker leaves its lock file behind on POSIX and removes it as it releases the lock on Windows, so the
+    # cleanup is handed one to remove on either platform.
+    lock_path.touch()
 
     removed = clean_pipeline_output(pipeline="checksum", unit_paths=[session_root(session=experiment_session)])
 

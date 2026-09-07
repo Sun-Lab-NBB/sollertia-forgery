@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from ataraxis_time import TimeUnits, to_timedelta
 
+from ..shared_assets import posix_text
+
 if TYPE_CHECKING:
     from pathlib import Path
     import datetime
@@ -66,7 +68,7 @@ class Job:
     ) -> None:
         # The Server instance transfers the script to this path, so the path is fixed at construction rather than
         # at submission.
-        self.remote_script_path: str = str(working_directory.joinpath(f"{job_name}.sh"))
+        self.remote_script_path: str = posix_text(path=working_directory.joinpath(f"{job_name}.sh"))
 
         self.job_id: str | None = None
         self.job_name: str = job_name  # Supports more informative terminal prints.
@@ -74,8 +76,8 @@ class Job:
         self._command: _SlurmScript = _SlurmScript(
             cpus_per_task=cpu_threads,
             job_name=job_name,
-            output=str(output_log),
-            error=str(error_log),
+            output=posix_text(path=output_log),
+            error=posix_text(path=error_log),
             memory=f"{ram}G",
             time=to_timedelta(time=time, from_units=TimeUnits.MINUTE),
             dependencies=tuple(dependencies),
