@@ -1617,8 +1617,12 @@ def test_two_photon_stages_are_sized_from_the_raw_recording_geometry(experiment_
         assert estimates[str(job_name), specifier] == cindra_single_recording_footprint(
             session=experiment_session, job_name=job_name, specifier=specifier
         )
-    # cindra picks each stage's width itself, so the allocation this call declared does not survive the sizing pass.
-    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""].cores != 4
+    # cindra picks each stage's width itself, so the allocation a caller declares does not survive the sizing pass.
+    # Sizing one stage again at a second declared width answers with the same footprint, which a pass carrying that
+    # declaration through could not do.
+    binarize_key = (str(SingleRecordingJobNames.BINARIZE), "")
+    redeclared = two_photon_estimates(session=experiment_session, jobs=[(*binarize_key, 1)])
+    assert redeclared[binarize_key] == estimates[binarize_key]
 
 
 def test_a_plane_job_whose_specifier_names_no_plane_takes_the_widest_plane(
