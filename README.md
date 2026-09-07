@@ -89,6 +89,18 @@ ___
 For users, all library dependencies are installed automatically by all supported installation methods. For developers,
 see the [Developers](#developers) section for information on installing additional development dependencies.
 
+On macOS, this library uses Numba's OpenMP threading layer, because the Numba macOS wheel carries no TBB support. The
+OpenMP runtime (`libomp.dylib`) ships with neither Numba nor macOS itself, so it is installed separately.
+
+Run `slf omp` to report the runtimes present on the host, and `slf omp --yes` to make one loadable. The command finds
+runtimes installed by [Homebrew](https://brew.sh/) or MacPorts, present in the active conda environment, or carried
+inside an installed Python package, and links the one it finds into the library directory of the interpreter that runs
+it. That directory belongs to the interpreter, so a conda environment needs no elevated permission while a system-wide
+interpreter does. Keep the same interpreter on an elevated run, because the link target follows the interpreter that
+runs the command. Install one with `brew install libomp` when the command finds none. Without a loadable runtime, the
+two-photon and forging pipelines fail once they reach one of cindra's parallelized stages. Linux and Windows run the
+TBB threading layer, which needs no additional steps, so `slf omp` errors when run on them.
+
 ___
 
 ## Installation
@@ -337,11 +349,9 @@ than to a direct invocation. That is how a scheduler drives cross-job parallelis
 own allocation. The `runtime` subcommand uses no identifier, since its single-job pipeline has no remote-dispatch job.
 
 ***Note,*** on macOS the Numba threading layer resolves its OpenMP runtime through the rpath dependency that the omppool
-extension records. The loader expands that dependency against the entries the running interpreter carries, and those
-entries name the interpreter's own library directory. Run `slf omp` once per host to report what it would link, and
-`slf omp -y` to write the link into that directory. A conda environment grants that write without `sudo`, while a
-system-wide interpreter needs it. Every pipeline that dispatches a parallel worker pool verifies the runtime before it
-starts a job.
+extension records, which the loader expands against the entries the running interpreter carries. The
+[Dependencies](#dependencies) section covers linking one. Every pipeline that dispatches a parallel worker pool verifies
+the runtime before it starts a job.
 
 ### Configuring Server Access
 
@@ -612,6 +622,9 @@ require that mamba is installed through the [miniforge3](https://github.com/cond
    `mamba install tox uv tox-uv` command.
 5. Use the `tox -e create` command to create the project-specific development environment followed by `tox -e install`
    command to install the project into that environment as a library.
+6. ***macOS only,*** activate the environment created by step 5 and run `slf omp --yes` to link an OpenMP runtime into
+   it. Run `brew install libomp` first when `slf omp` reports that the host holds none. The environment carries no
+   OpenMP runtime of its own, and the `py314-test` task fails without one.
 
 ### Additional Dependencies
 
@@ -789,6 +802,10 @@ modules by their filename suffix, so a new module needs no edit to the server it
 omit list in `pyproject.toml`, because tool modules reach infrastructure that only a live MCP session supplies.
 
 ### Automation Troubleshooting
+
+***Note,*** on macOS, a test run in which most tests fail with `ValueError: No threading layer could be loaded` holds
+no loadable OpenMP runtime. The hint that error carries names `intel-openmp`, which the macOS threading layer does
+not use. Run `slf omp --yes` from the activated development environment instead.
 
 Many packages used in `tox` automation pipelines (uv, mypy, ruff) and `tox` itself may experience runtime failures. In
 most cases, this is related to their caching behavior. If an unintelligible error is encountered with any of the
