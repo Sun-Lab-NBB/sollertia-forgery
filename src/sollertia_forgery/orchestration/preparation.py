@@ -10,6 +10,7 @@ from ataraxis_base_utilities import console
 from .graph import build_batch_document
 from .hosts import plan_artifact_path, state_artifact_paths
 from .dispatch import DATASET_UNIT, SESSION_UNIT, resolve_dispatch
+from ..shared_assets import posix_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -122,7 +123,7 @@ def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
 
     # Indexing the parents of a path shallower than this depth raises an IndexError, and every caller documents a
     # ValueError for this failure, so a shallow path is refused here under the documented error.
-    shallow = sorted(str(unit_path) for unit_path in unit_paths if len(unit_path.parents) < depth)
+    shallow = sorted(posix_text(path=unit_path) for unit_path in unit_paths if len(unit_path.parents) < depth)
     if shallow:
         message = (
             f"Unable to resolve the project of a batch from the {unit_kind} path(s) {shallow}. A {unit_kind} sits "
@@ -133,9 +134,9 @@ def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
     roots = {unit_path.parents[depth - 1] for unit_path in unit_paths}
     if len(roots) > 1:
         message = (
-            f"Unable to resolve a batch spanning the projects {sorted(str(root) for root in roots)}. The plan and "
-            f"state artifacts that resolve a batch are written per project, so every unit of one batch must "
-            f"belong to the same project."
+            f"Unable to resolve a batch spanning the projects {sorted(posix_text(path=root) for root in roots)}. "
+            f"The plan and state artifacts that resolve a batch are written per project, so every unit of one "
+            f"batch must belong to the same project."
         )
         console.error(message=message, error=ValueError)
     return roots.pop()

@@ -5,7 +5,7 @@ reads.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from dataclasses import dataclass
 
 import polars as pl
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
     from sollertia_forgery.server import Server
 
-_SERVER_PROJECT_ROOT: Path = Path("/data/sollertia/TestProject")
+_SERVER_PROJECT_ROOT: PurePosixPath = PurePosixPath("/data/sollertia/TestProject")
 """The project directory every remote-host test addresses on the stubbed compute server."""
 
 
@@ -206,7 +206,7 @@ def test_a_batched_remote_reset_costs_one_invocation() -> None:
 
     host.reset_jobs(
         pipeline="video",
-        job_ids_by_unit={Path("/data/P/305/a"): ["j1"], Path("/data/P/305/b"): ["j2"]},
+        job_ids_by_unit={PurePosixPath("/data/P/305/a"): ["j1"], PurePosixPath("/data/P/305/b"): ["j2"]},
     )
 
     assert len(server.commands) == 1
@@ -236,7 +236,7 @@ def test_a_remote_cleanup_reports_the_bytes_each_removal_freed() -> None:
         stdout="4096 /data/P/305/a/processed_data/video\n17 /data/P/305/a/video_tracker.yaml\n"
     )
 
-    removed = host.clean(pipeline="video", unit_paths=[Path("/data/P/305/a")])
+    removed = host.clean(pipeline="video", unit_paths=[PurePosixPath("/data/P/305/a")])
 
     assert removed == [
         {"path": "/data/P/305/a/processed_data/video", "removed_bytes": 4096},
@@ -249,7 +249,7 @@ def test_a_remote_cleanup_ignores_output_that_is_not_a_removal() -> None:
     """Verifies unrelated lines never become removals, so a warning on the same stream cannot inflate the report."""
     host, _server = build_remote_host(stdout="warning: something happened\n2048 /data/P/305/a/processed_data/video\n")
 
-    removed = host.clean(pipeline="video", unit_paths=[Path("/data/P/305/a")])
+    removed = host.clean(pipeline="video", unit_paths=[PurePosixPath("/data/P/305/a")])
 
     assert removed == [{"path": "/data/P/305/a/processed_data/video", "removed_bytes": 2048}]
 
@@ -261,7 +261,7 @@ def test_defining_a_remote_dataset_names_its_sessions_and_rebuild_flags() -> Non
     host, server = build_remote_host()
 
     host.define_dataset(
-        project_root=Path("/data/P"),
+        project_root=PurePosixPath("/data/P"),
         dataset_name="ds",
         session_names=["s1", "s2"],
         recreate_animals=["305"],
@@ -279,7 +279,7 @@ def test_defining_a_remote_dataset_names_its_sessions_and_rebuild_flags() -> Non
     assert "slf forge" not in issued
 
     host.define_dataset(
-        project_root=Path("/data/P"),
+        project_root=PurePosixPath("/data/P"),
         dataset_name="ds",
         session_names=["s2", "s1"],
         recreate_animals=[],
@@ -300,7 +300,7 @@ def test_a_failing_remote_operation_reports_the_invocation_it_ran() -> None:
 
     # Spans the wrap the console formatter inserts, since the message is longer than one console line.
     with pytest.raises(RuntimeError, match=r"invocation 'slf reset -p video -up [^']+'\.[\s\S]+exited with code 1"):
-        host.reset_jobs(pipeline="video", job_ids_by_unit={Path("/data/P/305/a"): ["j1"]})
+        host.reset_jobs(pipeline="video", job_ids_by_unit={PurePosixPath("/data/P/305/a"): ["j1"]})
 
 
 def test_chained_commands_stop_at_the_first_failure() -> None:
@@ -492,7 +492,7 @@ def test_each_host_reports_itself_under_the_name_a_batch_records(connected_serve
     assert LocalHost().label == "local"
     assert remote_host.label == "remote"
     assert remote_host.server is connected_server
-    assert repr(remote_host) == f"RemoteHost(host={connected_server.host}, root={connected_server.root})"
+    assert repr(remote_host) == (f"RemoteHost(host={connected_server.host}, root={connected_server.root.as_posix()})")
 
 
 # The local host
@@ -529,7 +529,7 @@ def test_planning_reports_the_figures_each_unit_recorded(project_root: Path, exp
     planned = LocalHost.plan(project_root=project_root, unit_paths=[session_path], unit_kind=SESSION_UNIT, replan=True)
 
     assert len(planned) == 1
-    assert planned[0]["unit_path"] == str(session_path)
+    assert planned[0]["unit_path"] == session_path.as_posix()
     assert planned[0]["unit_name"] == experiment_session.session_name
     # The checksum stage is the one pipeline whose every job reads data this session carries, so it is the one that
     # survives the sizing pass.
@@ -698,9 +698,9 @@ def test_the_local_host_resolves_where_each_units_tracker_sits(experiment_sessio
     resolved = LocalHost.resolve_tracker_paths(pipeline="runtime", unit_paths=[session_path, unloadable])
 
     assert resolved == {
-        str(session_path): str(
-            resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.RUNTIME)
-        )
+        session_path.as_posix(): resolve_session_tracker_path(
+            session=experiment_session, pipeline=ProcessingPipelines.RUNTIME
+        ).as_posix()
     }
 
 
@@ -792,7 +792,7 @@ def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
     )
 
     assert summarized[0] == {
-        "unit_path": str(planned),
+        "unit_path": planned.as_posix(),
         "unit_name": planned.name,
         "job_count": 2,
         "summed_memory_mb": 4608,
@@ -903,7 +903,7 @@ def test_a_server_side_invocation_killed_by_a_signal_is_reported_as_a_failure(
     # The invocation whose output is parsed by the caller answers the same way, so a killed cleanup never reads as a
     # short removal list.
     with pytest.raises(RuntimeError):
-        captured_host.clean(pipeline="video", unit_paths=[Path("/data/P/305/a")])
+        captured_host.clean(pipeline="video", unit_paths=[PurePosixPath("/data/P/305/a")])
 
 
 def test_the_remote_host_resolves_no_tracker_location_at_all(connected_server: Server) -> None:

@@ -27,6 +27,7 @@ from .planning import (
 )
 from ..managing import project_jobs_path, generate_project_manifest
 from .maintenance import reset_tracked_jobs, clean_pipeline_output
+from ..shared_assets import posix_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -174,10 +175,10 @@ class LocalHost:
             try:
                 unit_plan = resolve(unit_path, regenerate_plan=replan)
             except Exception as exception:
-                planned.append({"unit_path": str(unit_path), "error": str(exception), "job_count": 0})
+                planned.append({"unit_path": posix_text(path=unit_path), "error": str(exception), "job_count": 0})
                 continue
             summary: dict[str, Any] = {
-                "unit_path": str(unit_path),
+                "unit_path": posix_text(path=unit_path),
                 "unit_name": unit_plan.unit_name,
                 "job_count": len(unit_plan.entries),
                 "summed_memory_mb": sum(entry.memory_mb for entry in unit_plan.entries),
@@ -329,7 +330,7 @@ class LocalHost:
         resolved: dict[str, str] = {}
         for unit_path in unit_paths:
             try:
-                resolved[str(unit_path)] = str(dispatch.tracker_path(dispatch.load(unit_path)))
+                resolved[posix_text(path=unit_path)] = posix_text(path=dispatch.tracker_path(dispatch.load(unit_path)))
             except Exception as exception:
                 console.echo(message=f"Unable to locate the '{pipeline}' tracker for '{unit_path}'. {exception}")
         return resolved
@@ -355,7 +356,7 @@ class RemoteHost:
 
     def __repr__(self) -> str:
         """Returns a string representation of the RemoteHost instance."""
-        return f"RemoteHost(host={self._server.host}, root={self._server.root})"
+        return f"RemoteHost(host={self._server.host}, root={posix_text(path=self._server.root)})"
 
     @property
     def label(self) -> str:
@@ -702,7 +703,7 @@ def _plan_commands(project_root: Path, unit_paths: Sequence[Path], unit_kind: st
     if replan:
         plan.append("-rp")
 
-    projection = ["slf", "plan", "project", "-pp", str(project_root)]
+    projection = ["slf", "plan", "project", "-pp", posix_text(path=project_root)]
     # Naming no unit leaves the projection alone to run, which is how a caller reprojects an already planned project.
     return [projection] if not unit_paths else [plan, projection]
 
@@ -732,7 +733,7 @@ def _summarize_planned_units(
         if not planned:
             summarized.append(
                 {
-                    "unit_path": str(unit_path),
+                    "unit_path": posix_text(path=unit_path),
                     "error": "The project's plan projection holds no job for this unit, so it planned nothing.",
                     "job_count": 0,
                 }
@@ -740,7 +741,7 @@ def _summarize_planned_units(
             continue
         summarized.append(
             {
-                "unit_path": str(unit_path),
+                "unit_path": posix_text(path=unit_path),
                 "unit_name": unit_path.name,
                 "job_count": len(planned),
                 "summed_memory_mb": sum(int(row["memory_mb"]) for row in planned),
@@ -763,7 +764,7 @@ def _state_command(project_root: Path, unit_paths: Sequence[Path], unit_kind: st
     """
     if unit_kind == DATASET_UNIT:
         return ["slf", "dataset-state", *_repeated(flag="-dp", values=unit_paths)]
-    return ["slf", "manifest", "-pp", str(project_root), "create"]
+    return ["slf", "manifest", "-pp", posix_text(path=project_root), "create"]
 
 
 def _parse_removals(output: str) -> list[dict[str, Any]]:
@@ -817,7 +818,7 @@ def _definition_command(
         f"from sollertia_forgery.forging import define_forging_dataset; "
         f"define_forging_dataset(name={json.dumps(dataset_name)}, "
         f"session_names=tuple({json.dumps(list(session_names))}), "
-        f"project_root=Path({json.dumps(str(project_root))}), "
+        f"project_root=Path({json.dumps(posix_text(path=project_root))}), "
         f"force_recreate={force_recreate}, "
         f"recreate_animals=tuple({json.dumps(list(recreate_animals))}))"
     )
@@ -853,4 +854,4 @@ def _repeated(flag: str, values: Sequence[Path]) -> list[str]:
     Returns:
         The flattened argument list.
     """
-    return [argument for value in values for argument in (flag, str(value))]
+    return [argument for value in values for argument in (flag, posix_text(path=value))]

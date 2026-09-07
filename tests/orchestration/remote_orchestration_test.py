@@ -5,7 +5,7 @@ job commands, the batch script the scheduler runs, and the durable ledger of wha
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from dataclasses import field, dataclass
 
 import polars as pl
@@ -56,8 +56,11 @@ if TYPE_CHECKING:
     from sollertia_forgery.server import Server
     from sollertia_forgery.server.server_configuration import ServerConfiguration
 
-_SERVER_PROJECT_ROOT: Path = Path("/data/sollertia/TestProject")
+_SERVER_PROJECT_ROOT: PurePosixPath = PurePosixPath("/data/sollertia/TestProject")
 """The project directory every server-side preparation test addresses on the stubbed compute server."""
+
+_STUB_SERVER_ROOT: PurePosixPath = PurePosixPath("/server/root")
+"""The data root the stand-in server reports, under which it holds every batch directory it is asked to create."""
 
 pytestmark: pytest.MarkDecorator = pytest.mark.usefixtures("isolated_working_directory")
 """Points every test in this module at an isolated platform working directory, under which the ledger is written."""
@@ -67,16 +70,16 @@ pytestmark: pytest.MarkDecorator = pytest.mark.usefixtures("isolated_working_dir
 class StubServer:
     """Stands in for a connected compute server, recording the jobs it is asked to submit."""
 
-    root: Path = Path("/server/root")
+    root: PurePosixPath = _STUB_SERVER_ROOT
     """The server's data root."""
     environment: str = "slf_server"
     """The environment every submitted script activates."""
     submitted: list[Job] = field(default_factory=list)
     """The jobs the server accepted, in submission order."""
-    created: list[Path] = field(default_factory=list)
+    created: list[PurePosixPath] = field(default_factory=list)
     """The directories the server was asked to create."""
 
-    def create(self, remote_path: Path, *, is_dir: bool = True, parents: bool = True) -> None:  # noqa: ARG002
+    def create(self, remote_path: PurePosixPath, *, is_dir: bool = True, parents: bool = True) -> None:  # noqa: ARG002
         """Records a directory creation request."""
         self.created.append(remote_path)
 

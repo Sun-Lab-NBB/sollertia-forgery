@@ -278,7 +278,9 @@ class _StubPreparationHost:
         Returns:
             The tracker path of each unit, keyed by the unit path as a string.
         """
-        return {str(unit_path): str(unit_path.joinpath(f"{pipeline}_tracker.yaml")) for unit_path in unit_paths}
+        return {
+            unit_path.as_posix(): unit_path.joinpath(f"{pipeline}_tracker.yaml").as_posix() for unit_path in unit_paths
+        }
 
 
 def test_core_allocations_come_from_the_table_and_clamp_to_the_budget() -> None:
@@ -412,7 +414,7 @@ def test_admission_blocks_a_dependent_whose_prerequisite_failed() -> None:
     """Verifies that a job whose upstream failed is moved aside rather than waiting for an outcome that cannot come."""
     downstream = _make_pending_job(job_id="down", prerequisites=("up",))
     state = _build_state(jobs=[downstream])
-    state.failed_job_keys.add((str(_UNIT), "up"))
+    state.failed_job_keys.add((_UNIT.as_posix(), "up"))
 
     assert not _run_admission_pass(state=state).submitted
     assert [job.job_id for job in state.blocked_jobs] == ["down"]
@@ -608,7 +610,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         ],
         unit_paths=[unit],
         options={"regenerate_checksum": True},
-        tracker_paths={str(unit): "/nonexistent/project/305/a_session/tracker.yaml"},
+        tracker_paths={unit.as_posix(): "/nonexistent/project/305/a_session/tracker.yaml"},
     )
 
     assert document.pipeline == _PIPELINE
@@ -619,7 +621,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "job_id": _resolve_identifier(job_name="hash", specifier="b"),
         "job_name": "hash",
         "specifier": "b",
-        "unit_path": str(unit),
+        "unit_path": unit.as_posix(),
         "unit_name": unit.name,
         "pipeline": _PIPELINE,
         "tracker_path": "/nonexistent/project/305/a_session/tracker.yaml",
@@ -633,7 +635,9 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "status": "SCHEDULED",
         "executor_id": "",
     }
-    assert document.units == [{"unit_path": str(unit), "unit_name": unit.name, "job_count": 1, "blocked_count": 0}]
+    assert document.units == [
+        {"unit_path": unit.as_posix(), "unit_name": unit.name, "job_count": 1, "blocked_count": 0}
+    ]
     assert document.blocked_jobs == []
 
 
@@ -829,7 +833,7 @@ def test_a_prepared_batch_carries_the_tracker_location_the_host_resolved_for_eac
     # The local engine opens those files directly to seed and extend its recorded outcomes, so descriptors carrying
     # no location would leave every prerequisite unsatisfied and a multi-stage batch would report its later stages
     # blocked.
-    assert document.jobs[0]["tracker_path"] == str(unit.joinpath(f"{_PIPELINE}_tracker.yaml"))
+    assert document.jobs[0]["tracker_path"] == unit.joinpath(f"{_PIPELINE}_tracker.yaml").as_posix()
     assert document.jobs[0]["options"] == {"regenerate_checksum": True}
     assert document.host == "workstation"
     # A session pipeline materializes its whole project, and the caller's own replan choice reaches the host.

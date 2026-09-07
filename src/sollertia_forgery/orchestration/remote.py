@@ -23,6 +23,7 @@ from .dispatch import resolve_unit_kind, resolve_job_command
 from .planning import project_plan_path
 from ..managing import project_jobs_path, project_manifest_path
 from .preparation import resolve_project_root
+from ..shared_assets import posix_text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -369,7 +370,7 @@ def submit_batch(
         batch=SubmissionBatch(
             batch_id=batch_id,
             batch_ids=covered,
-            batch_directory=str(batch_directory),
+            batch_directory=posix_text(path=batch_directory),
             submitted_at=submitted_at,
             walltime_minutes=walltime_minutes,
             submissions=[],
@@ -393,7 +394,7 @@ def submit_batch(
                 batch=SubmissionBatch(
                     batch_id=batch_id,
                     batch_ids=covered,
-                    batch_directory=str(batch_directory),
+                    batch_directory=posix_text(path=batch_directory),
                     submitted_at=submitted_at,
                     walltime_minutes=walltime_minutes,
                     submissions=submissions,
@@ -492,7 +493,7 @@ def resolve_tracker_claims(
             continue
         unit_kind = resolve_unit_kind(pipeline=submission.pipeline)
         project_root = resolve_project_root(unit_paths=[Path(submission.unit_path)], unit_kind=unit_kind)
-        group = (unit_kind, str(project_root))
+        group = (unit_kind, posix_text(path=project_root))
         units.setdefault(group, set()).add(submission.unit_path)
         pipelines.setdefault(group, set()).add(submission.pipeline)
 
@@ -759,7 +760,7 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
     if not server.is_directory(remote_path=project_path):
         message = (
             f"Unable to mirror the state of project '{project}'. The remote compute server holds no directory at "
-            f"'{project_path}'."
+            f"'{posix_text(path=project_path)}'."
         )
         console.error(message=message, error=FileNotFoundError)
 
@@ -938,12 +939,12 @@ def _submit_ordered_jobs(
                 pipeline=job.pipeline,
                 job_name=job.job_name,
                 specifier=job.specifier,
-                unit_path=str(job.unit_path),
+                unit_path=posix_text(path=job.unit_path),
                 unit_name=job.name,
                 cores=job.core_weight,
                 resident_mb=job.resident_mb,
-                output_log=str(output_log),
-                error_log=str(error_log),
+                output_log=posix_text(path=output_log),
+                error_log=posix_text(path=error_log),
             )
         )
 
@@ -978,10 +979,14 @@ def _regenerate_remote_state(server: Server, project_path: Path, datasets: Seque
         project_path: The path to the project's root directory on the server.
         datasets: The project's dataset directories.
     """
-    commands = [["slf", "manifest", "-pp", str(project_path), "create"]]
+    commands = [["slf", "manifest", "-pp", posix_text(path=project_path), "create"]]
     if datasets:
         commands.append(
-            ["slf", "dataset-state", *[argument for dataset in datasets for argument in ("-dp", str(dataset))]]
+            [
+                "slf",
+                "dataset-state",
+                *[argument for dataset in datasets for argument in ("-dp", posix_text(path=dataset))],
+            ]
         )
 
     for command in commands:

@@ -30,6 +30,7 @@ from .responses import (
 )
 from .mcp_instance import mcp
 from ..orchestration import DATASET_UNIT, SESSION_UNIT, connect_to_server
+from ..shared_assets import posix_text
 
 _MASKED_PASSWORD: str = "<masked>"  # noqa: S105 - literal masking placeholder, not a real password.
 """The placeholder every tool substitutes for the stored password when it reports a configuration back. The write tool
@@ -306,7 +307,8 @@ def discover_remote_project_tool(
                 return error_response(
                     message=(
                         f"Unable to discover the '{project}' project on the compute server. The server holds no "
-                        f"directory at '{project_path}', which is where its configured data root resolves that name."
+                        f"directory at '{posix_text(path=project_path)}', which is where its configured data root "
+                        f"resolves that name."
                     )
                 )
             markers = discover_project_markers(
@@ -316,21 +318,22 @@ def discover_remote_project_tool(
         return error_response(message=f"Unable to discover the '{project}' project on the compute server. {exception}")
 
     entries: list[dict[str, str]] = [
-        {"unit_kind": DATASET_UNIT, "dataset": dataset.name, "unit_path": str(dataset)} for dataset in markers.datasets
+        {"unit_kind": DATASET_UNIT, "dataset": dataset.name, "unit_path": posix_text(path=dataset)}
+        for dataset in markers.datasets
     ]
     entries.extend(
         {
             "unit_kind": SESSION_UNIT,
             "animal": session.animal,
             "session": session.session,
-            "unit_path": str(project_path.joinpath(session.animal, session.session)),
+            "unit_path": posix_text(path=project_path.joinpath(session.animal, session.session)),
         }
         for session in markers.sessions
     )
 
     response = ok_response(
         project=project_path.name,
-        project_path=str(project_path),
+        project_path=posix_text(path=project_path),
         total_sessions=len(markers.sessions),
         total_datasets=len(markers.datasets),
         breakdown={
@@ -528,7 +531,7 @@ def pull_remote_path_tool(remote_path: str, destination: str) -> dict[str, Any]:
 
     copied = sorted(path for path in local_path.rglob("*") if path.is_file()) if is_directory else [local_path]
     return ok_response(
-        remote_path=str(source),
+        remote_path=posix_text(path=source),
         local_path=str(local_path),
         is_directory=is_directory,
         total_files=len(copied),

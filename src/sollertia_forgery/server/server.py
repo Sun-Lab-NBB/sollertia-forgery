@@ -16,6 +16,8 @@ import paramiko
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 from ataraxis_base_utilities import LogLevel, console
 
+from ..shared_assets import posix_text
+
 if TYPE_CHECKING:
     from types import TracebackType
     from collections.abc import Sequence
@@ -473,11 +475,11 @@ class Server:
             FileNotFoundError: If the remote path does not exist on the server.
         """
         try:
-            remote_stat = self._sftp.stat(path=str(remote_path))
+            remote_stat = self._sftp.stat(path=posix_text(path=remote_path))
         except FileNotFoundError:
             message = (
-                f"Unable to download {remote_path} from the remote compute server. The server holds no file or "
-                f"directory at that path."
+                f"Unable to download {posix_text(path=remote_path)} from the remote compute server. The server "
+                f"holds no file or directory at that path."
             )
             console.error(message=message, error=FileNotFoundError)
 
@@ -485,7 +487,7 @@ class Server:
             self._pull_directory(local_path=local_path, remote_path=remote_path)
         else:
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            self._sftp.get(localpath=str(local_path), remotepath=str(remote_path))
+            self._sftp.get(localpath=str(local_path), remotepath=posix_text(path=remote_path))
 
     def push(self, local_path: Path, remote_path: Path) -> None:
         """Uploads a file or directory from the local machine to the remote server.
@@ -511,7 +513,7 @@ class Server:
             self._push_directory(local_path=local_path, remote_path=remote_path)
         else:
             self._create_directory(remote_path=remote_path.parent, parents=True)
-            self._sftp.put(localpath=str(local_path), remotepath=str(remote_path))
+            self._sftp.put(localpath=str(local_path), remotepath=posix_text(path=remote_path))
 
     def create(self, remote_path: Path, *, is_dir: bool = True, parents: bool = True) -> None:
         """Creates a file or directory on the remote server.
@@ -536,7 +538,7 @@ class Server:
 
             if not self.exists(remote_path=remote_path):
                 # Opening the path for writing and immediately closing it leaves an empty file behind.
-                with self._sftp.open(filename=str(remote_path), mode="w"):
+                with self._sftp.open(filename=posix_text(path=remote_path), mode="w"):
                     pass
 
     def remove(self, remote_path: Path, *, is_dir: bool, recursive: bool = False) -> None:
@@ -552,9 +554,9 @@ class Server:
             if recursive:
                 self._recursive_remove(remote_path=remote_path)
             else:
-                self._sftp.rmdir(path=str(remote_path))
+                self._sftp.rmdir(path=posix_text(path=remote_path))
         else:
-            self._sftp.unlink(path=str(remote_path))
+            self._sftp.unlink(path=posix_text(path=remote_path))
 
     def exists(self, remote_path: Path) -> bool:
         """Returns True if the target file or directory exists on the remote server.
@@ -566,7 +568,7 @@ class Server:
             True if the path exists, False otherwise.
         """
         try:
-            self._sftp.stat(path=str(remote_path))
+            self._sftp.stat(path=posix_text(path=remote_path))
         except FileNotFoundError:
             return False
         else:
@@ -582,7 +584,7 @@ class Server:
             True if the path exists and is a directory, False otherwise.
         """
         try:
-            file_stat = self._sftp.stat(path=str(remote_path))
+            file_stat = self._sftp.stat(path=posix_text(path=remote_path))
         except FileNotFoundError:
             return False
         else:
@@ -600,7 +602,7 @@ class Server:
         Raises:
             FileNotFoundError: If the directory does not exist.
         """
-        return self._sftp.listdir(path=str(remote_path))
+        return self._sftp.listdir(path=posix_text(path=remote_path))
 
     def find_paths(
         self, remote_path: Path, names: Sequence[str], *, minimum_depth: int, maximum_depth: int
@@ -632,8 +634,8 @@ class Server:
         """
         if not self.is_directory(remote_path=remote_path):
             message = (
-                f"Unable to search {remote_path} on the remote compute server. The server holds no directory at that "
-                f"path."
+                f"Unable to search {posix_text(path=remote_path)} on the remote compute server. The server holds "
+                f"no directory at that path."
             )
             console.error(message=message, error=FileNotFoundError)
 
@@ -649,7 +651,7 @@ class Server:
             [
                 "find",
                 "-L",
-                str(remote_path),
+                posix_text(path=remote_path),
                 "-mindepth",
                 str(minimum_depth),
                 "-maxdepth",
@@ -667,8 +669,8 @@ class Server:
         result = self.execute_command(command=command)
         if result.return_code != 0:
             message = (
-                f"Unable to search {remote_path} on the remote compute server. The search reached only part of the "
-                f"tree, so its answer would omit paths the server holds. "
+                f"Unable to search {posix_text(path=remote_path)} on the remote compute server. The search "
+                f"reached only part of the tree, so its answer would omit paths the server holds. "
                 f"{result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
             )
             console.error(message=message, error=RuntimeError)
@@ -683,9 +685,9 @@ class Server:
             # carry it is output that the search did not produce, and the answer containing it cannot be trusted.
             if not match.is_relative_to(remote_path):
                 message = (
-                    f"Unable to search {remote_path} on the remote compute server. The search reported the entry "
-                    f"'{record[:_REPORTED_ERROR_CHARACTERS]}', which does not sit under the searched directory, so "
-                    f"its answer carries output another program wrote."
+                    f"Unable to search {posix_text(path=remote_path)} on the remote compute server. The search "
+                    f"reported the entry '{record[:_REPORTED_ERROR_CHARACTERS]}', which does not sit under the "
+                    f"searched directory, so its answer carries output another program wrote."
                 )
                 console.error(message=message, error=RuntimeError)
             matches.append(match)
@@ -757,7 +759,7 @@ class Server:
         """
         local_path.mkdir(parents=True, exist_ok=True)
 
-        remote_items = self._sftp.listdir_attr(path=str(remote_path))
+        remote_items = self._sftp.listdir_attr(path=posix_text(path=remote_path))
 
         for item in remote_items:
             remote_item_path = remote_path / item.filename
@@ -766,7 +768,7 @@ class Server:
             if stat.S_ISDIR(item.st_mode):
                 self._pull_directory(local_path=local_item_path, remote_path=remote_item_path)
             else:
-                self._sftp.get(localpath=str(local_item_path), remotepath=str(remote_item_path))
+                self._sftp.get(localpath=str(local_item_path), remotepath=posix_text(path=remote_item_path))
 
     def _push_directory(self, local_path: Path, remote_path: Path) -> None:
         """Recursively uploads a directory to the remote server.
@@ -783,7 +785,7 @@ class Server:
             if local_item_path.is_dir():
                 self._push_directory(local_path=local_item_path, remote_path=remote_item_path)
             else:
-                self._sftp.put(localpath=str(local_item_path), remotepath=str(remote_item_path))
+                self._sftp.put(localpath=str(local_item_path), remotepath=posix_text(path=remote_item_path))
 
     def _create_directory(self, remote_path: Path, *, parents: bool = True) -> None:
         """Creates a directory on the remote server.
@@ -797,7 +799,7 @@ class Server:
             remote_path: The absolute path to the directory to create on the remote server.
             parents: Determines whether missing parent directories are created alongside the requested directory.
         """
-        remote_path_str = str(remote_path)
+        remote_path_str = posix_text(path=remote_path)
 
         if parents:
             result = self.execute_command(command=f"mkdir -p {shlex.quote(remote_path_str)}")
@@ -820,7 +822,7 @@ class Server:
             remote_path: The path to the remote directory to recursively remove.
         """
         try:
-            items = self._sftp.listdir_attr(path=str(remote_path))
+            items = self._sftp.listdir_attr(path=posix_text(path=remote_path))
 
             for item in items:
                 item_path = remote_path / item.filename
@@ -828,13 +830,14 @@ class Server:
                 if stat.S_ISDIR(item.st_mode):
                     self._recursive_remove(remote_path=item_path)
                 else:
-                    self._sftp.unlink(path=str(item_path))
+                    self._sftp.unlink(path=posix_text(path=item_path))
 
-            self._sftp.rmdir(path=str(remote_path))
+            self._sftp.rmdir(path=posix_text(path=remote_path))
 
         except Exception as error:
             console.echo(
-                message=f"Unable to remove the specified directory {remote_path}: {error!s}", level=LogLevel.WARNING
+                message=f"Unable to remove the specified directory {posix_text(path=remote_path)}: {error!s}",
+                level=LogLevel.WARNING,
             )
 
 

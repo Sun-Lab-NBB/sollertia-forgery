@@ -18,6 +18,7 @@ from ataraxis_base_utilities import console
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, initialize_worker_threads
 
 from .graph import PendingJob, resolve_dispatch_priorities
+from ..shared_assets import posix_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -443,9 +444,9 @@ def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[Pend
             continue
         for job_id, job_state in ProcessingTracker(file_path=tracker_path).snapshot().items():
             if job_state.status is ProcessingStatus.SUCCEEDED:
-                state.succeeded_job_keys.add((str(unit_path), job_id))
+                state.succeeded_job_keys.add((posix_text(path=unit_path), job_id))
             elif job_state.status is ProcessingStatus.FAILED:
-                state.failed_job_keys.add((str(unit_path), job_id))
+                state.failed_job_keys.add((posix_text(path=unit_path), job_id))
 
 
 def _admit_pending_jobs[PendingJobT: PendingJob](

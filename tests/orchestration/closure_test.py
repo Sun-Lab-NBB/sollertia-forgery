@@ -91,7 +91,7 @@ class _StubHost:
             RuntimeError: If this stub is configured to fail for the batch's units.
         """
         self.materialized += 1
-        if self._fails or any(str(unit_path) in self._failing_units for unit_path in unit_paths):
+        if self._fails or any(unit_path.as_posix() in self._failing_units for unit_path in unit_paths):
             message = "Unable to materialize the project artifacts. This stub host is configured to fail."
             raise RuntimeError(message)
 

@@ -9,7 +9,7 @@ from natsort import natsorted
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from pathlib import Path, PurePath
     from collections.abc import Sequence
 
 _NATURAL_RANK_PREFIX: str = "__natural_rank_"
@@ -71,6 +71,23 @@ def multi_recording_dataset_name(animal_id: str, dataset_name: str) -> str:
         The ``{animal_id}_{dataset_name}`` name under which cindra records the animal's multi-recording output.
     """
     return f"{animal_id}_{dataset_name}"
+
+
+def posix_text(path: PurePath) -> str:
+    """Renders one path as the forward-slash text that every host and every stored record reads.
+
+    Notes:
+        A path composed on Windows separates its components with a backslash, which a POSIX compute server reads as a
+        literal character inside a name rather than as a separator. Rendering here holds every path this library sends
+        to the server, and every path it records as part of a job's identity, to the one form both platforms parse.
+
+    Args:
+        path: The path to render.
+
+    Returns:
+        The path as forward-slash separated text.
+    """
+    return path.as_posix()
 
 
 def count_feather_rows(feather_path: Path) -> int:

@@ -8,6 +8,8 @@ from dataclasses import field, dataclass
 
 from ataraxis_data_structures import ProcessingStatus
 
+from ..shared_assets import posix_text
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -53,14 +55,14 @@ class PendingJob:
         """Returns the composite key that uniquely identifies this job across the entire batch, combining its unit
         with the job identifier.
         """
-        return str(self.unit_path), self.job_id
+        return posix_text(path=self.unit_path), self.job_id
 
     @property
     def prerequisite_keys(self) -> tuple[tuple[str, str], ...]:
         """Returns the dispatch keys of this job's upstream jobs, each pairing this job's unit with one prerequisite
         identifier.
         """
-        return tuple((str(self.unit_path), prerequisite) for prerequisite in self.prerequisite_ids)
+        return tuple((posix_text(path=self.unit_path), prerequisite) for prerequisite in self.prerequisite_ids)
 
 
 @dataclass(slots=True)
@@ -192,7 +194,7 @@ def build_batch_document(
                 unit_name=unit_name,
                 pipeline=pipeline,
                 options=options,
-                tracker_path=trackers.get(str(unit_path), ""),
+                tracker_path=trackers.get(posix_text(path=unit_path), ""),
                 # Scopes each recorded edge to the jobs this unit actually tracks, which drops the edges naming a
                 # stage the unit can never produce.
                 trackable_ids=set(unit_state),
@@ -205,7 +207,7 @@ def build_batch_document(
         blocked.extend(unit_blocked)
         units.append(
             {
-                "unit_path": str(unit_path),
+                "unit_path": posix_text(path=unit_path),
                 "unit_name": unit_name,
                 "job_count": len(submittable),
                 "blocked_count": len(unit_blocked),
@@ -400,7 +402,7 @@ def _build_job_descriptor(
         # tracker recorded without opening that tracker while the batch runs.
         "status": state_row["status"],
         "executor_id": state_row.get("executor_id") or "",
-        "unit_path": str(unit_path),
+        "unit_path": posix_text(path=unit_path),
         "unit_name": unit_name,
         "pipeline": pipeline,
         "tracker_path": tracker_path,
@@ -476,7 +478,7 @@ def _unresolved_unit(unit_path: Path, reason: str) -> dict[str, Any]:
     Returns:
         The unit entry.
     """
-    return {"unit_path": str(unit_path), "unit_name": unit_path.name, "error": reason, "job_count": 0}
+    return {"unit_path": posix_text(path=unit_path), "unit_name": unit_path.name, "error": reason, "job_count": 0}
 
 
 def _no_state_reason(pipeline: str) -> str:

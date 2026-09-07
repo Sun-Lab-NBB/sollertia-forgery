@@ -493,7 +493,7 @@ def test_a_job_whose_prerequisite_failed_is_dropped_rather_than_queued() -> None
     """Verifies an outcome that can never arrive would hold the job forever, so the job leaves the queue as blocked."""
     dependent = make_job(job_id="dependent", prerequisites=("upstream",))
     state = build_state(jobs=[dependent])
-    state.failed_job_keys.add((str(dependent.unit_path), "upstream"))
+    state.failed_job_keys.add((dependent.unit_path.as_posix(), "upstream"))
 
     assert admit(state=state).submitted == []
     assert [job.job_id for job in state.blocked_jobs] == ["dependent"]
@@ -506,7 +506,7 @@ def test_a_satisfied_prerequisite_releases_the_job_waiting_on_it() -> None:
     """
     dependent = make_job(job_id="dependent", prerequisites=("upstream",))
     state = build_state(jobs=[dependent])
-    state.succeeded_job_keys.add((str(dependent.unit_path), "upstream"))
+    state.succeeded_job_keys.add((dependent.unit_path.as_posix(), "upstream"))
 
     assert [job.job_id for job in admit(state=state).submitted] == ["dependent"]
 
@@ -620,8 +620,8 @@ def test_recorded_outcomes_are_read_back_under_the_unit_that_holds_them(tmp_path
     )
     _refresh_job_outcomes(state=state)
 
-    assert state.succeeded_job_keys == {(str(unit), done_id)}
-    assert state.failed_job_keys == {(str(unit), broken_id)}
+    assert state.succeeded_job_keys == {(unit.as_posix(), done_id)}
+    assert state.failed_job_keys == {(unit.as_posix(), broken_id)}
 
 
 # The execution manager
@@ -654,7 +654,7 @@ def test_the_manager_runs_a_dependency_chain_through_to_its_last_stage(tmp_path:
     assert snapshot[first_id].status is ProcessingStatus.SUCCEEDED
     assert snapshot[second_id].status is ProcessingStatus.SUCCEEDED
     # Reading the first stage back is what released the second, so the session records it as a satisfied prerequisite.
-    assert (str(unit), first_id) in state.succeeded_job_keys
+    assert (unit.as_posix(), first_id) in state.succeeded_job_keys
     assert state.blocked_jobs == []
 
 
