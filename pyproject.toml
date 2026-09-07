@@ -130,16 +130,16 @@ dev = [
     "platformdirs>=4,<5",
 ]
 
-# Names the directories that the source distribution omits. Hatchling reads the root .gitignore alone, so a directory
-# that git leaves untracked still reaches the archive and is named here. The '.claude', '.codegraph', and
-# '.import_linter_cache' directories hold machine-local state, and a running daemon rewrites the codegraph database
-# under the build, failing the sdist walk that reads it.
+# Names the directories the source distribution omits. A nested .gitignore keeps a cache out of git without keeping it
+# out of the archive, so every machine-local directory is named here. The codegraph entry is the load-bearing one,
+# because a build that reads its database while the daemon rewrites it fails.
 [tool.hatch.build.targets.sdist]
 exclude = [
     ".claude",
     ".codegraph",
     ".github",
     ".import_linter_cache",
+    ".ruff_cache",
     "recipe",
 ]
 
