@@ -110,10 +110,11 @@ def run_mcp_server_command(transport: Literal["stdio", "sse", "streamable-http"]
 def omp_command(source: Path | None, target: Path | None, *, force: bool, yes: bool) -> None:
     """Links the OpenMP runtime that the Numba threading layer loads on macOS into a directory the loader searches.
 
-    The Numba macOS wheel names its OpenMP dependency through an rpath that carries no entries, so the runtime
-    resolves from the dynamic loader's default search path alone. This command finds an installed runtime and links it
-    into that path. Writing the link usually requires running the command through sudo. Running the command on any
-    other platform errors, because those platforms run the TBB threading layer instead.
+    The Numba macOS wheel names its OpenMP dependency through an rpath that carries no entries. The loader therefore
+    expands that name against the entries the running interpreter carries, and the only directory it reaches is that
+    interpreter's own library directory. This command finds an installed runtime and links it into that directory. A
+    conda environment grants that write without sudo, while a system-wide interpreter needs it. Running the command on
+    any other platform errors, because those platforms run the TBB threading layer instead.
     """
     summary = resolve_openmp_runtime(runtime_path=source, link_path=target, execute=yes, force=force)
 

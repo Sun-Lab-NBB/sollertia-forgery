@@ -5,6 +5,7 @@ macOS.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -76,6 +77,19 @@ def test_an_unloadable_runtime_names_the_command_that_links_one(darwin: None, un
     """
     with pytest.raises(RuntimeError, match=r"slf omp"):
         verify_openmp_runtime()
+
+
+@pytest.mark.parametrize("absent_specification", [True, False])
+def test_a_host_carrying_no_loadable_numba_extension_reports_an_unloadable_runtime(
+    monkeypatch: pytest.MonkeyPatch, *, absent_specification: bool
+) -> None:
+    """Verifies that the probe resolves the runtime through the extension that loads it, so a host whose extension
+    carries no loadable file reports no runtime.
+    """
+    specification = None if absent_specification else SimpleNamespace(origin=None)
+    monkeypatch.setattr(openmp_module.importlib.util, "find_spec", lambda _name: specification)
+
+    assert not openmp_module._openmp_runtime_loadable()
 
 
 # Discovery
@@ -289,9 +303,7 @@ def test_linking_replaces_a_stale_link(darwin: None, unloadable: None, tmp_path:
 def test_an_unwritable_link_directory_names_the_permission_remedy(
     monkeypatch: pytest.MonkeyPatch, darwin: None, unloadable: None, tmp_path: Path
 ) -> None:
-    """Verifies that the default link directory is root-owned, so the failure has to name sudo rather than report a bare
-    errno.
-    """
+    """Verifies that the failure names the elevation a system-wide interpreter needs, and not a bare errno."""
     runtime = tmp_path.joinpath(openmp_module._OPENMP_LIBRARY_NAME)
     runtime.touch()
 

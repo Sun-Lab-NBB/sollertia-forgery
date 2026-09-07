@@ -8,6 +8,7 @@ from pathlib import Path
 import sysconfig
 import subprocess
 from dataclasses import dataclass
+import importlib.util
 
 from ataraxis_base_utilities import console
 
@@ -29,6 +30,14 @@ Python distributions this library installs alongside itself.
 _CONDA_PREFIX_VARIABLE: str = "CONDA_PREFIX"
 """The environment variable naming the active conda environment, whose lib directory holds an llvm-openmp runtime."""
 
+_OMPPOOL_MODULE: str = "numba.np.ufunc.omppool"
+"""The Numba extension that links against the OpenMP runtime the threading layer loads at its first parallel call.
+
+Every check in this module resolves the runtime through this extension instead of through its file name, because the
+two resolve differently. A file name reaches the loader's default fallback list, while the '@rpath' dependency this
+extension records does not, so a check reading the file name reports a runtime the threading layer cannot load.
+"""
+
 _VENDORED_RUNTIME_PATTERN: str = f"*/.dylibs/{_OPENMP_LIBRARY_NAME}"
 """The glob pattern matching the OpenMP runtimes that delocate vendors into the macOS wheels of scikit-learn, torch,
 and their peers.
@@ -37,15 +46,17 @@ A vendored runtime is examined last, because linking it ties the threading layer
 that carries it. Upgrading or removing that distribution leaves the link dangling.
 """
 
-_LINK_DIRECTORY: Path = Path("/usr/local/lib")
-"""The directory into which the OpenMP runtime is linked so that the dynamic loader finds it.
+_LINK_DIRECTORY: Path = Path(sysconfig.get_config_var("LIBDIR") or Path(sys.base_prefix) / "lib")
+"""The directory the OpenMP runtime is linked into so that the dynamic loader finds it.
 
-Numba's omppool extension records its dependency as '@rpath/libomp.dylib' and carries no LC_RPATH entries, so the
-loader resolves the file name against DYLD_FALLBACK_LIBRARY_PATH instead. This directory is on that path by default,
-while the Apple Silicon Homebrew prefix is not.
+Numba's omppool extension records its dependency as '@rpath/libomp.dylib' and carries no LC_RPATH entry of its own, so
+the loader expands that name against the entries that the images already loaded into the process carry. Those entries
+name the running interpreter's own library directory, which makes it the one destination a link reaches while
+DYLD_FALLBACK_LIBRARY_PATH stays unset. The loader consults its default fallback list for a file name alone, so a
+runtime linked into a directory on that list stays unreachable to the extension.
 """
 
-_VERIFICATION_SCRIPT: str = f"import ctypes; ctypes.CDLL({_OPENMP_LIBRARY_NAME!r})"
+_VERIFICATION_SCRIPT: str = f"import {_OMPPOOL_MODULE}"
 """The script that loads the OpenMP runtime from a fresh interpreter, which reads the loader search path as it stands
 after linking.
 """
@@ -215,8 +226,11 @@ def _openmp_runtime_loadable() -> bool:
     Returns:
         True when the dynamic loader resolves the runtime, and False when it does not.
     """
+    extension = importlib.util.find_spec(_OMPPOOL_MODULE)
+    if extension is None or extension.origin is None:
+        return False
     try:
-        ctypes.CDLL(_OPENMP_LIBRARY_NAME)
+        ctypes.CDLL(extension.origin)
     except OSError:
         return False
     return True
@@ -332,8 +346,9 @@ def _link_openmp_runtime(runtime_path: Path, link_path: Path) -> None:
         temporary_path.unlink(missing_ok=True)
         message = (
             f"Unable to link the OpenMP runtime into {link_path.parent}. Writing the link requires permission to "
-            f"modify that directory, which usually means running the command through sudo. The loader reported: "
-            f"{error}."
+            f"modify that directory, which sudo supplies for a system-wide interpreter. Keep the same interpreter on "
+            f"the elevated run, because the link target follows the interpreter that runs the command. The loader "
+            f"reported: {error}."
         )
         console.error(message=message, error=RuntimeError)
 

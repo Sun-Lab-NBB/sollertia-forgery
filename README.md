@@ -336,9 +336,12 @@ runs exactly the job named by that identifier. Resolving only the outstanding wo
 than to a direct invocation. That is how a scheduler drives cross-job parallelism, by dispatching each identifier as its
 own allocation. The `runtime` subcommand uses no identifier, since its single-job pipeline has no remote-dispatch job.
 
-***Note,*** on macOS the Numba threading layer resolves its OpenMP runtime from the dynamic loader's default search
-path alone. Run `slf omp` once per host to report what it would link, and `slf omp -y` through `sudo` to create the
-link. Every pipeline that dispatches a parallel worker pool verifies the runtime before it starts a job.
+***Note,*** on macOS the Numba threading layer resolves its OpenMP runtime through the rpath dependency that the omppool
+extension records. The loader expands that dependency against the entries the running interpreter carries, and those
+entries name the interpreter's own library directory. Run `slf omp` once per host to report what it would link, and
+`slf omp -y` to write the link into that directory. A conda environment grants that write without `sudo`, while a
+system-wide interpreter needs it. Every pipeline that dispatches a parallel worker pool verifies the runtime before it
+starts a job.
 
 ### Configuring Server Access
 
