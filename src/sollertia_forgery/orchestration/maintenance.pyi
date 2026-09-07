@@ -1,0 +1,9 @@
+from typing import Any
+from pathlib import Path
+from collections.abc import Sequence
+
+from .dispatch import resolve_dispatch as resolve_dispatch
+
+def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Sequence[str] = ()) -> list[str]: ...
+def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dict[str, Any]]: ...
+def _resolve_path_size(path: Path) -> int: ...

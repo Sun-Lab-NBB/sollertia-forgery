@@ -1,0 +1,13 @@
+from pathlib import Path
+from collections.abc import Sequence
+
+import polars as pl
+from ataraxis_time import PrecisionTimer
+
+_NATURAL_RANK_PREFIX: str
+_DELAY_TIMER: PrecisionTimer
+
+def delay_terminal() -> None: ...
+def natural_sort(frame: pl.DataFrame, by: Sequence[str], *, nulls_last: bool = False) -> pl.DataFrame: ...
+def multi_recording_dataset_name(animal_id: str, dataset_name: str) -> str: ...
+def count_feather_rows(feather_path: Path) -> int: ...
