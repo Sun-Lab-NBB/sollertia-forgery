@@ -22,13 +22,13 @@ developed in the Sun (NeuroAI) lab at Cornell University. It is the processing c
 reads. It processes the raw data of a recorded session into multiple per-session intermediate data tables and forges the
 processed sessions into the multi-session datasets consumed by the downstream analysis assets.
 
-Every pipeline runs the same way for every acquisition system. Each system contributes its own parsers and workers as
-data, through the dispatch registries described in [Acquisition Systems](#acquisition-systems), so every command infers
-its acquisition system from the session instead of taking one from the caller. The library plans each unit's jobs, sizes
-the cores and memory used by every job, and dispatches the resulting batches onto this machine's process pool or onto a
-SLURM compute server.
+Every processing pipeline runs the same way for every acquisition system. Each system contributes its own parsers and 
+workers as data, through the dispatch registries described in [Acquisition Systems](#acquisition-systems), so every 
+command infers its acquisition system from the session instead of taking one from the caller. The library plans each 
+unit's jobs, sizes the cores and memory used by every job, and dispatches the resulting batches onto this machine's 
+process pool or onto a SLURM compute server.
 
-The documented path to using the library runs through AI agents. Every operation except `slf mcp`, which starts the MCP
+The preferred way for using the library runs through AI agents. Every operation except `slf mcp`, which starts the MCP
 server itself, and `slf omp`, which links the macOS OpenMP runtime, is exposed as a Model Context Protocol tool, and the
 Claude Code skills described in [AI-Assisted Development](#ai-assisted-development) orchestrate those tools. The `slf`
 CLI serves the same operations to a human operator and to the job scripts the compute server runs.
@@ -157,7 +157,7 @@ donated by that member:
 | Multi-recording session types  | The session types the system tracks across recordings                                      |
 
 A coverage check runs when `registries.py` is imported and raises a `RuntimeError` naming the registry where it stopped
-and the systems missing from it, so a partially wired system fails at import time rather than midway through a batch.
+and the systems missing from it, so a partially wired system fails at import time.
 The dependency runs one way, because a per-system package never imports an agnostic category package.
 
 ***Note,*** adding a system to the platform spans three repositories. The enumeration member and the session records
@@ -212,9 +212,9 @@ Work reaches a host as a **job**, and every pipeline models its jobs the same wa
 Every job carries two memory figures, and the same sizing pass resolves both. The anonymous figure is the memory the
 job allocates, and the resident figure adds the pages the job maps and the shared library image its processes hold in
 common, above a margin. The local engine budgets against the anonymous figure, because anonymous pages are the ones a
-host cannot reclaim under pressure, and a SLURM allocation requests the resident figure, because the scheduler's memory
+host cannot reclaim under pressure. A SLURM allocation requests the resident figure, because the scheduler's memory
 cgroup charges a job for every page it holds. A stage carries a non-zero mapped term when it holds a map open at its
-peak rather than reading through one and releasing it, which covers the two-photon `binarization`, `registration`, and
+peak instead of reading through one and releasing it, which covers the two-photon `binarization`, `registration`, and
 `processing` stages and the forging pipeline's `multiday_extraction` and `session_data_assembly` stages. Every other
 job's two figures differ by the shared image and the margin alone.
 
@@ -227,9 +227,8 @@ Each job holds one of four statuses on its tracker, and a rerun resolves only th
 | `SUCCEEDED` | The job completed and its output is on disk             |
 | `FAILED`    | The job raised, and a reset returns it to `SCHEDULED`   |
 
-Trackers are per-unit YAML files written under a file lock, so the state of a unit travels with the unit's data rather
-than with the host that processed it. Project-level artifacts roll that state up for a submitting host that holds none
-of the data:
+Trackers are per-unit YAML files written under a file lock, so the state of a unit travels with the unit's data. 
+Project-level artifacts roll that state up for a submitting host that holds none of the data:
 
 | Artifact                               | Contents                                                                                |
 |----------------------------------------|-----------------------------------------------------------------------------------------|
@@ -275,7 +274,7 @@ Session/
 
 The checksum tracker sits under the acquired data, because that pipeline verifies the acquired data in place. Every
 other pipeline records beside the output it produces. The elided entries are named by the acquisition system's donated
-parsers and workers, so their filenames and column schemas belong to that system rather than to the pipeline. The
+parsers and workers, so their filenames and column schemas belong to that system instead of the pipeline. The
 agnostic entries are stable across systems, and every camera table is positional, carrying one row per acquired frame.
 
 ### Forged Datasets
@@ -344,8 +343,8 @@ Use `slf --help` or `slf SUBCOMMAND --help` for detailed usage information.
 The `process` group parses the session path, the job identifier, the worker budget, and the progress flag, so those
 options come before the subcommand name, as `-pp` does on the `manifest` group. Without a job identifier, a subcommand
 runs every job the session's data supports on this host, re-running the ones that already succeeded, and with one it
-runs exactly the job named by that identifier. Resolving only the outstanding work belongs to batch preparation rather
-than to a direct invocation. That is how a scheduler drives cross-job parallelism, by dispatching each identifier as its
+runs exactly the job named by that identifier. Resolving only the outstanding work belongs to batch preparation instead 
+of the direct invocation. That is how a scheduler drives cross-job parallelism, by dispatching each identifier as its
 own allocation. The `runtime` subcommand uses no identifier, since its single-job pipeline has no remote-dispatch job.
 
 ***Note,*** on macOS the Numba threading layer resolves its OpenMP runtime through the rpath dependency that the omppool
@@ -433,8 +432,8 @@ server.
 
 ### Recovering from Interruptions
 
-Every pipeline records its progress on a per-unit tracker, so an interrupted run resumes rather than restarts. What to
-run depends on what the interruption left behind:
+Every pipeline records its progress on a per-unit tracker, so an interrupted run resumes instead of restarting from 
+scratch when possible. What to run depends on what the interruption left behind:
 
 | Situation                                              | Recovery                                                                                                                                                                               |
 |--------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -483,8 +482,7 @@ server. Nine tools take none. `execute_jobs_tool` takes none because a batch run
 `forget_prepared_batches_tool` and `read_resource_model_tool` answer for this machine alone, the two
 server-configuration tools are always local, and `discover_remote_project_tool`, `read_scheduler_jobs_tool`,
 `pull_remote_path_tool`, and `retire_remote_batches_tool` always address the compute server. On
-`list_prepared_batches_tool` the `host` is a filter rather than a target, and omitting it lists the batches prepared
-against either host.
+`list_prepared_batches_tool` the `host` is a filter, and omitting it lists the batches prepared against either host.
 
 #### Starting the Server
 
@@ -557,7 +555,7 @@ The server tools author the compute server's credentials and read what that serv
 | `write_server_configuration_tool` | Creates or replaces the server configuration YAML in that same configuration subdirectory                  |
 | `discover_remote_project_tool`    | Enumerates the sessions and forged datasets a project holds on the compute server, with their server paths |
 | `read_scheduler_jobs_tool`        | Reads the compute server's own record of its allocations, queued or already settled                        |
-| `pull_remote_path_tool`           | Copies a file or directory off the compute server onto this machine, taking a directory whole |
+| `pull_remote_path_tool`           | Copies a file or directory off the compute server onto this machine, taking a directory whole              |
 
 ### Skills
 
@@ -569,7 +567,7 @@ The **forging** plugin ships the skills that orchestrate the tools above:
 | `batch-processing`              | Orchestrates batch processing across all six batch pipelines                         |
 | `job-planning`                  | Sizes every runnable job of a session or a dataset before a batch or a submission    |
 | `dataset-definition`            | Composes forged dataset hierarchies and reports their forging job state              |
-| `dataset-forging`               | Runs the forging pipeline, which processes a dataset rather than a session           |
+| `dataset-forging`               | Runs the forging pipeline, which processes the entire dataset                        |
 | `remote-execution`              | Runs work on the configured SLURM compute server and reads its scheduler records     |
 | `server-configuration`          | Authors the ServerConfiguration YAML that authorizes SSH and SLURM execution         |
 | `project-state`                 | Generates and queries the session manifest and the job table published beside it     |
@@ -698,8 +696,8 @@ system makes for a class it never produces. The coverage check therefore stays a
 capability.
 
 ***Critical!*** A system package must never import an agnostic category package. The category pipelines import
-`registries.py` and `registries.py` imports every system package, so the reverse import is a circular import rather
-than a style preference.
+`registries.py` and `registries.py` imports every system package, so the reverse import is a circular import that must 
+be avoided.
 
 **Step 3: Register the donations**
 
@@ -716,7 +714,7 @@ or dataset they open, so a fully wired system reaches every command already expo
 
 Add the system's `automodule` block to `docs/source/api.rst`, add its tests under `tests/`, and add the system to the
 per-system assertions in `tests/registry_coverage_test.py`, which name each registered system explicitly. That file's
-donor registry list names the registries themselves rather than the systems, so a new system adds no entry to it. The
+donor registry list names the registries themselves instead of systems, so a new system adds no entry to it. The
 suite gates on 100% statement and branch coverage.
 
 **Step 5: Update the sibling libraries**
@@ -734,8 +732,7 @@ A session type is owned by sollertia-shared-assets and reaches this library thro
    `assets:library-extension` owns. In `SYSTEM_SESSION_TYPES`, pair the member with every acquisition system that
    records it.
 2. Add the type to the recording system's admission policy, which names the pipelines a session of that type completes
-   before it joins a forged dataset. A type left out of the policy joins no dataset, which is the deliberate opt-out
-   rather than an omission.
+   before it joins a forged dataset. A type left out of the policy joins no dataset, which is the deliberate opt-out.
 3. Route the type in the system's forging assembler and write the branch that assembles its data. An unrouted type
    raises when the forging pipeline reaches it.
 4. Route the type in the system's assembly-source resolver, which reports the height at which the assembler holds each
@@ -767,8 +764,7 @@ change.
 
 ### Adding a New Processing Pipeline
 
-A pipeline that reads a new class of acquired data is agnostic, so it becomes a category package rather than a system
-donation.
+A pipeline that reads a new class of acquired data is agnostic, so it becomes a category package.
 
 1. Add the tracker filename to `ProcessingTrackers` and the output directory to `ProcessedData` in
    sollertia-shared-assets, because a per-session pipeline records beside the output it produces.
