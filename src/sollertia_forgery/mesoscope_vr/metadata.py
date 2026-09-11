@@ -128,7 +128,9 @@ class DatasetColumn(StrEnum):
     CUE = "cue"
     """Active virtual reality cue identifier at each sample. 255 marks samples outside the run state."""
     IN_TRIGGER_ZONE = "in_trigger_zone"
-    """Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample."""
+    """Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample, as the Virtual
+    Reality runtime registers it. The zone extends one actor lead beyond each declared boundary, because the actor's
+    collider surface crosses the zone before and after its tracked position does."""
     RUNTIME_STATE = "runtime_state"
     """Experiment runtime state label at each sample."""
     REINFORCING_GUIDED = "reinforcing_guided"
@@ -272,7 +274,9 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
     ),
     DatasetColumn.CUE: "Active virtual reality cue identifier at each sample. 255 marks samples outside the run state.",
     DatasetColumn.IN_TRIGGER_ZONE: (
-        "Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample."
+        "Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample, as the Virtual "
+        "Reality runtime registers it. The zone extends one actor lead beyond each declared boundary, because the "
+        "actor's collider surface crosses the zone before and after its tracked position does."
     ),
     DatasetColumn.RUNTIME_STATE: "Experiment runtime state label at each sample.",
     DatasetColumn.REINFORCING_GUIDED: (

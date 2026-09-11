@@ -21,6 +21,7 @@ _REINFORCING_GUIDANCE_STATE_CODE: int
 _AVERSIVE_GUIDANCE_STATE_CODE: int
 _DISTANCE_SNAPSHOT_CODE: int
 _ERROR_CONTEXT_CUE_COUNT: int
+_ACTOR_TRIGGER_LEAD_CM: np.float64
 
 def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None: ...
 def _export_runtime_data(
