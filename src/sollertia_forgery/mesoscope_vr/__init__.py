@@ -2,7 +2,7 @@
 
 from .forging import MESOSCOPE_ADMISSION_PIPELINES, assemble_mesoscope_session
 from .runtime import RUNTIME_SOURCE_ID, parse_runtime
-from .metadata import MESOSCOPE_COLUMN_DESCRIPTIONS
+from .metadata import MESOSCOPE_COLUMN_DESCRIPTIONS, DatasetColumn
 from .two_photon import (
     MESOSCOPE_MULTI_RECORDING_SESSION_TYPES,
     locate_two_photon_data,
@@ -30,6 +30,7 @@ __all__ = [
     "MESOSCOPE_COLUMN_DESCRIPTIONS",
     "MESOSCOPE_MULTI_RECORDING_SESSION_TYPES",
     "RUNTIME_SOURCE_ID",
+    "DatasetColumn",
     "assemble_mesoscope_session",
     "get_eligible_modules",
     "get_module_event_codes",
