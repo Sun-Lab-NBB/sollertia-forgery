@@ -45,6 +45,14 @@ _DISTANCE_SNAPSHOT_CODE: int = 5
 _ERROR_CONTEXT_CUE_COUNT: int = 20
 """The number of subsequent cues included in the error context when a cue sequence fails to decompose."""
 
+_ACTOR_TRIGGER_LEAD_CM: np.float64 = np.float64(4.0)
+"""The distance, in centimeters, by which the Virtual Reality runtime registers a stimulus trigger zone crossing ahead
+of the animal's tracked position. Gimbl represents the animal as a CharacterController sphere of 0.5 Unity units (5 cm)
+with a 0.05 unit skin width, and Unity fires a zone trigger while that sphere overlaps the zone collider, so the
+sphere's leading surface enters the zone this far before the tracked center does and its trailing surface leaves this
+far after. The value is bracketed to 3.8 to 4.1 cm by the last unrewarded and first rewarded lick positions in
+native-rate encoder data and equals the radius less the skin width on each side."""
+
 
 def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None:
     """Parses the decoded Mesoscope-VR runtime archive into the session's runtime behavior feathers.
@@ -543,8 +551,9 @@ def _process_trial_sequence(
         A tuple of five NumPy arrays. The first array stores the IDs of the Virtual Reality environment cues
         experienced by the animal during runtime. The second array stores the cumulative distance, in centimeters,
         traveled by the animal at the onset of each cue. The third array stores the cumulative distance traveled by
-        the animal when it entered a trial's trigger zone, and the fourth the distance at which it left that zone,
-        clamped to the trial's end distance. Trials that ended before their trigger zone began contribute no entry,
+        the animal when the runtime registered it entering a trial's trigger zone, and the fourth the distance at
+        which it registered the exit, clamped to the trial's end distance. Both sit one actor lead outside the
+        declared zone boundaries. Trials that ended before their trigger zone began contribute no entry,
         so these two arrays can be shorter than the trial-type array. The fifth array stores the cumulative distance
         traveled by the animal at the start of each trial.
     """
@@ -609,8 +618,11 @@ def _process_trial_sequence(
         # A trial entered partway into its first cue is shorter than its corridor by that offset, so every position that
         # the template declares against the corridor is reached that much earlier in the distance traveled.
         entry_offset = cue_offset if entered_mid_cue else np.float64(0)
-        trigger_start_absolute = previous_trial_end_distance + trigger_start_relative - entry_offset
-        trigger_end_absolute = previous_trial_end_distance + trigger_end_relative - entry_offset
+        zone_origin = previous_trial_end_distance - entry_offset
+        # Unity registers the crossing when the actor's collider surface meets the zone, so the tracked position is one
+        # actor lead short of the declared start at entry and one lead past the declared end at exit.
+        trigger_start_absolute = zone_origin + trigger_start_relative - _ACTOR_TRIGGER_LEAD_CM
+        trigger_end_absolute = zone_origin + trigger_end_relative + _ACTOR_TRIGGER_LEAD_CM
 
         if trigger_start_absolute <= trial_distances[index]:
             trigger_zone_starts_list.append(trigger_start_absolute)

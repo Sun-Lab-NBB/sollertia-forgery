@@ -350,8 +350,8 @@ def test_runtime_pipeline_writes_experiment_behavior_feathers(
     assert cues["traveled_distance_cm"].to_numpy() == pytest.approx(np.arange(2 * _TRIAL_COUNT) * _CUE_LENGTH_CM)
 
     trigger_zones = _read_feather(directory=directory, name=BehaviorDataFiles.VR_TRIGGER_ZONE)
-    assert trigger_zones["trigger_zone_start_cm"].to_numpy() == pytest.approx(30.0 + 60.0 * np.arange(_TRIAL_COUNT))
-    assert trigger_zones["trigger_zone_end_cm"].to_numpy() == pytest.approx(45.0 + 60.0 * np.arange(_TRIAL_COUNT))
+    assert trigger_zones["trigger_zone_start_cm"].to_numpy() == pytest.approx(26.0 + 60.0 * np.arange(_TRIAL_COUNT))
+    assert trigger_zones["trigger_zone_end_cm"].to_numpy() == pytest.approx(49.0 + 60.0 * np.arange(_TRIAL_COUNT))
 
     trials = _read_feather(directory, BehaviorDataFiles.TRIAL)
     assert trials["trial_type_index"].to_list() == [0] * _TRIAL_COUNT
@@ -800,8 +800,8 @@ def test_every_distance_stream_shares_the_traveled_frame_under_a_cue_offset() ->
     assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE] * 3
 
     # The trigger zone sits 30 cm into the corridor, which the first trial reaches after traveling only 20.
-    assert trigger_starts.tolist() == [20.0, 80.0, 140.0]
-    assert trigger_ends.tolist() == [35.0, 95.0, 155.0]
+    assert trigger_starts.tolist() == [16.0, 76.0, 136.0]
+    assert trigger_ends.tolist() == [39.0, 99.0, 159.0]
 
 
 def test_decomposition_reports_trial_ends_as_distances_traveled() -> None:
@@ -835,8 +835,8 @@ def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_tri
     # after traveling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the corridor, so the same offset
     # applies to it. Trial 1 is cut short before its zone begins and contributes no entry, and trial 3 follows a
     # complete trial, so its zone sits at the full 30 cm.
-    assert trigger_starts.tolist() == [20.0, 100.0, 180.0]
-    assert trigger_ends.tolist() == [35.0, 115.0, 190.0]
+    assert trigger_starts.tolist() == [16.0, 96.0, 176.0]
+    assert trigger_ends.tolist() == [39.0, 119.0, 190.0]
     assert trial_starts.tolist() == [0.0, 60.0, 80.0, 150.0]
 
 
@@ -856,8 +856,8 @@ def test_process_trial_sequence_walks_each_trial_through_its_own_corridor() -> N
     assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE, _CHECKER_CODE, _GRATING_CODE, _GRATING_CODE]
     assert distances.tolist() == [0.0, 30.0, 60.0, 90.0, 120.0]
     assert trial_starts.tolist() == [0.0, 60.0]
-    assert trigger_starts.tolist() == [30.0, 90.0]
-    assert trigger_ends.tolist() == [45.0, 105.0]
+    assert trigger_starts.tolist() == [26.0, 86.0]
+    assert trigger_ends.tolist() == [49.0, 109.0]
 
 
 def test_decompose_cue_sequence_kernel_prefers_the_longest_matching_motif() -> None:
