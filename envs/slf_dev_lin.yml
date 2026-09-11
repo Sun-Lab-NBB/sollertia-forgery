@@ -39,11 +39,10 @@ dependencies:
   - tox-uv=1.36.0=pyhcf101f3_0
   - typing_extensions=4.16.0=pyhcf101f3_0
   - tzdata=2026c=h151e31d_0
-  - uv=0.12.10=h86a270d_0
+  - uv=0.12.9=h86a270d_0
   - virtualenv=21.7.8=pyh5ded981_0
   - zstd=1.5.7=hb78ec9c_7
   - pip:
-    - GitPython==3.1.46
     - Jinja2==3.1.6
     - MarkupSafe==3.0.3
     - PyJWT==2.13.0
@@ -58,8 +57,8 @@ dependencies:
     - accessible-pygments==0.0.5
     - alabaster==1.0.0
     - annotated-types==0.8.0
-    - anyio==4.15.1
-    - ast_serialize==0.10.0
+    - anyio==4.15.0
+    - ast_serialize==0.9.0
     - ataraxis-automation==9.0.2
     - ataraxis-base-utilities==7.0.0
     - ataraxis-communication-interface==7.1.1
@@ -79,7 +78,7 @@ dependencies:
     - certifi==2026.7.22
     - cffi==2.1.1
     - charset-normalizer==3.5.1
-    - cibuildwheel==4.2.1
+    - cibuildwheel==4.2.0
     - cindra==2.0.0
     - click==8.5.0
     - cloudpickle==3.1.2
@@ -97,8 +96,6 @@ dependencies:
     - fonttools==4.64.0
     - furo==2025.12.19
     - genicam==1.6.0
-    - gh==0.0.4
-    - gitdb==4.0.12
     - h11==0.16.0
     - h2==4.4.1
     - harvesters==1.4.3
@@ -114,7 +111,7 @@ dependencies:
     - imagecodecs==2026.8.16
     - imagesize==2.0.1
     - iniconfig==2.3.0
-    - intel-cmplr-lib-rt==2026.1.2
+    - intel-cmplr-lib-rt==2026.1.1
     - invoke==3.0.3
     - jaraco.classes==3.4.0
     - jaraco.context==6.1.2
@@ -131,8 +128,8 @@ dependencies:
     - loguru==0.7.3
     - markdown-it-py==4.2.0
     - matplotlib==3.11.1
-    - mcp==2.2.0
-    - mcp-types==2.2.0
+    - mcp==2.1.1
+    - mcp-types==2.1.1
     - mdurl==0.1.2
     - more-itertools==11.1.0
     - msgpack==1.2.2
@@ -144,7 +141,7 @@ dependencies:
     - nh3==0.3.7
     - numba==0.67.0
     - numexpr==2.14.2
-    - numpy==2.5.3
+    - numpy==2.5.2
     - nvidia-cublas==13.6.0.2
     - nvidia-cuda-nvrtc==13.3.33
     - nvidia-cuda-runtime==13.3.29
@@ -185,12 +182,11 @@ dependencies:
     - rich==15.0.0
     - roman-numerals==4.1.0
     - rpds-py==2026.6.3
-    - ruff==0.16.6
+    - ruff==0.16.5
     - scikit-learn==1.9.0
     - scipy==1.18.1
     - shiboken6==6.11.2
     - six==1.17.0
-    - smmap==5.0.2
     - snowballstemmer==3.1.1
     - sollertia-shared-assets==10.0.0
     - soupsieve==2.9.2
@@ -203,7 +199,7 @@ dependencies:
     - sphinxcontrib-jsmath==1.0.1
     - sphinxcontrib-qthelp==2.0.0
     - sphinxcontrib-serializinghtml==2.0.0
-    - sse-starlette==3.4.11
+    - sse-starlette==3.4.10
     - starlette==1.6.0
     - tables==3.11.1
     - tabulate==0.10.0
@@ -216,14 +212,14 @@ dependencies:
     - tqdm==4.70.0
     - truststore==0.10.4
     - twine==7.0.0
-    - types-PyYAML==6.0.12.20260906
+    - types-PyYAML==6.0.12.20260815
     - types-filelock==3.2.7
     - types-paramiko==5.0.0.20260724
-    - types-psutil==7.2.2.20260906
+    - types-psutil==7.2.2.20260827
     - types-tabulate==0.10.0.20260508
     - typing-inspection==0.4.4
     - urllib3==2.7.0
-    - uv==0.12.10
+    - uv==0.12.9
     - uvicorn==0.52.4
     - xxhash==3.8.1
 
