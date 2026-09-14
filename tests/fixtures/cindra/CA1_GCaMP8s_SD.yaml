@@ -7,7 +7,7 @@ main:
   two_channels: false
   first_channel_functional: true
   second_channel_functional: false
-  tau: 0.7
+  tau: 0.3
   ignored_flyback_planes: []
   custom_classifier_path: null
 file_io:

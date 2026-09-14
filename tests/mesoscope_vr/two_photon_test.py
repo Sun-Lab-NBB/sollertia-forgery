@@ -125,9 +125,9 @@ def test_single_recording_genotype_delta() -> None:
     """Verifies the single-recording tau and neuropil coefficient differ between the two indicators."""
     gcamp6f = _build_single_recording_configuration(genotype="GP5.17")
     jgcamp8s = _build_single_recording_configuration(genotype="GCaMP8s x CamKIICre")
-    assert gcamp6f.main.tau == pytest.approx(0.4)
-    assert jgcamp8s.main.tau == pytest.approx(0.7)
-    assert gcamp6f.spike_deconvolution.neuropil_coefficient == pytest.approx(0.7)
+    assert gcamp6f.main.tau == pytest.approx(0.2)
+    assert jgcamp8s.main.tau == pytest.approx(0.3)
+    assert gcamp6f.spike_deconvolution.neuropil_coefficient == pytest.approx(0.6)
     assert jgcamp8s.spike_deconvolution.neuropil_coefficient == pytest.approx(0.8)
 
 
@@ -139,7 +139,7 @@ def test_multi_recording_genotype_delta() -> None:
     jgcamp8s = _build_multi_recording_configuration(genotype="GCaMP8s x CamKIICre")
     assert gcamp6f.roi_selection.probability_threshold == pytest.approx(0.85)
     assert jgcamp8s.roi_selection.probability_threshold == pytest.approx(0.80)
-    assert gcamp6f.spike_deconvolution.neuropil_coefficient == pytest.approx(0.7)
+    assert gcamp6f.spike_deconvolution.neuropil_coefficient == pytest.approx(0.6)
     assert jgcamp8s.spike_deconvolution.neuropil_coefficient == pytest.approx(0.8)
     assert gcamp6f.signal_extraction.allow_overlap
     assert jgcamp8s.signal_extraction.allow_overlap
@@ -184,7 +184,7 @@ def test_resolve_single_recording_configuration_reads_genotype(
     configuration = resolve_single_recording_configuration(
         session=stubbed_session(genotype="GCaMP8s x CamKIICre", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
     )
-    assert configuration.main.tau == pytest.approx(0.7)
+    assert configuration.main.tau == pytest.approx(0.3)
 
 
 def test_resolve_single_recording_configuration_missing_surgery_errors(

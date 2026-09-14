@@ -51,8 +51,8 @@ class _CalciumIndicator(StrEnum):
     GCAMP6F = "GCaMP6f"
     """The Thy1-GCaMP6f transgenic line (GP5.17)."""
     JGCAMP8S = "jGCaMP8s"
-    """The in-house cross of a jGCaMP8s reporter line and a CaMKII-Cre driver line (GCaMP8s x CamKIICre), the slow-decay
-    member of the jGCaMP8 family."""
+    """The cross of the TIGRE2-jGCaMP8s reporter line and the CaMKIIa-Cre T29-1 driver line (GCaMP8s x CamKIICre),
+    the slow-decay member of the jGCaMP8 family."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,14 +63,15 @@ class _IndicatorParameters:
     """The single-recording OASIS AR(1) sensor decay time constant, in seconds (``main.tau``)."""
     neuropil_coefficient: float
     """The neuropil-subtraction coefficient shared by both configurations
-    (``spike_deconvolution.neuropil_coefficient``)."""
+    (``spike_deconvolution.neuropil_coefficient``). The value holds for the neuropil mask geometry that both builders
+    fix through ``minimum_neuropil_pixels`` and ``inner_neuropil_border_radius``."""
     probability_threshold: float
     """The multi-recording ROI-selection cell-probability threshold (``roi_selection.probability_threshold``)."""
 
 
 _INDICATOR_PARAMETERS: dict[_CalciumIndicator, _IndicatorParameters] = {
-    _CalciumIndicator.GCAMP6F: _IndicatorParameters(tau=0.4, neuropil_coefficient=0.7, probability_threshold=0.85),
-    _CalciumIndicator.JGCAMP8S: _IndicatorParameters(tau=0.7, neuropil_coefficient=0.8, probability_threshold=0.80),
+    _CalciumIndicator.GCAMP6F: _IndicatorParameters(tau=0.2, neuropil_coefficient=0.6, probability_threshold=0.85),
+    _CalciumIndicator.JGCAMP8S: _IndicatorParameters(tau=0.3, neuropil_coefficient=0.8, probability_threshold=0.80),
 }
 """Maps each calcium indicator to its indicator-dependent cindra parameters. Every ``_CalciumIndicator`` member must
 appear here, which ``_assert_indicator_coverage`` enforces at import time."""

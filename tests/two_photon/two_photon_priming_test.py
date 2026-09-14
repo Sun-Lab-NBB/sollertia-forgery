@@ -245,7 +245,7 @@ def test_priming_materializes_the_configuration_and_every_plane_bootstrap(imagin
     configuration = SingleRecordingConfiguration.from_yaml(file_path=configuration_path)
 
     # The resolver's genotype-tuned parameters stand, while the pipeline overrides only the session-bound locations.
-    assert configuration.main.tau == pytest.approx(0.4)
+    assert configuration.main.tau == pytest.approx(0.2)
     assert configuration.file_io.data_path == imaging_session.raw_data_path.joinpath(
         MesoscopeDirectories.MESOSCOPE_DATA
     )

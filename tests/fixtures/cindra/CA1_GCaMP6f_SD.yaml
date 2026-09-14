@@ -7,7 +7,7 @@ main:
   two_channels: false
   first_channel_functional: true
   second_channel_functional: false
-  tau: 0.4
+  tau: 0.2
   ignored_flyback_planes: []
   custom_classifier_path: null
 file_io:
@@ -64,7 +64,7 @@ signal_extraction:
   colocalization_threshold: 0.65
 spike_deconvolution:
   extract_spikes: true
-  neuropil_coefficient: 0.7
+  neuropil_coefficient: 0.6
   baseline_method: maximin
   baseline_window: 60.0
   baseline_sigma: 10.0
