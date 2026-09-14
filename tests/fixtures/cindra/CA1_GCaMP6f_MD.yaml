@@ -42,7 +42,7 @@ signal_extraction:
   colocalization_threshold: 0.65
 spike_deconvolution:
   extract_spikes: true
-  neuropil_coefficient: 0.7
+  neuropil_coefficient: 0.6
   baseline_method: maximin
   baseline_window: 60.0
   baseline_sigma: 10.0
