@@ -85,7 +85,9 @@ def define_forging_dataset_tool(
     Provided sessions that the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
     animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged for
     the sessions it keeps. Name that animal in ``recreate_animals`` to rebuild it from the provided sessions while every
-    other animal keeps its data, which also returns that animal's tracked jobs to the scheduled state.
+    other animal keeps its data. A rebuild returns the animal's tracked jobs to the scheduled state and discards the
+    cross-recording output written by this dataset into the animal's source sessions, so its cross-recording stages
+    track the rebuilt recording set afresh.
 
     Args:
         project_path: The path to the project's root directory holding the animal and session data directories. The
@@ -97,8 +99,8 @@ def define_forging_dataset_tool(
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
             A remote definition reports the dataset it built without its shape, since the hierarchy cannot be loaded
             from this machine.
-        force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild it from the
-            provided session list. Mutually exclusive with ``recreate_animals``.
+        force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild every animal from
+            the provided session list. Mutually exclusive with ``recreate_animals``.
 
     Returns:
         A response dict with the ``dataset_name``, the ``dataset_path`` at which the hierarchy was built, the

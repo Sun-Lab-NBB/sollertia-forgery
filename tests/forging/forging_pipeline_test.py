@@ -20,6 +20,7 @@ from sollertia_shared_assets import (
     RawDataFiles,
     SessionTypes,
     ProcedureData,
+    DatasetSession,
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
@@ -39,6 +40,7 @@ from sollertia_forgery.forging.pipeline import (
     _load_multiday_plan,
     _build_forging_universe,
     _materialize_multiday_plan,
+    _resolve_cross_recording_paths,
 )
 
 if TYPE_CHECKING:
@@ -360,6 +362,27 @@ def _session_entry(dataset: DatasetData, name: str) -> Any:
     return next(entry for entry in dataset.sessions if entry.session == name)
 
 
+def _seed_cross_recording_output(project: _ForgingProject, sessions: tuple[SessionData, ...]) -> tuple[Path, ...]:
+    """Writes a stand-in cross-recording output directory of the module's dataset into each named source session.
+
+    Args:
+        project: The source project holding the sessions.
+        sessions: The loaded sessions into which the directory is written.
+
+    Returns:
+        The seeded directories, in the order of the sessions.
+    """
+    paths = _resolve_cross_recording_paths(
+        dataset_name=_DATASET_NAME,
+        project_root=project.project_root,
+        entries=[DatasetSession(animal=str(session.animal_id), session=session.session_name) for session in sessions],
+    )
+    for path in paths:
+        path.mkdir(parents=True)
+        path.joinpath("tracking_template_masks.npz").write_bytes(b"stale")
+    return paths
+
+
 def _tracker_states(dataset: DatasetData) -> dict[tuple[str, str], ProcessingStatus]:
     """Returns the recorded status of every job the dataset's forging tracker holds.
 
@@ -477,6 +500,70 @@ def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
     assert written.recording_io.recording_directories == (
         experiment_project.sessions[0].processed_data.cindra_data_path,
     )
+
+
+def test_define_forging_dataset_discards_a_rebuilt_animals_cross_recording_output(
+    experiment_project: _ForgingProject,
+) -> None:
+    """Verifies that rebuilding an animal removes the cross-recording output left in every source session it held,
+    including a session dropped by the rebuild, while the other animals' output stays in place.
+    """
+    names = experiment_project.names()
+    define_forging_dataset(name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root)
+    dropped, kept, untouched = _seed_cross_recording_output(
+        project=experiment_project, sessions=experiment_project.sessions
+    )
+
+    define_forging_dataset(
+        name=_DATASET_NAME,
+        session_names=(names[1],),
+        project_root=experiment_project.project_root,
+        recreate_animals=("305",),
+    )
+
+    assert not dropped.exists()
+    assert not kept.exists()
+    assert untouched.joinpath("tracking_template_masks.npz").is_file()
+
+
+def test_define_forging_dataset_discards_the_output_left_in_a_session_a_rebuild_adds(
+    experiment_project: _ForgingProject,
+) -> None:
+    """Verifies that rebuilding an animal removes the cross-recording output left by a previous run in a session added
+    by the rebuild, so a run that failed partway leaves no output from which the stages resume.
+    """
+    names = experiment_project.names()
+    define_forging_dataset(
+        name=_DATASET_NAME, session_names=(names[0], names[2]), project_root=experiment_project.project_root
+    )
+    (leftover,) = _seed_cross_recording_output(project=experiment_project, sessions=(experiment_project.sessions[1],))
+
+    define_forging_dataset(
+        name=_DATASET_NAME,
+        session_names=(names[0], names[1]),
+        project_root=experiment_project.project_root,
+        recreate_animals=("305",),
+    )
+
+    assert not leftover.exists()
+
+
+def test_define_forging_dataset_discards_every_animals_cross_recording_output_on_recreation(
+    experiment_project: _ForgingProject,
+) -> None:
+    """Verifies that recreating the whole dataset removes the cross-recording output of every session it held, including
+    the sessions of an animal left out by the recreation.
+    """
+    names = experiment_project.names()
+    define_forging_dataset(name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root)
+    seeded = _seed_cross_recording_output(project=experiment_project, sessions=experiment_project.sessions)
+
+    recreated = define_forging_dataset(
+        name=_DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root, force_recreate=True
+    )
+
+    assert {dataset_animal.animal for dataset_animal in recreated.animals} == {"305"}
+    assert not any(path.exists() for path in seeded)
 
 
 def test_load_multiday_plan_skips_an_animal_holding_no_sessions(tmp_path: Path) -> None:

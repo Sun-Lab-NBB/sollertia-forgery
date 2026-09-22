@@ -51,7 +51,8 @@ def resolve_dataset(
 
         Naming an animal in recreate_animals opts that animal out of the freeze. The animal is dropped from the
         dataset with its directory tree and rebuilt from the sessions provided for it, while every other animal
-        keeps its data. The rebuilt animal's tracked jobs need a reset, which the calling pipeline owns.
+        keeps its data. The rebuilt animal's tracked jobs need a reset and its cross-recording output a discard,
+        both owned by the calling pipeline.
 
     Args:
         name: The unique name of the dataset.
