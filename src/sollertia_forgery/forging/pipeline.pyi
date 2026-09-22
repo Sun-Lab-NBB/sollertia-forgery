@@ -1,6 +1,6 @@
 from pathlib import Path
 from dataclasses import dataclass
-from collections.abc import Collection
+from collections.abc import Iterable, Collection
 
 from cindra import MultiRecordingJobNames
 from sollertia_shared_assets import (
@@ -65,6 +65,12 @@ def _resolve_multiday_stages(
 ) -> dict[tuple[str, str], _MultidayStage]: ...
 def _resolve_runnable_jobs(tracker: ProcessingTracker, universe: list[tuple[str, str]]) -> list[tuple[str, str]]: ...
 def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals: tuple[str, ...]) -> None: ...
+def _resolve_cross_recording_paths(
+    dataset_name: str, project_root: Path, entries: Iterable[DatasetSession]
+) -> tuple[Path, ...]: ...
+def _discard_cross_recording_output(
+    dataset_name: str, project_root: Path, entries: Iterable[DatasetSession]
+) -> None: ...
 def _run_multiday_job(
     stage: _MultidayStage, job: tuple[str, str], tracker: ProcessingTracker, job_id: str, workers: int
 ) -> None: ...
