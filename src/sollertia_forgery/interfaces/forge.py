@@ -99,7 +99,8 @@ def forge_command(
     Provided sessions that the dataset does not hold are appended to it, so a dataset grows by naming the sessions to
     add. An animal already in the dataset is frozen, because widening its session set invalidates the outputs already
     forged for it and requires rebuilding the animal as a whole. Name that animal with --recreate-animal to rebuild it
-    from the provided sessions while every other animal keeps its data.
+    from the provided sessions while every other animal keeps its data. A rebuild discards the cross-recording output
+    written by this dataset into the animal's source sessions, so its recordings are tracked afresh.
 
     The forging pipeline is system-agnostic: it resolves the dataset's system-specific assembly worker internally
     from the central registry and infers the acquisition system from the resolved dataset, so the command carries no

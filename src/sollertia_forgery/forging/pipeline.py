@@ -35,6 +35,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import (
     ProcessingStatus,
     ProcessingTracker,
+    delete_directory,
     limit_worker_threads,
     initialize_worker_threads,
 )
@@ -49,7 +50,7 @@ from ..shared_assets import verify_openmp_runtime, multi_recording_dataset_name
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Collection
+    from collections.abc import Iterable, Collection
 
     from sollertia_shared_assets import DatasetSession
 
@@ -129,6 +130,12 @@ def define_forging_dataset(
         makes every stage outstanding again. The tracked jobs of a session no longer held by the animal fall outside the
         resulting universe and are discarded when the next pipeline run aligns the tracker.
 
+        A rebuild also discards the cross-recording output written by this dataset into the animal's source sessions,
+        both the sessions held by the animal before the rebuild and the ones it holds after it. The cross-recording
+        stages resume from the output they find, and the output of a previous build describes that build's recording
+        set. Recreating the whole dataset discards that output from every session held by the dataset before or after
+        the recreation, because the recreation rebuilds every animal.
+
         Each animal that this call adds or rebuilds has its multi-recording configuration materialized, as does an
         animal already in the dataset that lacks one and whose sessions are still on this machine. Whether a
         configuration is needed at all follows from the dataset's recorded session type, so a dataset of sessions with
@@ -160,15 +167,24 @@ def define_forging_dataset(
         FileNotFoundError: If a provided session name resolves to no directory under the project root, or if the
             acquisition system's resolver reports a missing input it needs for an animal.
         RuntimeError: If a provided session name resolves to more than one directory under the project root.
+        OSError: If the existing hierarchy, or the cross-recording output of a rebuilt animal, cannot be removed.
     """
     console.echo(message=f"Defining the '{name}' dataset...", level=LogLevel.INFO)
 
-    # Captured before resolution, so the animals added by this call are the ones absent from this set afterwards.
+    # Captures the previous membership before resolution, because the animals added by this call are the ones absent
+    # from the existing set afterwards, and the sessions held by a rebuilt animal before the rebuild leave the marker
+    # once resolution drops them. A recreated dataset counts none of its animals as existing while its whole previous
+    # membership is captured, because the recreation rebuilds every animal.
     existing_animals: frozenset[str] = frozenset()
+    former_entries: tuple[DatasetSession, ...] = ()
     dataset_directory = project_root.joinpath(name)
-    if not force_recreate and dataset_directory.joinpath(DATASET_MARKER_FILENAME).is_file():
+    if dataset_directory.joinpath(DATASET_MARKER_FILENAME).is_file():
         existing = DatasetData.load(dataset_path=dataset_directory)
-        existing_animals = frozenset(dataset_animal.animal for dataset_animal in existing.animals)
+        if not force_recreate:
+            existing_animals = frozenset(dataset_animal.animal for dataset_animal in existing.animals)
+        former_entries = tuple(
+            entry for entry in existing.sessions if force_recreate or entry.animal in recreate_animals
+        )
 
     dataset = resolve_dataset(
         name=name,
@@ -179,6 +195,7 @@ def define_forging_dataset(
     )
 
     resolved_animals = frozenset(dataset_animal.animal for dataset_animal in dataset.animals)
+    rebuilt_animals = resolved_animals if force_recreate else frozenset(recreate_animals)
 
     # Membership in the dataset marker is not evidence that a configuration was written, because the marker is
     # committed before the configurations are. An animal held by the marker but absent from the disk is therefore
@@ -201,11 +218,16 @@ def define_forging_dataset(
     # Materializing loads every requested animal's sessions before the resolver can decline, so a dataset with no
     # cross-recording tracking skips the call outright rather than paying that read to write nothing.
     if tracked_across_recordings:
+        # The entries are keyed by name so that each source session is cleared once, because a session kept across a
+        # rebuild sits in both the former and the current membership.
+        current_entries = tuple(entry for entry in dataset.sessions if entry.animal in rebuilt_animals)
+        rebuilt_entries = {(entry.animal, entry.session): entry for entry in (*former_entries, *current_entries)}
+        _discard_cross_recording_output(dataset_name=name, project_root=project_root, entries=rebuilt_entries.values())
         _materialize_multiday_plan(
             dataset=dataset,
             project_root=project_root,
             display_progress=display_progress,
-            animals=(resolved_animals - existing_animals) | frozenset(recreate_animals) | unconfigured_animals,
+            animals=(resolved_animals - existing_animals) | rebuilt_animals | unconfigured_animals,
         )
 
     if recreate_animals:
@@ -448,25 +470,9 @@ def forging_cross_recording_paths(dataset: DatasetData) -> tuple[Path, ...]:
         The cross-recording output directory this dataset owns in each source session that resolves, in the order the
         dataset holds its sessions.
     """
-    project_root = dataset.dataset_data_path.parents[1]
-    paths: list[Path] = []
-    for entry in dataset.sessions:
-        try:
-            session = SessionData.load(session_path=project_root.joinpath(entry.animal, entry.session))
-        except Exception as exception:
-            console.echo(
-                message=f"Unable to locate the source session '{entry.session}' of dataset '{dataset.name}'. "
-                f"{exception}",
-                level=LogLevel.WARNING,
-            )
-            continue
-        paths.append(
-            resolve_dataset_path(
-                output_root=session.processed_data_path,
-                dataset_name=multi_recording_dataset_name(animal_id=entry.animal, dataset_name=dataset.name),
-            )
-        )
-    return tuple(paths)
+    return _resolve_cross_recording_paths(
+        dataset_name=dataset.name, project_root=dataset.dataset_data_path.parents[1], entries=dataset.sessions
+    )
 
 
 def forging_job_prerequisites(
@@ -762,6 +768,68 @@ def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals
         tracker.reset_jobs(job_ids=tracked_targets)
         console.echo(
             message=f"Reset {len(tracked_targets)} tracked job(s) for the rebuilt animal(s) {natsorted(animals)}.",
+            level=LogLevel.INFO,
+        )
+
+
+def _resolve_cross_recording_paths(
+    dataset_name: str, project_root: Path, entries: Iterable[DatasetSession]
+) -> tuple[Path, ...]:
+    """Resolves the cross-recording output directory owned by one dataset inside each named source session.
+
+    Notes:
+        A session whose marker cannot be read is reported and passed over, since a source session that no longer
+        resolves holds no directory to name.
+
+    Args:
+        dataset_name: The unqualified name of the dataset that owns the output.
+        project_root: The path to the project's root directory that stores the animal and session data directories.
+        entries: The dataset entries naming the source sessions to resolve.
+
+    Returns:
+        The output directory inside each source session that resolves, in entry order.
+    """
+    paths: list[Path] = []
+    for entry in entries:
+        try:
+            session = SessionData.load(session_path=project_root.joinpath(entry.animal, entry.session))
+        except Exception as exception:
+            console.echo(
+                message=f"Unable to locate the source session '{entry.session}' of dataset '{dataset_name}'. "
+                f"{exception}",
+                level=LogLevel.WARNING,
+            )
+            continue
+        paths.append(
+            resolve_dataset_path(
+                output_root=session.processed_data_path,
+                dataset_name=multi_recording_dataset_name(animal_id=entry.animal, dataset_name=dataset_name),
+            )
+        )
+    return tuple(paths)
+
+
+def _discard_cross_recording_output(dataset_name: str, project_root: Path, entries: Iterable[DatasetSession]) -> None:
+    """Removes the cross-recording output written by one dataset into the named source sessions.
+
+    Args:
+        dataset_name: The unqualified name of the dataset that owns the output.
+        project_root: The path to the project's root directory that stores the animal and session data directories.
+        entries: The dataset entries naming the source sessions to clear.
+    """
+    removed_count = 0
+    for directory in _resolve_cross_recording_paths(
+        dataset_name=dataset_name, project_root=project_root, entries=entries
+    ):
+        if directory.exists():
+            delete_directory(directory_path=directory)
+            removed_count += 1
+    if removed_count:
+        console.echo(
+            message=(
+                f"Discarded the cross-recording output of dataset '{dataset_name}' from {removed_count} source "
+                f"session(s)."
+            ),
             level=LogLevel.INFO,
         )
 
