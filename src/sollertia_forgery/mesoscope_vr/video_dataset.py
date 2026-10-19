@@ -14,6 +14,7 @@ from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
 from .metadata import VideoDataFiles
+from .frame_windows import resolve_window_maxima
 from ..shared_assets import count_feather_rows
 from .video_tracking import PUPIL_CAMERA_NAME, PupilColumn
 
@@ -45,7 +46,7 @@ _PUPIL_FLAG_COLUMNS: frozenset[str] = frozenset({PupilColumn.BLINKING_STATE, Pup
 unsigned 8-bit integers, since a boolean state cannot be linearly interpolated."""
 
 type _AlignedArray = NDArray[np.float32] | NDArray[np.uint8]
-"""The per-camera array types the assembled columns take: linearly interpolated geometry and the nearest-prior state
+"""The per-camera array types the assembled columns take: single-precision camera values and the nearest-prior state
 flags."""
 
 
@@ -98,11 +99,12 @@ the eye, so only it contributes a pupil feather."""
 def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uint64]) -> pl.DataFrame:
     """Assembles the target session's video dataset and aligns it to the reference time vector.
 
-    Reads the fixed camera set's per-frame video feathers from the processed video-data directory and interpolates
-    each present feather's values onto the reference time vector. Motion-energy, frame-luminance, and pupil-geometry
-    values are interpolated linearly, while the two pupil state flags are interpolated by nearest-prior sample. A
-    camera whose timestamp feather is absent is skipped, and the dataset is empty when no camera feather is present, so
-    a session processed without video still forges.
+    Reads the fixed camera set's per-frame video feathers from the processed video-data directory and resamples each
+    present feather's values onto the reference time vector. Every reference sample takes the largest motion energy
+    acquired since the preceding sample, or the interpolated value when the camera acquired no frame in that span.
+    Frame-luminance and pupil-geometry values are interpolated linearly, and the two pupil state flags are interpolated
+    by nearest-prior sample. A camera whose timestamp feather is absent is skipped, and the dataset is empty when no
+    camera feather is present, so a session processed without video still forges.
 
     Args:
         video_data_path: The path to the processed video-data directory holding the per-camera timestamp,
@@ -136,12 +138,18 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
             energy_frame = _read_frame_aligned(
                 feather_path=energy_path, expected_rows=frame_time.size, timestamps_filename=timestamps_path.name
             )
-            for source_column in (_MOTION_ENERGY_COLUMN, _FRAME_LUMINANCE_COLUMN):
-                aligned_data[f"{camera.name}_{source_column}"] = _interpolate_linear(
-                    frame_time=frame_time,
-                    values=energy_frame[source_column].to_numpy(),
-                    reference_time=reference_time,
-                )
+            # Every reference frame keeps the largest motion energy inside its window, because a movement bout can span
+            # fewer camera frames than one reference interval holds.
+            aligned_data[f"{camera.name}_{_MOTION_ENERGY_COLUMN}"] = resolve_window_maxima(
+                frame_time=frame_time,
+                values=energy_frame[_MOTION_ENERGY_COLUMN].to_numpy(),
+                reference_time=reference_time,
+            )
+            aligned_data[f"{camera.name}_{_FRAME_LUMINANCE_COLUMN}"] = _interpolate_linear(
+                frame_time=frame_time,
+                values=energy_frame[_FRAME_LUMINANCE_COLUMN].to_numpy(),
+                reference_time=reference_time,
+            )
 
         if camera.pupil_file is None:
             continue

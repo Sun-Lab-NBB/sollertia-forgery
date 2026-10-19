@@ -100,15 +100,15 @@ class DatasetColumn(StrEnum):
     SCREENS = "screens"
     """The Virtual Reality display state at each sample."""
     TORQUE_N_CM = "torque_N_cm"
-    """The torque applied by the animal to the running wheel in N·cm at each sample, forced to zero during 'run' periods
-    upstream.
+    """The torque applied by the animal to the running wheel in N·cm at each sample, the value of largest magnitude held
+    since the preceding sample with its sign kept, forced to zero during 'run' periods upstream.
     """
     DISTANCE_CM = "distance_cm"
     """Cumulative distance traveled by the animal in centimeters at each sample."""
     SPEED_CM_S = "speed_cm_s"
     """Animal's running speed in cm/s at each sample."""
     LICK = "lick"
-    """Lick sensor engagement state at each sample."""
+    """Lick onset flag at each sample, 1 when a lick sensor contact began between the preceding sample and this one."""
     WATER_UL = "water_uL"
     """The cumulative water reward volume delivered to the animal at each sample in microliters."""
     REWARD = "reward"
@@ -170,14 +170,18 @@ class DatasetColumn(StrEnum):
 
     # Groups the video motion-energy columns produced by the forging video assembly.
     FACE_CAMERA_MOTION_ENERGY = "face_camera_motion_energy"
-    """Face camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A
-    within-session movement magnitude, high during movement and low during stillness.
+    """Face camera motion energy at each sample in gray levels, the largest value among the camera frames acquired
+    since the preceding sample, or the interpolated value when none was acquired. A frame's value is its mean absolute
+    intensity change from the previous frame, a within-session movement magnitude that is high during movement and low
+    during stillness.
     """
     FACE_CAMERA_FRAME_LUMINANCE = "face_camera_frame_luminance"
     """Face camera mean frame intensity at each sample in gray levels, tracking scene illumination."""
     BODY_CAMERA_MOTION_ENERGY = "body_camera_motion_energy"
-    """Body camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A
-    within-session movement magnitude, high during movement and low during stillness.
+    """Body camera motion energy at each sample in gray levels, the largest value among the camera frames acquired
+    since the preceding sample, or the interpolated value when none was acquired. A frame's value is its mean absolute
+    intensity change from the previous frame, a within-session movement magnitude that is high during movement and low
+    during stillness.
     """
     BODY_CAMERA_FRAME_LUMINANCE = "body_camera_frame_luminance"
     """Body camera mean frame intensity at each sample in gray levels, tracking scene illumination."""
@@ -251,12 +255,14 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
     DatasetColumn.BRAKE: "The running wheel brake engagement at each sample.",
     DatasetColumn.SCREENS: "The Virtual Reality display state at each sample.",
     DatasetColumn.TORQUE_N_CM: (
-        "The torque applied by the animal to the running wheel in N·cm at each sample, forced to zero during 'run' "
-        "periods upstream."
+        "The torque applied by the animal to the running wheel in N·cm at each sample, the value of largest magnitude "
+        "held since the preceding sample with its sign kept, forced to zero during 'run' periods upstream."
     ),
     DatasetColumn.DISTANCE_CM: "Cumulative distance traveled by the animal in centimeters at each sample.",
     DatasetColumn.SPEED_CM_S: "Animal's running speed in cm/s at each sample.",
-    DatasetColumn.LICK: "Lick sensor engagement state at each sample.",
+    DatasetColumn.LICK: (
+        "Lick onset flag at each sample, 1 when a lick sensor contact began between the preceding sample and this one."
+    ),
     DatasetColumn.WATER_UL: "The cumulative water reward volume delivered to the animal at each sample in microliters.",
     DatasetColumn.REWARD: (
         "The reward-classification state at each sample, one of 'no' (no reward tone playing), 'tone' (reward tone "
@@ -318,15 +324,19 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
     ),
     # Video motion-energy column descriptions.
     DatasetColumn.FACE_CAMERA_MOTION_ENERGY: (
-        "Face camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A "
-        "within-session movement magnitude, high during movement and low during stillness."
+        "Face camera motion energy at each sample in gray levels, the largest value among the camera frames "
+        "acquired since the preceding sample, or the interpolated value when none was acquired. A frame's value is its "
+        "mean absolute intensity change from the previous frame, a within-session movement magnitude that is high "
+        "during movement and low during stillness."
     ),
     DatasetColumn.FACE_CAMERA_FRAME_LUMINANCE: (
         "Face camera mean frame intensity at each sample in gray levels, tracking scene illumination."
     ),
     DatasetColumn.BODY_CAMERA_MOTION_ENERGY: (
-        "Body camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A "
-        "within-session movement magnitude, high during movement and low during stillness."
+        "Body camera motion energy at each sample in gray levels, the largest value among the camera frames "
+        "acquired since the preceding sample, or the interpolated value when none was acquired. A frame's value is its "
+        "mean absolute intensity change from the previous frame, a within-session movement magnitude that is high "
+        "during movement and low during stillness."
     ),
     DatasetColumn.BODY_CAMERA_FRAME_LUMINANCE: (
         "Body camera mean frame intensity at each sample in gray levels, tracking scene illumination."
