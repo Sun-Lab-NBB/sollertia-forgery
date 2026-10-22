@@ -73,7 +73,7 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
         console.error(message=message, error=FileNotFoundError)
 
     # Resolves the reference clock from the slowest camera, since a training session has no fluorescence clock. Every
-    # other data source is interpolated onto this clock. Resolving before creating the output directory avoids leaving
+    # other data source is resampled onto this clock. Resolving before creating the output directory avoids leaving
     # an empty directory behind when no camera clock is available.
     reference_time = resolve_slowest_camera_clock(video_data_path=video_data_path)
 

@@ -203,15 +203,25 @@ def _write_brake_feather(microcontroller_data_path: Path) -> None:
 
 
 def _write_torque_feather(microcontroller_data_path: Path) -> None:
-    """Writes the torque feather as a linear ramp of one N·cm per reference sample.
+    """Writes the torque feather as a stepwise stream that holds 2 N·cm from one second past sample one, pushes
+    clockwise to -4 N·cm and settles at 0.5 N·cm between samples seven and eight, and reports 9 N·cm at sample nine.
 
     Args:
         microcontroller_data_path: The directory receiving the torque feather.
     """
     pl.DataFrame(
         {
-            "time_us": np.array([_sample_time(0), _sample_time(index=9)], dtype=np.uint64),
-            "torque_N_cm": np.array([0.0, 9.0], dtype=np.float64),
+            "time_us": np.array(
+                [
+                    _sample_time(0),
+                    _sample_time(1) + 1_000_000,
+                    _sample_time(7) + 1_000_000,
+                    _sample_time(7) + 2_000_000,
+                    _sample_time(9),
+                ],
+                dtype=np.uint64,
+            ),
+            "torque_N_cm": np.array([0.0, 2.0, -4.0, 0.5, 9.0], dtype=np.float64),
         }
     ).write_ipc(file=microcontroller_data_path.joinpath(BehaviorDataFiles.TORQUE))
 
@@ -301,8 +311,9 @@ def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) 
     # The brake column thresholds the interpolated brake torque.
     assert behavior_data["brake"].to_list() == [1, 1, 1, 0, 0, 0, 0, 1, 1, 1]
     assert behavior_data["screens"].to_list() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
-    # The ramp reads one N·cm per sample, and the four run samples are overwritten with zero.
-    assert behavior_data["torque_N_cm"].to_list() == pytest.approx([0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 7.0, 8.0, 9.0])
+    # Each sample keeps the torque of largest magnitude held since the preceding sample, so the brief clockwise push
+    # between samples seven and eight survives with its sign, and the four run samples are overwritten with zero.
+    assert behavior_data["torque_N_cm"].to_list() == pytest.approx([0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, -4.0, 9.0])
     # The encoder advances to 21.5 cm by the last run sample, and the rest samples hold that readout forward.
     assert behavior_data["distance_cm"].to_list() == pytest.approx(
         [0.0, 0.0, 0.0, 1.0, 6.5, 14.0, 21.5, 21.5, 21.5, 21.5]
@@ -314,6 +325,42 @@ def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) 
     assert behavior_data.schema["brake"] == pl.UInt8
     assert behavior_data.schema["torque_N_cm"] == pl.Float32
     assert behavior_data.schema["speed_cm_s"] == pl.Float32
+
+
+def test_assemble_behavior_dataset_flags_the_frame_in_which_each_lick_begins(tmp_path: Path) -> None:
+    """Verifies that a lick contact shorter than the sampling interval is flagged at the sample whose window holds its
+    onset, including a contact that never spans a reference timestamp.
+    """
+    microcontroller_data_path, runtime_data_path, raw_data_path = _make_input_directories(tmp_path=tmp_path)
+    _write_hardware_state(raw_data_path=raw_data_path)
+    _write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
+    # The first contact starts and ends between samples two and three, and the second starts just before sample six
+    # and ends just after it.
+    pl.DataFrame(
+        {
+            "time_us": np.array(
+                [
+                    _sample_time(0),
+                    _sample_time(2) + 1_000_000,
+                    _sample_time(2) + 1_060_000,
+                    _sample_time(6) - 30_000,
+                    _sample_time(6) + 30_000,
+                ],
+                dtype=np.uint64,
+            ),
+            "lick_state": np.array([0, 1, 0, 1, 0], dtype=np.uint8),
+        }
+    ).write_ipc(file=microcontroller_data_path.joinpath(BehaviorDataFiles.LICK))
+
+    behavior_data = assemble_behavior_dataset(
+        microcontroller_data_path=microcontroller_data_path,
+        runtime_data_path=runtime_data_path,
+        raw_data_path=raw_data_path,
+        reference_time=_reference_time_vector(),
+    )
+
+    assert behavior_data["lick"].to_list() == [0, 0, 0, 1, 0, 0, 1, 0, 0, 0]
+    assert behavior_data.schema["lick"] == pl.UInt8
 
 
 def test_assemble_behavior_dataset_steps_the_water_total_between_deliveries(tmp_path: Path) -> None:

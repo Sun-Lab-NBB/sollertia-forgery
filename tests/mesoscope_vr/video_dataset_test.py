@@ -129,7 +129,7 @@ def test_assemble_video_dataset_returns_an_empty_frame_for_a_camera_carrying_onl
     assert assembled.width == 0
 
 
-def test_assemble_video_dataset_interpolates_the_body_camera_onto_the_reference_clock(
+def test_assemble_video_dataset_resamples_the_body_camera_onto_the_reference_clock(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
@@ -144,11 +144,13 @@ def test_assemble_video_dataset_interpolates_the_body_camera_onto_the_reference_
     # The body camera carries no eye, so it contributes its two energy columns and no pupil column at all.
     assert assembled.columns == [f"{_BODY_CAMERA_NAME}_motion_energy", f"{_BODY_CAMERA_NAME}_frame_luminance"]
     assert assembled.schema[f"{_BODY_CAMERA_NAME}_motion_energy"] == pl.Float32
-    assert assembled[f"{_BODY_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([5.0, 15.0])
+    # Each reference sample takes the largest motion energy acquired since the preceding sample, while the luminance
+    # blends the bracketing frames.
+    assert assembled[f"{_BODY_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([0.0, 10.0])
     assert assembled[f"{_BODY_CAMERA_NAME}_frame_luminance"].to_list() == pytest.approx([105.0, 115.0])
 
 
-def test_assemble_video_dataset_interpolates_the_face_camera_energy_and_pupil_columns(
+def test_assemble_video_dataset_resamples_the_face_camera_energy_and_pupil_columns(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
@@ -171,12 +173,30 @@ def test_assemble_video_dataset_interpolates_the_face_camera_energy_and_pupil_co
         PupilColumn.PUPIL_DIAMETER_PX.value,
         PupilColumn.BLINKING_STATE.value,
     ]
-    assert assembled[f"{PUPIL_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([2.0, 4.0, 5.0])
+    assert assembled[f"{PUPIL_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([1.0, 3.0, 5.0])
+    assert assembled[f"{PUPIL_CAMERA_NAME}_frame_luminance"].to_list() == pytest.approx([15.0, 25.0, 30.0])
     assert assembled[PupilColumn.PUPIL_DIAMETER_PX].to_list() == pytest.approx([25.0, 35.0, 40.0])
     # A boolean state cannot be blended, so each flag takes the value of the last frame acquired at or before the
     # reference sample.
     assert assembled.schema[PupilColumn.BLINKING_STATE] == pl.UInt8
     assert assembled[PupilColumn.BLINKING_STATE].to_list() == [1, 0, 1]
+
+
+def test_assemble_video_dataset_keeps_a_motion_bout_shorter_than_the_reference_interval(
+    video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
+) -> None:
+    write_camera_timestamps(
+        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 250, 500, 750, 1000)
+    )
+    _write_energy(
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        motion_energy=[1.0, 1.0, 9.0, 1.0, 1.0],
+        frame_luminance=[100.0] * 5,
+    )
+
+    assembled = assemble_video_dataset(video_data_path=video_data_path, reference_time=_clock(0, 1000))
+
+    assert assembled[f"{_BODY_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([1.0, 9.0])
 
 
 def test_assemble_video_dataset_skips_a_camera_whose_clock_is_absent(

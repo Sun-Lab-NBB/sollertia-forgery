@@ -14,6 +14,7 @@ from sollertia_shared_assets import RawDataFiles, MesoscopeHardwareState
 from ataraxis_data_structures import interpolate_data
 
 from .metadata import BehaviorDataFiles
+from .frame_windows import flag_window_onsets, resolve_window_signed_peaks
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,10 +45,11 @@ def assemble_behavior_dataset(
 ) -> pl.DataFrame:
     """Assembles the target session's behavior dataset and aligns it to the reference time vector.
 
-    Reads the module-parsed microcontroller feathers and the runtime system-state feather, interpolates each present
+    Reads the module-parsed microcontroller feathers and the runtime system-state feather, resamples each present
     source onto the reference time vector, and classifies every sample's reward outcome from the valve tone and water
-    volume. The encoder, screen, brake, and torque sources are optional, so a session assembles with whichever
-    feathers its session type produced.
+    volume. A sample's lick and torque values summarize the window that ends at the sample and opens at the preceding
+    one. The encoder, screen, brake, and torque sources are optional, so a session assembles with whichever feathers
+    its session type produced.
 
     Args:
         microcontroller_data_path: The path to the processed microcontroller-data directory holding the module-parsed
@@ -103,11 +105,12 @@ def assemble_behavior_dataset(
             target_coordinates=reference_time,
             is_discrete=True,
         ),
-        "lick": interpolate_data(
-            source_coordinates=lick_data_frame["time_us"].to_numpy(),
-            source_values=lick_data_frame["lick_state"].to_numpy(),
-            target_coordinates=reference_time,
-            is_discrete=True,
+        # Each frame flags whether a lick contact began inside its window, because a contact is shorter than a mesoscope
+        # frame interval and a frame instant misses many contacts.
+        "lick": flag_window_onsets(
+            event_time=lick_data_frame["time_us"].to_numpy(),
+            states=lick_data_frame["lick_state"].to_numpy(),
+            reference_time=reference_time,
         ),
         "water_uL": interpolate_data(
             source_coordinates=valve_time,
@@ -182,11 +185,12 @@ def assemble_behavior_dataset(
     torque_file = microcontroller_data_path.joinpath(BehaviorDataFiles.TORQUE)
     if torque_file.exists():
         torque_data_frame = pl.read_ipc(source=torque_file, memory_map=True)
-        aligned_data["torque_N_cm"] = interpolate_data(
-            source_coordinates=torque_data_frame["time_us"].to_numpy(),
-            source_values=torque_data_frame["torque_N_cm"].to_numpy(),
-            target_coordinates=reference_time,
-            is_discrete=False,
+        # Every frame keeps the largest torque held inside its window, because the torque sensor reports only changes
+        # and a push can rise and settle between two frame instants.
+        aligned_data["torque_N_cm"] = resolve_window_signed_peaks(
+            event_time=torque_data_frame["time_us"].to_numpy(),
+            values=torque_data_frame["torque_N_cm"].to_numpy(),
+            reference_time=reference_time,
         ).astype(np.float32)
 
     behavior_data = pl.DataFrame(aligned_data)
