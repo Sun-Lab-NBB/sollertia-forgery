@@ -20,6 +20,13 @@ def assemble_runtime_dataset(
 ) -> pl.DataFrame: ...
 def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame: ...
 def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path) -> pl.DataFrame: ...
+def _resolve_corridor_distance(
+    reference_time: NDArray[np.uint64],
+    encoder_time: NDArray[np.uint64],
+    encoder_distance: NDArray[np.float64],
+    corridor_onsets: NDArray[np.uint64],
+    corridor_starts: NDArray[np.float64],
+) -> NDArray[np.float64]: ...
 def _check_trigger_zones(
     traversed_distance: NDArray[np.float64],
     trigger_zone_starts: NDArray[np.float64],

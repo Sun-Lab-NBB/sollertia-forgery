@@ -6,6 +6,7 @@ import polars as pl
 from numpy.typing import NDArray
 
 from .metadata import VideoDataFiles as VideoDataFiles
+from .frame_windows import resolve_window_maxima as resolve_window_maxima
 from ..shared_assets import count_feather_rows as count_feather_rows
 from .video_tracking import (
     PUPIL_CAMERA_NAME as PUPIL_CAMERA_NAME,

@@ -5,6 +5,10 @@ import polars as pl
 from numpy.typing import NDArray as NDArray
 
 from .metadata import BehaviorDataFiles as BehaviorDataFiles
+from .frame_windows import (
+    flag_window_onsets as flag_window_onsets,
+    resolve_window_signed_peaks as resolve_window_signed_peaks,
+)
 
 _MICROSECONDS_PER_SECOND: int
 _MICROSECONDS_PER_MINUTE: int

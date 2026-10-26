@@ -1,0 +1,19 @@
+import numpy as np
+from numpy.typing import NDArray as NDArray
+
+def flag_window_onsets(
+    event_time: NDArray[np.uint64], states: NDArray[np.uint8], reference_time: NDArray[np.uint64]
+) -> NDArray[np.uint8]: ...
+def resolve_window_signed_peaks(
+    event_time: NDArray[np.uint64], values: NDArray[np.float64], reference_time: NDArray[np.uint64]
+) -> NDArray[np.float64]: ...
+def resolve_window_maxima(
+    frame_time: NDArray[np.uint64], values: NDArray[np.float32], reference_time: NDArray[np.uint64]
+) -> NDArray[np.float32]: ...
+def _resolve_window_starts(reference_time: NDArray[np.uint64]) -> NDArray[np.int64]: ...
+def _select_signed_peaks(
+    values: NDArray[np.float64], first: NDArray[np.int64], last: NDArray[np.int64]
+) -> NDArray[np.float64]: ...
+def _select_maxima(
+    values: NDArray[np.float32], first: NDArray[np.int64], last: NDArray[np.int64], fallback: NDArray[np.float32]
+) -> NDArray[np.float32]: ...

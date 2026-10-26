@@ -13,6 +13,7 @@ class BehaviorDataFiles(StrEnum):
     RUNTIME_STATE = "runtime_state_data.feather"
     REINFORCING_GUIDANCE = "reinforcing_guidance_state_data.feather"
     AVERSIVE_GUIDANCE = "aversive_guidance_state_data.feather"
+    VR_CORRIDOR = "vr_corridor_data.feather"
     VR_CUE = "vr_cue_data.feather"
     VR_TRIGGER_ZONE = "vr_trigger_zone_data.feather"
     TRIAL = "trial_data.feather"
