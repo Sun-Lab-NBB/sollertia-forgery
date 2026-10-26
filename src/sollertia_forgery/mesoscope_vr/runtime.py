@@ -40,7 +40,7 @@ _AVERSIVE_GUIDANCE_STATE_CODE: int = 4
 """The message code for aversive trial guidance state data."""
 
 _DISTANCE_SNAPSHOT_CODE: int = 5
-"""The message code for distance snapshot data logged when VR wall cue sequence changes."""
+"""The message code for the distance traveled since the active VR corridor's onset, logged when Unity terminates."""
 
 _ERROR_CONTEXT_CUE_COUNT: int = 20
 """The number of subsequent cues included in the error context when a cue sequence fails to decompose."""
@@ -99,8 +99,8 @@ def _export_runtime_data(
     """Routes decoded runtime messages by payload code and exports the resulting behavior feathers.
 
     Writes the system-state and runtime-state feathers for every session. For experiment sessions it also writes the
-    cue, trigger-zone, and trial feathers, plus the guidance feathers when the corresponding guidance events were
-    recorded.
+    corridor, cue, trigger-zone, and trial feathers, plus the guidance feathers when the corresponding guidance events
+    were recorded.
 
     Args:
         messages: The decoded runtime records, in archive order.
@@ -124,6 +124,7 @@ def _export_runtime_data(
     aversive_guidance_states: list[np.uint8] = []
     aversive_guidance_timestamps: list[np.uint64] = []
     cue_sequences: list[NDArray[np.uint8]] = []
+    cue_sequence_timestamps: list[np.uint64] = []
     distance_snapshots: list[np.float64] = []
 
     # The timestamps are already absolute UTC values resolved during decoding.
@@ -136,6 +137,7 @@ def _export_runtime_data(
         if len(payload) > _CUE_SEQUENCE_MIN_LENGTH:
             if experiment_configuration is not None:
                 cue_sequences.append(payload.astype(np.uint8))
+                cue_sequence_timestamps.append(timestamp)
 
         elif payload[0] == _SYSTEM_STATE_CODE:
             system_states.append(np.uint8(payload[1]))
@@ -185,12 +187,22 @@ def _export_runtime_data(
                 file=output_directory / BehaviorDataFiles.AVERSIVE_GUIDANCE, compression="uncompressed"
             )
 
+        # The acquisition system zeroes its distance tracker at every corridor onset, so each snapshot measures the
+        # corridor it ends. Their running total places every corridor flush against the one before it.
+        corridor_ends: NDArray[np.float64] = np.cumsum(np.array(distance_snapshots, dtype=np.float64))
+
         trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
             experiment_configuration=experiment_configuration,
             task_template=task_template,
             cue_sequences=cue_sequences,
-            distance_breakpoints=distance_snapshots,
+            distance_breakpoints=list(corridor_ends),
         )
+
+        # The cue sequence is logged immediately before the tracker reset that opens its corridor, so its timestamp
+        # marks the corridor onset.
+        corridor_starts = np.concatenate((np.zeros(1, dtype=np.float64), corridor_ends[: len(cue_sequences) - 1]))
+        corridor_dataframe = pl.DataFrame({"time_us": cue_sequence_timestamps, "traveled_distance_cm": corridor_starts})
+        corridor_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.VR_CORRIDOR, compression="uncompressed")
 
         cue_sequence, distance_sequence, trigger_start, trigger_end, trial_start = _process_trial_sequence(
             experiment_configuration=experiment_configuration,

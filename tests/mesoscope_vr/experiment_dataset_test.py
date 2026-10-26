@@ -247,6 +247,10 @@ def _write_runtime_sources(session: SessionData) -> None:
         },
     )
     _write_feather(
+        path=directory.joinpath(BehaviorDataFiles.VR_CORRIDOR),
+        columns={"time_us": np.zeros(1, dtype=np.uint64), "traveled_distance_cm": np.zeros(1, dtype=np.float64)},
+    )
+    _write_feather(
         path=directory.joinpath(BehaviorDataFiles.TRIAL),
         columns={
             "traveled_distance_cm": np.array([0.0, 100.0, 200.0, 300.0], dtype=np.float64),

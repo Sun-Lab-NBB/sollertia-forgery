@@ -60,8 +60,8 @@ def assemble_runtime_dataset(
         columns when the corresponding guidance feathers were produced.
 
     Raises:
-        FileNotFoundError: If any of the required encoder, VR cue, trigger zone, trial, or runtime state feathers is
-            missing from the processed data directories.
+        FileNotFoundError: If any of the required encoder, VR corridor, VR cue, trigger zone, trial, or runtime state
+            feathers is missing from the processed data directories.
         InvalidOperationError: If a recorded trial type index or runtime state code has no entry in the experiment
             configuration's mappings.
     """
@@ -79,6 +79,7 @@ def assemble_runtime_dataset(
     encoder_data_frame = pl.read_ipc(
         source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True
     )
+    corridor_data_frame = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.VR_CORRIDOR), memory_map=True)
     trigger_zones_data_frame = pl.read_ipc(
         source=runtime_data_path.joinpath(BehaviorDataFiles.VR_TRIGGER_ZONE), memory_map=True
     )
@@ -93,11 +94,12 @@ def assemble_runtime_dataset(
     trial_distance = trial_data_frame["traveled_distance_cm"].to_numpy()
     trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_data_frame) + 1, dtype=np.uint32)
 
-    reference_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
-        source_coordinates=encoder_data_frame["time_us"].to_numpy(),
-        source_values=encoder_data_frame["traveled_distance_cm"].to_numpy(),
-        target_coordinates=reference_time,
-        is_discrete=False,
+    reference_distance = _resolve_corridor_distance(
+        reference_time=reference_time,
+        encoder_time=encoder_data_frame["time_us"].to_numpy(),
+        encoder_distance=encoder_data_frame["traveled_distance_cm"].to_numpy(),
+        corridor_onsets=corridor_data_frame["time_us"].to_numpy(),
+        corridor_starts=corridor_data_frame["traveled_distance_cm"].to_numpy(),
     )
 
     # The processing pipeline produces separate reinforcing and aversive guidance files, each conditional on
@@ -225,6 +227,54 @@ def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path
         clipped = clipped.filter(pl.col("time_us") <= runtime_state_data["time_us"][-1])
 
     return clipped
+
+
+def _resolve_corridor_distance(
+    reference_time: NDArray[np.uint64],
+    encoder_time: NDArray[np.uint64],
+    encoder_distance: NDArray[np.float64],
+    corridor_onsets: NDArray[np.uint64],
+    corridor_starts: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Resolves the distance at each reference time-point in the corridor frame that keys the VR cue, trigger zone, and
+    trial feathers.
+
+    Notes:
+        Each sample is assigned to the last corridor whose onset precedes it and measured from the encoder distance
+        recorded at that onset, the moment at which the acquisition system zeroed its distance tracker. The wheel motion
+        between a corridor's end and the next onset therefore never shifts the corridors that follow. Holding each
+        sample past its corridor's end at that end keeps the resolved distances monotonic.
+
+    Args:
+        reference_time: The reference time vector at which to resolve the distance.
+        encoder_time: The timestamps of the encoder's cumulative distance samples.
+        encoder_distance: The cumulative distance the encoder recorded at each of those timestamps, in centimeters.
+        corridor_onsets: The onset time of each corridor, in ascending order.
+        corridor_starts: The corridor-frame distance, in centimeters, at which each corridor starts.
+
+    Returns:
+        The corridor-frame distance, in centimeters, at each reference time-point.
+    """
+    sample_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
+        source_coordinates=encoder_time,
+        source_values=encoder_distance,
+        target_coordinates=reference_time,
+        is_discrete=False,
+    )
+
+    # Reads the encoder distance accumulated by the last sample at or before each onset, which is the value the
+    # tracker held when it was zeroed. An onset preceding every encoder sample opens at zero distance.
+    onset_indices = np.searchsorted(a=encoder_time, v=corridor_onsets, side="right") - 1
+    onset_distances = np.where(onset_indices >= 0, encoder_distance[np.maximum(onset_indices, 0)], 0.0)
+    corridor_lengths = np.append(np.diff(corridor_starts), np.inf)
+
+    corridor_indices = np.searchsorted(a=corridor_onsets, v=reference_time, side="right") - 1
+    np.clip(a=corridor_indices, a_min=0, a_max=None, out=corridor_indices)
+
+    corridor_distance = np.clip(
+        a=sample_distance - onset_distances[corridor_indices], a_min=0.0, a_max=corridor_lengths[corridor_indices]
+    )
+    return corridor_starts[corridor_indices] + corridor_distance
 
 
 @njit(cache=True, nogil=True)
