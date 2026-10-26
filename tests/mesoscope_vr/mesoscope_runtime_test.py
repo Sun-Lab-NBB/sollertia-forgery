@@ -32,6 +32,7 @@ from sollertia_forgery.mesoscope_vr.runtime_dataset import (
     _check_trigger_zones,
     clip_to_session_bounds,
     assemble_runtime_dataset,
+    _resolve_corridor_distance,
     mask_non_run_experiment_data,
 )
 
@@ -260,8 +261,9 @@ def _write_experiment_runtime_feathers(session: SessionData, *, guidance: bool) 
     messages: list[tuple[int, bytes]] = [
         (100, _state_payload(_SYSTEM_STATE_CODE, 0)),
         (300, _state_payload(_SYSTEM_STATE_CODE, 2)),
+        # The corridor opens before the animal moves, matching a session's cold start.
+        (200, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))),
         (400, _state_payload(_RUNTIME_STATE_CODE, 1)),
-        (500, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))),
         (900, _state_payload(_RUNTIME_STATE_CODE, 0)),
     ]
     if guidance:
@@ -504,6 +506,43 @@ def test_parse_runtime_truncates_the_trial_spanning_the_recorded_corridor_swap(
     assert trials["traveled_distance_cm"].to_list()[:4] == [0.0, 60.0, 90.1, 150.1]
     # The first corridor contributes the completed trial and the truncated one alone. The rest of it is abandoned.
     assert len(trials) == _TRIAL_COUNT + 2
+
+
+def test_parse_runtime_stitches_corridors_from_snapshots_counted_from_their_own_onset(
+    experiment_session: SessionData, tmp_path: Path
+) -> None:
+    """Verifies that every corridor after a restart starts where the corridor before it ended."""
+    directory = tmp_path.joinpath("runtime_data")
+    corridor = _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))
+
+    # Each snapshot counts from its own corridor's onset, so the third one is shorter than the distance already run.
+    parse_runtime(
+        decoded_messages=_decoded_messages(
+            messages=[
+                (100, _state_payload(_SYSTEM_STATE_CODE, 2)),
+                (200, corridor),
+                (300, _distance_payload(distance_cm=90.0)),
+                (400, corridor),
+                (500, _distance_payload(distance_cm=100.0)),
+                (600, corridor),
+                (700, _distance_payload(distance_cm=30.0)),
+                (800, corridor),
+            ]
+        ),
+        output_directory=directory,
+        session=experiment_session,
+    )
+
+    corridors = _read_feather(directory, BehaviorDataFiles.VR_CORRIDOR)
+    assert corridors["time_us"].to_list() == [200, 400, 600, 800]
+    assert corridors["traveled_distance_cm"].to_list() == [0.0, 90.0, 190.0, 220.0]
+
+    trials = _read_feather(directory, BehaviorDataFiles.TRIAL)
+    assert trials["traveled_distance_cm"].to_list()[:8] == [0.0, 60.0, 90.0, 150.0, 190.0, 220.0, 280.0, 340.0]
+    assert len(trials) == 2 + 2 + 1 + _TRIAL_COUNT
+
+    cues = _read_feather(directory, BehaviorDataFiles.VR_CUE)
+    assert np.all(np.diff(cues["traveled_distance_cm"].to_numpy()) >= 0)
 
 
 def test_parse_runtime_raises_for_missing_experiment_configuration(
@@ -984,6 +1023,76 @@ def test_assemble_runtime_dataset_labels_a_mixed_session_against_the_reference_d
     assert dataset["trial"].to_list() == [1] * 5
     assert dataset["trial_type"].to_list() == ["reward_trial"] * 5
     assert dataset.schema["trial_type"] == pl.Enum(["reward_trial", "control_trial", "undefined"])
+
+
+def test_assemble_runtime_dataset_follows_every_corridor_across_repeated_restarts(
+    experiment_session: SessionData, experiment_configuration: MesoscopeExperimentConfiguration
+) -> None:
+    """Verifies that the trial column follows the corridor running at each sample across three Unity restarts."""
+    corridor = _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))
+    runtime_directory = experiment_session.processed_data.runtime_data_path
+    parse_runtime(
+        decoded_messages=_decoded_messages(
+            messages=[
+                (100, _state_payload(_SYSTEM_STATE_CODE, 2)),
+                (150, _state_payload(_RUNTIME_STATE_CODE, 1)),
+                (200, corridor),
+                (300, _distance_payload(distance_cm=90.0)),
+                (400, corridor),
+                (500, _distance_payload(distance_cm=100.0)),
+                (600, corridor),
+                (700, _distance_payload(distance_cm=30.0)),
+                (800, corridor),
+            ]
+        ),
+        output_directory=runtime_directory,
+        session=experiment_session,
+    )
+    microcontroller_directory = _write_encoder_feather(
+        session=experiment_session,
+        times_us=(0, 300, 350, 500, 550, 700, 750, 1000),
+        distances_cm=(0.0, 90.0, 93.0, 193.0, 197.0, 227.0, 230.0, 295.0),
+    )
+
+    dataset = assemble_runtime_dataset(
+        microcontroller_data_path=microcontroller_directory,
+        runtime_data_path=runtime_directory,
+        experiment_configuration=experiment_configuration,
+        reference_time=np.array([250, 450, 650, 1000], dtype=np.uint64),
+    )
+
+    # The samples sit 75, 66.7, 20, and 65 cm into the four corridors, whose trials start at 0, 60 | 90, 150 | 190 |
+    # 220, 280, and so on along the corridor frame.
+    assert dataset["trial"].to_list() == [2, 4, 5, 7]
+
+
+def test_resolve_corridor_distance_measures_each_corridor_from_its_own_onset() -> None:
+    """Verifies that the wheel motion between a corridor's end and the next onset never shifts the next corridor."""
+    # The animal runs 90 cm through the first corridor and 3 cm more before the restart, then 100 cm and 4 cm, then
+    # 30 cm and 3 cm, then 65 cm into the last corridor.
+    distances = _resolve_corridor_distance(
+        reference_time=np.array([250, 375, 450, 650, 1000], dtype=np.uint64),
+        encoder_time=np.array([0, 300, 350, 500, 550, 700, 750, 1000], dtype=np.uint64),
+        encoder_distance=np.array([0.0, 90.0, 93.0, 193.0, 197.0, 227.0, 230.0, 295.0], dtype=np.float64),
+        corridor_onsets=np.array([200, 400, 600, 800], dtype=np.uint64),
+        corridor_starts=np.array([0.0, 90.0, 190.0, 220.0], dtype=np.float64),
+    )
+
+    # The sample at 375 ran past the first corridor's end before the restart, so it is held at that end.
+    assert distances == pytest.approx([75.0, 90.0, 90.0 + 200.0 / 3.0, 210.0, 285.0])
+
+
+def test_resolve_corridor_distance_opens_a_corridor_preceding_every_encoder_sample_at_zero() -> None:
+    """Verifies that a corridor opening before the first encoder sample is measured from zero distance."""
+    distances = _resolve_corridor_distance(
+        reference_time=np.array([100, 300], dtype=np.uint64),
+        encoder_time=np.array([200, 300], dtype=np.uint64),
+        encoder_distance=np.array([5.0, 20.0], dtype=np.float64),
+        corridor_onsets=np.array([50], dtype=np.uint64),
+        corridor_starts=np.array([0.0], dtype=np.float64),
+    )
+
+    assert distances == pytest.approx([5.0, 20.0])
 
 
 def test_mask_non_run_experiment_data_masks_idle_and_rest_samples() -> None:

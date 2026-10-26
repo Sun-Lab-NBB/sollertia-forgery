@@ -50,6 +50,7 @@ joined, so it stands at its own height several times over."""
 
 _EXPERIMENT_RUNTIME_SOURCES: tuple[BehaviorDataFiles, ...] = (
     *_TRAINING_RUNTIME_SOURCES,
+    BehaviorDataFiles.VR_CORRIDOR,
     BehaviorDataFiles.VR_TRIGGER_ZONE,
     BehaviorDataFiles.VR_CUE,
     BehaviorDataFiles.TRIAL,
@@ -58,9 +59,9 @@ _EXPERIMENT_RUNTIME_SOURCES: tuple[BehaviorDataFiles, ...] = (
 )
 """The runtime-parsed feathers an experiment assembly reads out of the session's processed runtime-data directory. An
 experiment session carries a runtime sub-dataset that a training session does not, and that sub-dataset reads the VR
-trigger-zone, wall-cue and trial feathers unconditionally and the two guidance feathers whenever the session recorded
-guidance events. None of them is read by the training assembler, so counting a session of either type against the
-training set alone would leave an experiment assembly charged for a fraction of the sources it holds."""
+corridor, trigger-zone, wall-cue and trial feathers unconditionally and the two guidance feathers whenever the session
+recorded guidance events. None of them is read by the training assembler, so counting a session of either type against
+the training set alone would leave an experiment assembly charged for a fraction of the sources it holds."""
 
 _SOURCE_FILES: dict[SessionTypes, tuple[tuple[BehaviorDataFiles, ...], tuple[BehaviorDataFiles, ...]]] = {
     SessionTypes.MESOSCOPE_EXPERIMENT: (_EXPERIMENT_MICROCONTROLLER_SOURCES, _EXPERIMENT_RUNTIME_SOURCES),

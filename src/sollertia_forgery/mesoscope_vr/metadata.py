@@ -43,6 +43,8 @@ class BehaviorDataFiles(StrEnum):
     AVERSIVE_GUIDANCE = "aversive_guidance_state_data.feather"
     """The runtime feather holding aversive guidance-state transitions (written only when aversive guidance events
     were recorded during the session)."""
+    VR_CORRIDOR = "vr_corridor_data.feather"
+    """The runtime feather holding the onset time of each VR corridor and the traveled distance at which it starts."""
     VR_CUE = "vr_cue_data.feather"
     """The runtime feather holding VR wall-cue transitions along the corridor."""
     VR_TRIGGER_ZONE = "vr_trigger_zone_data.feather"
