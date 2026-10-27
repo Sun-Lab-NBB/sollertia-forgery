@@ -429,8 +429,38 @@ def test_assemble_behavior_dataset_holds_the_traveled_distance_across_a_paused_r
     assert behavior_data["distance_cm"].to_list() == pytest.approx(
         [0.0, 0.0, 0.0, 1.0, 6.5, 14.0, 14.0, 14.0, 26.0, 26.0]
     )
-    # The speed gate answers to the run state alone, so the paused samples report no motion.
+    # The speed gate answers to the encoder states alone, so the paused samples report no motion.
     assert behavior_data["speed_cm_s"].to_list() == pytest.approx([0.0, 0.0, 0.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 0.0])
+
+
+def test_assemble_behavior_dataset_tracks_the_wheel_through_run_training(tmp_path: Path) -> None:
+    """Verifies that run training gates the encoder the way the run state of an experiment does."""
+    microcontroller_data_path, runtime_data_path, raw_data_path = _make_input_directories(tmp_path=tmp_path)
+    _write_hardware_state(raw_data_path=raw_data_path, system_state_codes={"idle": 0, "run training": 4})
+    _write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
+    _write_encoder_feather(microcontroller_data_path=microcontroller_data_path)
+    # Replaces the experiment's walk with run training from the fourth sample through the seventh, then idle.
+    pl.DataFrame(
+        {
+            "time_us": np.array([_sample_time(0), _sample_time(3), _sample_time(7)], dtype=np.uint64),
+            "system_state": np.array([0, 4, 0], dtype=np.uint8),
+        }
+    ).write_ipc(file=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE))
+
+    behavior_data = assemble_behavior_dataset(
+        microcontroller_data_path=microcontroller_data_path,
+        runtime_data_path=runtime_data_path,
+        raw_data_path=raw_data_path,
+        reference_time=_reference_time_vector(),
+    )
+
+    # The encoder advances to 21.5 cm by the last training sample, and the closing idle samples hold that readout.
+    assert behavior_data["distance_cm"].to_list() == pytest.approx(
+        [0.0, 0.0, 0.0, 1.0, 6.5, 14.0, 21.5, 21.5, 21.5, 21.5]
+    )
+    assert behavior_data["speed_cm_s"].to_list() == pytest.approx(
+        [0.0, 0.0, 0.0, 20.0, 30.0, 40.0, 30.0, 0.0, 0.0, 0.0]
+    )
 
 
 def test_assemble_behavior_dataset_drops_the_time_columns_on_request(tmp_path: Path) -> None:
