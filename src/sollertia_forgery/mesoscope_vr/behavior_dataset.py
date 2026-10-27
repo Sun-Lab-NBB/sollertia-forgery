@@ -34,6 +34,9 @@ _RUNNING_SPEED_WINDOW_US: int = 100_000
 _TIME_COLUMNS: frozenset[str] = frozenset({"time_us", "elapsed_minutes"})
 """The dataset columns holding the session clock, dropped when a different sub-dataset supplies them."""
 
+_ENCODER_STATES: tuple[str, ...] = ("run", "run training")
+"""The system states in which the wheel encoder reports motion: the run state of an experiment and run training."""
+
 
 def assemble_behavior_dataset(
     microcontroller_data_path: Path,
@@ -239,21 +242,23 @@ def assemble_behavior_dataset(
         )
 
     if "distance_cm" in behavior_data.columns:
+        # Names only the encoder states the session's mapping declares, because the state Enum rejects any other name.
+        encoder_active = pl.col("system_state").is_in([state for state in _ENCODER_STATES if state in state_mapping])
         behavior_data = (
             behavior_data
-            # The encoder is disabled unless the system is in the run state, so its readout is held forward across
-            # every other state and anchored at 0 before the first non-idle sample.
+            # The encoder is disabled outside its states, so its readout is held forward across every other state and
+            # anchored at 0 before the first non-idle sample.
             .with_columns((pl.col("system_state") != "idle").cum_sum().alias("_past_idle"))
             .with_columns(
                 pl.when((pl.col("system_state") == "idle") & (pl.col("_past_idle") == 0))
                 .then(0.0)
-                .when(pl.col("system_state") == "run")
+                .when(encoder_active)
                 .then(pl.col("distance_cm"))
                 .otherwise(None)
                 .forward_fill()
                 .fill_null(0.0)
                 .alias("distance_cm"),
-                pl.when(pl.col("system_state") == "run").then(pl.col("speed_cm_s")).otherwise(0.0).alias("speed_cm_s"),
+                pl.when(encoder_active).then(pl.col("speed_cm_s")).otherwise(0.0).alias("speed_cm_s"),
             )
             .drop("_past_idle")
         )
