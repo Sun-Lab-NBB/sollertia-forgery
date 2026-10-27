@@ -14,6 +14,7 @@ _MICROSECONDS_PER_SECOND: int
 _MICROSECONDS_PER_MINUTE: int
 _RUNNING_SPEED_WINDOW_US: int
 _TIME_COLUMNS: frozenset[str]
+_ENCODER_STATES: tuple[str, ...]
 
 def assemble_behavior_dataset(
     microcontroller_data_path: Path,

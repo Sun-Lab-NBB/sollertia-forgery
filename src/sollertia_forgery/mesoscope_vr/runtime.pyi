@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import dataclass
 from collections.abc import Iterable
 
 import numpy as np
@@ -23,6 +24,15 @@ _DISTANCE_SNAPSHOT_CODE: int
 _ERROR_CONTEXT_CUE_COUNT: int
 _ACTOR_TRIGGER_LEAD_CM: np.float64
 
+@dataclass(frozen=True, slots=True)
+class _Trial:
+    trial_type: int
+    start_cm: np.float64
+    end_cm: np.float64
+    length_cm: np.float64
+    opens_corridor: bool
+    truncated: bool
+
 def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None: ...
 def _export_runtime_data(
     messages: Iterable[tuple[np.uint64, NDArray[np.uint8]]],
@@ -39,8 +49,9 @@ def _decompose_multiple_cue_sequences_into_trials(
     experiment_configuration: MesoscopeExperimentConfiguration,
     task_template: TaskTemplate,
     cue_sequences: list[NDArray[np.uint8]],
-    distance_breakpoints: list[np.float64],
-) -> tuple[NDArray[np.int32], NDArray[np.float64]]: ...
+    corridor_distances: list[np.float64],
+) -> list[_Trial]: ...
+def _resolve_corridor_starts(corridor_distances: list[np.float64]) -> NDArray[np.float64]: ...
 def _prepare_motif_data(
     trial_motifs: list[NDArray[np.uint8]], trial_distances: list[float]
 ) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.int32], NDArray[np.float64]]: ...
@@ -53,8 +64,5 @@ def _decompose_cue_sequence_into_trials(
     maximum_trials: int,
 ) -> tuple[NDArray[np.int32], int, int]: ...
 def _process_trial_sequence(
-    experiment_configuration: MesoscopeExperimentConfiguration,
-    task_template: TaskTemplate,
-    trial_types: NDArray[np.int32],
-    trial_distances: NDArray[np.float64],
-) -> tuple[NDArray[np.uint8], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]: ...
+    experiment_configuration: MesoscopeExperimentConfiguration, task_template: TaskTemplate, trials: list[_Trial]
+) -> tuple[NDArray[np.uint8], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]: ...
