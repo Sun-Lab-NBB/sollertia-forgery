@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 from numba import njit
 import numpy as np
@@ -54,6 +55,25 @@ far after. The value is bracketed to 3.8 to 4.1 cm by the last unrewarded and fi
 native-rate encoder data and equals the radius less the skin width on each side."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Trial:
+    """Describes one trial the animal ran, decomposed from the cue sequence of its corridor."""
+
+    trial_type: int
+    """The index of the trial's type in the experiment configuration's declaration order."""
+    start_cm: np.float64
+    """The cumulative distance, in centimeters, the animal had traveled when the trial began."""
+    end_cm: np.float64
+    """The cumulative distance, in centimeters, the animal had traveled when the trial ended or its corridor closed."""
+    length_cm: np.float64
+    """The distance, in centimeters, the animal traveled inside the trial. It is measured within the trial's own
+    corridor, so it carries none of the rounding that the cumulative distances accumulate across corridors."""
+    opens_corridor: bool
+    """Determines whether the trial is the first of its corridor, which the animal enters partway into its first cue."""
+    truncated: bool
+    """Determines whether a corridor swap cut the trial short."""
+
+
 def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None:
     """Parses the decoded Mesoscope-VR runtime archive into the session's runtime behavior feathers.
 
@@ -70,7 +90,7 @@ def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, sessio
     Raises:
         FileNotFoundError: If the session is an experiment session but its experiment configuration or VR task
             template YAML file is missing.
-        ValueError: If the recorded VR wall cue sequences are absent, if their distance breakpoints are inconsistent,
+        ValueError: If the recorded VR wall cue sequences are absent, if their distance snapshots are inconsistent,
             or if the experiment configuration references a trial name absent from the VR task template.
         RuntimeError: If a VR wall cue sequence cannot be fully decomposed into trial motifs.
     """
@@ -111,7 +131,7 @@ def _export_runtime_data(
             when experiment_configuration is present, since only experiment sessions decode trial geometry.
 
     Raises:
-        ValueError: If the recorded VR wall cue sequences are absent, if their distance breakpoints are inconsistent,
+        ValueError: If the recorded VR wall cue sequences are absent, if their distance snapshots are inconsistent,
             or if the experiment configuration references a trial name absent from the VR task template.
         RuntimeError: If a VR wall cue sequence cannot be fully decomposed into trial motifs.
     """
@@ -187,28 +207,21 @@ def _export_runtime_data(
                 file=output_directory / BehaviorDataFiles.AVERSIVE_GUIDANCE, compression="uncompressed"
             )
 
-        # The acquisition system zeroes its distance tracker at every corridor onset, so each snapshot measures the
-        # corridor it ends. Their running total places every corridor flush against the one before it.
-        corridor_ends: NDArray[np.float64] = np.cumsum(np.array(distance_snapshots, dtype=np.float64))
-
-        trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+        trials = _decompose_multiple_cue_sequences_into_trials(
             experiment_configuration=experiment_configuration,
             task_template=task_template,
             cue_sequences=cue_sequences,
-            distance_breakpoints=list(corridor_ends),
+            corridor_distances=distance_snapshots,
         )
 
         # The cue sequence is logged immediately before the tracker reset that opens its corridor, so its timestamp
         # marks the corridor onset.
-        corridor_starts = np.concatenate((np.zeros(1, dtype=np.float64), corridor_ends[: len(cue_sequences) - 1]))
+        corridor_starts = _resolve_corridor_starts(corridor_distances=distance_snapshots)[: len(cue_sequences)]
         corridor_dataframe = pl.DataFrame({"time_us": cue_sequence_timestamps, "traveled_distance_cm": corridor_starts})
         corridor_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.VR_CORRIDOR, compression="uncompressed")
 
-        cue_sequence, distance_sequence, trigger_start, trigger_end, trial_start = _process_trial_sequence(
-            experiment_configuration=experiment_configuration,
-            task_template=task_template,
-            trial_types=trial_types,
-            trial_distances=trial_distances,
+        cue_sequence, distance_sequence, trigger_start, trigger_end = _process_trial_sequence(
+            experiment_configuration=experiment_configuration, task_template=task_template, trials=trials
         )
 
         cue_dataframe = pl.DataFrame({"vr_cue": cue_sequence, "traveled_distance_cm": distance_sequence})
@@ -221,7 +234,12 @@ def _export_runtime_data(
             file=output_directory / BehaviorDataFiles.VR_TRIGGER_ZONE, compression="uncompressed"
         )
 
-        trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
+        trial_dataframe = pl.DataFrame(
+            {
+                "trial_type_index": np.array([trial.trial_type for trial in trials], dtype=np.int32),
+                "traveled_distance_cm": np.array([trial.start_cm for trial in trials], dtype=np.float64),
+            }
+        )
         trial_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.TRIAL, compression="uncompressed")
 
 
@@ -315,29 +333,30 @@ def _decompose_multiple_cue_sequences_into_trials(
     experiment_configuration: MesoscopeExperimentConfiguration,
     task_template: TaskTemplate,
     cue_sequences: list[NDArray[np.uint8]],
-    distance_breakpoints: list[np.float64],
-) -> tuple[NDArray[np.int32], NDArray[np.float64]]:
+    corridor_distances: list[np.float64],
+) -> list[_Trial]:
     """Decomposes multiple Virtual Reality environment cue sequences into a unified sequence of trials.
 
     Notes:
         Handles cases where the original cue sequence was interrupted and a new sequence was generated during runtime.
-        Uses distance breakpoints to stitch sequences together correctly.
+        Each corridor's trials are placed against the distance traveled since that corridor's onset, the frame in which
+        the runtime records its snapshot, so whether a swap cuts a trial short never depends on the rounding of the
+        cumulative distances. A swap landing on a trial boundary contributes no zero-length trial.
 
     Args:
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session, which
-            defines the canonical trial ordering to which trial_type_index refers.
+            defines the canonical trial ordering to which each trial's type index refers.
         task_template: The VR task template supplying each trial's cue motif and length, joined by trial name.
         cue_sequences: The Virtual Reality environment cue sequences in the order they were used during runtime.
-        distance_breakpoints: The cumulative distances, in centimeters, at which each sequence ends. It holds one
-            fewer element than the cue_sequences list.
+        corridor_distances: The distances, in centimeters, the animal traveled in each corridor before Unity
+            terminated and its cue sequence was replaced. It holds one fewer element than the cue_sequences list.
 
     Returns:
-        A tuple of two elements. The first element is an array of trial type indices stored in the order encountered
-        during runtime. The second element is an array of cumulative distances at the end of each trial.
+        Every trial the animal ran, in the order it ran them.
 
     Raises:
-        ValueError: If there is more than one cue sequence and the number of breakpoints does not match the number of
-            sequences minus one, or if no cue sequences are provided.
+        ValueError: If there is more than one cue sequence and the number of corridor distances does not match the
+            number of sequences minus one, or if no cue sequences are provided.
         RuntimeError: If the function is unable to fully decompose any of the cue sequences.
     """
     if not cue_sequences:
@@ -347,15 +366,15 @@ def _decompose_multiple_cue_sequences_into_trials(
         )
         console.error(message=message, error=ValueError)
 
-    if len(cue_sequences) > 1 and len(distance_breakpoints) != len(cue_sequences) - 1:
+    if len(cue_sequences) > 1 and len(corridor_distances) != len(cue_sequences) - 1:
         message = (
-            f"Unable to decompose input cue sequence(s) into trials. Expected the number of distance breakpoints "
-            f"to be {len(cue_sequences) - 1} (number of sequences - 1), but encountered {len(distance_breakpoints)}."
+            f"Unable to decompose input cue sequence(s) into trials. Expected the number of distance snapshots "
+            f"to be {len(cue_sequences) - 1} (number of sequences - 1), but encountered {len(corridor_distances)}."
         )
         console.error(message=message, error=ValueError)
 
-    # The experiment configuration defines the canonical trial ordering to which trial_type_index refers, and the VR
-    # task template supplies each trial's spatial geometry. The two are joined by trial name.
+    # The experiment configuration defines the canonical trial ordering to which each trial's type index refers, and
+    # the VR task template supplies each trial's spatial geometry. The two are joined by trial name.
     trial_names = list(experiment_configuration.trial_structures.keys())
     trial_geometries = _resolve_trial_geometries(task_template=task_template, trial_names=trial_names)
     cue_code_by_name = {cue.name: cue.code for cue in task_template.cues}
@@ -377,16 +396,12 @@ def _decompose_multiple_cue_sequences_into_trials(
     total_cue_length = sum(len(sequence) for sequence in cue_sequences)
     maximum_trials = total_cue_length // minimum_motif_length + 1
 
-    # The animal enters each corridor already 'cue_offset_cm' into its first cue, so it completes a trial after
-    # traveling that much less than the trial's corridor length. Opening the accumulator at minus the offset makes every
-    # distance below a distance traveled. The encoder reports that frame, and the corridor swap snapshots used in the
-    # comparison below are recorded in it.
-    cue_offset = float(task_template.vr_environment.cue_offset_cm)
+    # The animal enters each corridor already 'cue_offset_cm' into its first cue, so the corridor's first trial ends
+    # after it travels that much less than the trial's corridor length.
+    cue_offset = np.float64(task_template.vr_environment.cue_offset_cm)
+    corridor_starts = _resolve_corridor_starts(corridor_distances=corridor_distances)
 
-    all_trial_indices: list[int] = []
-    all_trial_distances: list[float] = []
-    cumulative_distance = -cue_offset
-
+    trials: list[_Trial] = []
     for sequence_index, cue_sequence in enumerate(cue_sequences):
         trial_indices_array, trial_count, failure_position = _decompose_cue_sequence_into_trials(
             cue_sequence=cue_sequence,
@@ -406,33 +421,57 @@ def _decompose_multiple_cue_sequences_into_trials(
             )
             console.error(message=message, error=RuntimeError)
 
-        sequence_trial_indices = trial_indices_array[:trial_count].tolist()
+        # Every corridor but the last closes at the distance recorded by its snapshot. The last one runs to the end of
+        # the session, so the rest of its sequence stays listed in full.
+        swap = corridor_distances[sequence_index] if sequence_index < len(cue_sequences) - 1 else None
+        corridor_start = corridor_starts[sequence_index]
+        trial_start = np.float64(0)
+        for position, trial_index in enumerate(trial_indices_array[:trial_count].tolist()):
+            trial_length = distances_array[trial_index] - (cue_offset if position == 0 else np.float64(0))
+            trial_end = trial_start + trial_length
+            if swap is not None and trial_end > swap:
+                if swap > trial_start:
+                    trials.append(
+                        _Trial(
+                            trial_type=trial_index,
+                            start_cm=corridor_start + trial_start,
+                            end_cm=corridor_start + swap,
+                            length_cm=swap - trial_start,
+                            opens_corridor=position == 0,
+                            truncated=True,
+                        )
+                    )
+                break
+            trials.append(
+                _Trial(
+                    trial_type=trial_index,
+                    start_cm=corridor_start + trial_start,
+                    end_cm=corridor_start + trial_end,
+                    length_cm=trial_length,
+                    opens_corridor=position == 0,
+                    truncated=False,
+                )
+            )
+            trial_start = trial_end
 
-        for trial_index in sequence_trial_indices:
-            trial_distance = distances_array[trial_index]
-            new_cumulative_distance = cumulative_distance + trial_distance
+    return trials
 
-            if sequence_index < len(cue_sequences) - 1:
-                breakpoint_distance = distance_breakpoints[sequence_index]
 
-                if new_cumulative_distance > breakpoint_distance:
-                    truncated_distance = breakpoint_distance - cumulative_distance
+def _resolve_corridor_starts(corridor_distances: list[np.float64]) -> NDArray[np.float64]:
+    """Resolves the cumulative distance, in centimeters, at which each corridor opened.
 
-                    if truncated_distance > 0:
-                        all_trial_indices.append(trial_index)
-                        all_trial_distances.append(float(breakpoint_distance))
+    Notes:
+        The acquisition system zeroes its distance tracker at every corridor onset, so each snapshot measures the
+        corridor it closes. Their running total places every corridor flush against the one before it.
 
-                    cumulative_distance = breakpoint_distance - cue_offset
-                    break
+    Args:
+        corridor_distances: The distances the animal traveled in each closed corridor, in the order the corridors ran.
 
-            all_trial_indices.append(trial_index)
-            all_trial_distances.append(float(new_cumulative_distance))
-            cumulative_distance = new_cumulative_distance
-
-    trial_type_sequence: NDArray[np.int32] = np.array(all_trial_indices, dtype=np.int32)
-    trial_distance_sequence: NDArray[np.float64] = np.array(all_trial_distances, dtype=np.float64)
-
-    return trial_type_sequence, trial_distance_sequence
+    Returns:
+        The opening distance of every corridor, one more than the number of closed corridors.
+    """
+    totals = np.cumsum(np.array(corridor_distances, dtype=np.float64))
+    return np.concatenate((np.zeros(1, dtype=np.float64), totals))
 
 
 def _prepare_motif_data(
@@ -545,36 +584,36 @@ def _decompose_cue_sequence_into_trials(
 def _process_trial_sequence(
     experiment_configuration: MesoscopeExperimentConfiguration,
     task_template: TaskTemplate,
-    trial_types: NDArray[np.int32],
-    trial_distances: NDArray[np.float64],
-) -> tuple[NDArray[np.uint8], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Processes the sequence of trials experienced by the animal during runtime to extract trial metadata.
+    trials: list[_Trial],
+) -> tuple[NDArray[np.uint8], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Resolves the cues the animal entered and the trigger zones it crossed over the trials it ran.
+
+    Notes:
+        Every decision is taken against the distance traveled since the trial began, so no two cumulative distances are
+        ever compared.
 
     Args:
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session, which
-            defines the canonical trial ordering to which the trial_types indices refer.
+            defines the canonical trial ordering to which each trial's type index refers.
         task_template: The VR task template supplying each trial's cue sequence and trigger zone, the cue catalog,
             and the corridor cue offset, joined by trial name.
-        trial_types: The indices used to query the trial data for each trial experienced by the animal during runtime.
-        trial_distances: The cumulative traveled distance, in centimeters, at which the animal fully completed each
-            trial during runtime. The elements in this array use the same order as elements in the trial_types array.
+        trials: The trials the animal ran, as decomposed from the cue sequences of their corridors.
 
     Returns:
-        A tuple of five NumPy arrays. The first array stores the IDs of the Virtual Reality environment cues
+        A tuple of four NumPy arrays. The first array stores the IDs of the Virtual Reality environment cues
         experienced by the animal during runtime. The second array stores the cumulative distance, in centimeters,
         traveled by the animal at the onset of each cue. The third array stores the cumulative distance traveled by
         the animal when the runtime registered it entering a trial's trigger zone, and the fourth the distance at
         which it registered the exit, clamped to the trial's end distance. Both sit one actor lead outside the
-        declared zone boundaries. Trials that ended before their trigger zone began contribute no entry,
-        so these two arrays can be shorter than the trial-type array. The fifth array stores the cumulative distance
-        traveled by the animal at the start of each trial.
+        declared zone boundaries. Trials that ended before their trigger zone began contribute no entry, so these two
+        arrays can be shorter than the trial list.
     """
     # The experiment configuration defines the canonical trial ordering, and the VR task template supplies each
     # trial's cue sequence, trigger zone, and the cue catalog, joined by trial name.
     trial_names = list(experiment_configuration.trial_structures.keys())
     trial_geometries = _resolve_trial_geometries(task_template=task_template, trial_names=trial_names)
 
-    cue_offset = task_template.vr_environment.cue_offset_cm
+    cue_offset = np.float64(task_template.vr_environment.cue_offset_cm)
     cue_code_by_name = {cue.name: cue.code for cue in task_template.cues}
     cue_length_by_name = {cue.name: cue.length_cm for cue in task_template.cues}
 
@@ -582,74 +621,37 @@ def _process_trial_sequence(
     cues_list: list[np.uint8] = []
     trigger_zone_starts_list: list[np.float64] = []
     trigger_zone_ends_list: list[np.float64] = []
-    trial_start_distances_list: list[np.float64] = []
 
-    cumulative_distance = np.float64(0)
-    apply_offset_to_next_cue = True
-    previous_trial_end_distance = np.float64(0)
+    for trial in trials:
+        trial_geometry = trial_geometries[trial.trial_type]
 
-    index: int
-    trial: np.int32
-    for index, trial in enumerate(trial_types):
-        trial_geometry = trial_geometries[trial]
-        trial_start_distances_list.append(previous_trial_end_distance)
+        # The animal enters the first trial of every corridor partway into its first cue, so it reaches that cue's end
+        # and every position the template declares against the corridor that much sooner.
+        entry_offset = cue_offset if trial.opens_corridor else np.float64(0)
 
-        # Captures the flag before the cue walk below consumes it, since the trigger zone is placed against the corridor
-        # into which this trial was entered rather than against the one the walk leaves behind.
-        entered_mid_cue = apply_offset_to_next_cue
-
-        actual_trial_distance = trial_distances[index] - previous_trial_end_distance
-        trial_cue_sequence = trial_geometry.cue_sequence
         distance_within_trial = np.float64(0)
-
-        for cue_index, cue_name in enumerate(trial_cue_sequence):
-            cue_code = cue_code_by_name[cue_name]
-            cue_length = cue_length_by_name[cue_name]
-
-            if apply_offset_to_next_cue and cue_index == 0:
-                effective_distance_to_next_cue = cue_length - cue_offset
-                apply_offset_to_next_cue = False
-            else:
-                effective_distance_to_next_cue = cue_length
-
-            # Handles trial truncation when the trial was abruptly ended before completion.
-            if distance_within_trial + effective_distance_to_next_cue > actual_trial_distance:
-                cues_list.append(np.uint8(cue_code))
-                distances_list.append(cumulative_distance)
-                cumulative_distance = previous_trial_end_distance + actual_trial_distance
-                apply_offset_to_next_cue = True
+        for cue_index, cue_name in enumerate(trial_geometry.cue_sequence):
+            # A trial cut short by a corridor swap holds only the cues the animal entered before the swap.
+            if trial.truncated and distance_within_trial >= trial.length_cm:
                 break
+            cues_list.append(np.uint8(cue_code_by_name[cue_name]))
+            distances_list.append(trial.start_cm + distance_within_trial)
+            distance_within_trial += cue_length_by_name[cue_name] - (entry_offset if cue_index == 0 else 0)
 
-            cues_list.append(np.uint8(cue_code))
-            distances_list.append(cumulative_distance)
-            cumulative_distance += effective_distance_to_next_cue
-            distance_within_trial += effective_distance_to_next_cue
-
-        trigger_start_relative = trial_geometry.stimulus_trigger_zone_start_cm
-        trigger_end_relative = trial_geometry.stimulus_trigger_zone_end_cm
-        # A trial entered partway into its first cue is shorter than its corridor by that offset, so every position that
-        # the template declares against the corridor is reached that much earlier in the distance traveled.
-        entry_offset = cue_offset if entered_mid_cue else np.float64(0)
-        zone_origin = previous_trial_end_distance - entry_offset
         # Unity registers the crossing when the actor's collider surface meets the zone, so the tracked position is one
         # actor lead short of the declared start at entry and one lead past the declared end at exit.
-        trigger_start_absolute = zone_origin + trigger_start_relative - _ACTOR_TRIGGER_LEAD_CM
-        trigger_end_absolute = zone_origin + trigger_end_relative + _ACTOR_TRIGGER_LEAD_CM
+        trigger_start = trial_geometry.stimulus_trigger_zone_start_cm - entry_offset - _ACTOR_TRIGGER_LEAD_CM
+        trigger_end = trial_geometry.stimulus_trigger_zone_end_cm - entry_offset + _ACTOR_TRIGGER_LEAD_CM
 
-        if trigger_start_absolute <= trial_distances[index]:
-            trigger_zone_starts_list.append(trigger_start_absolute)
-
-            if trigger_end_absolute <= trial_distances[index]:
-                trigger_zone_ends_list.append(trigger_end_absolute)
-            else:
-                trigger_zone_ends_list.append(np.float64(trial_distances[index]))
-
-        previous_trial_end_distance = trial_distances[index]
+        if trigger_start <= trial.length_cm:
+            trigger_zone_starts_list.append(trial.start_cm + trigger_start)
+            trigger_zone_ends_list.append(
+                trial.start_cm + trigger_end if trigger_end <= trial.length_cm else trial.end_cm
+            )
 
     distances: NDArray[np.float64] = np.array(distances_list, dtype=np.float64)
     cues: NDArray[np.uint8] = np.array(cues_list, dtype=np.uint8)
     trigger_zone_starts: NDArray[np.float64] = np.array(trigger_zone_starts_list, dtype=np.float64)
     trigger_zone_ends: NDArray[np.float64] = np.array(trigger_zone_ends_list, dtype=np.float64)
-    trial_start_distances: NDArray[np.float64] = np.array(trial_start_distances_list, dtype=np.float64)
 
-    return cues, distances, trigger_zone_starts, trigger_zone_ends, trial_start_distances
+    return cues, distances, trigger_zone_starts, trigger_zone_ends

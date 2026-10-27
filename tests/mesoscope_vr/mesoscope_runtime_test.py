@@ -22,6 +22,7 @@ from sollertia_shared_assets import (
 
 from sollertia_forgery.runtime import run_runtime_processing_pipeline
 from sollertia_forgery.mesoscope_vr.runtime import (
+    _Trial,
     parse_runtime,
     _process_trial_sequence,
     _decompose_cue_sequence_into_trials,
@@ -94,7 +95,7 @@ def _distance_payload(distance_cm: float) -> bytes:
     """Builds the distance snapshot payload the acquisition runtime logs when it swaps the cue sequence.
 
     Args:
-        distance_cm: The cumulative traveled distance the snapshot reports.
+        distance_cm: The distance the snapshot reports, traveled since the onset of the corridor it closes.
 
     Returns:
         The payload bytes, holding the leading code followed by the little-endian double.
@@ -182,6 +183,31 @@ def _build_task_template(
             )
             for name, cue_sequence in trial_cue_sequences.items()
         },
+    )
+
+
+def _trial(
+    trial_type: int, start_cm: float, end_cm: float, *, opens_corridor: bool = False, truncated: bool = False
+) -> _Trial:
+    """Builds one decomposed trial spanning the given traveled distances.
+
+    Args:
+        trial_type: The index of the trial's type in the experiment configuration's declaration order.
+        start_cm: The cumulative distance at which the trial begins.
+        end_cm: The cumulative distance at which the trial ends.
+        opens_corridor: Determines whether the trial is the first of its corridor.
+        truncated: Determines whether a corridor swap cut the trial short.
+
+    Returns:
+        The decomposed trial.
+    """
+    return _Trial(
+        trial_type=trial_type,
+        start_cm=np.float64(start_cm),
+        end_cm=np.float64(end_cm),
+        length_cm=np.float64(end_cm - start_cm),
+        opens_corridor=opens_corridor,
+        truncated=truncated,
     )
 
 
@@ -621,7 +647,7 @@ def test_parse_runtime_raises_for_breakpoint_count_mismatch(experiment_session: 
             session=experiment_session,
         )
 
-    assert "Expected the number of distance breakpoints to be 1" in _normalized(str(raised.value))
+    assert "Expected the number of distance snapshots to be 1" in _normalized(str(raised.value))
     assert "but encountered 0." in _normalized(str(raised.value))
 
 
@@ -654,7 +680,7 @@ def test_decompose_reports_the_failure_position_when_no_trial_is_decoded() -> No
             experiment_configuration=_build_experiment_configuration(trial_names=["long_trial"]),
             task_template=_build_task_template(trial_cue_sequences={"long_trial": ["grating", "checker", "grating"]}),
             cue_sequences=[np.array([_GRATING_CODE, _CHECKER_CODE], dtype=np.uint8)],
-            distance_breakpoints=[],
+            corridor_distances=[],
         )
 
     assert "No trial motif matched at position 0. The next 20 cues: [1, 2]" in _normalized(str(raised.value))
@@ -669,7 +695,7 @@ def test_decompose_reports_the_failure_position_of_a_corridor_built_from_the_fir
             experiment_configuration=_build_experiment_configuration(["reward_trial"]),
             task_template=_build_task_template({"reward_trial": ["grating", "checker"]}),
             cue_sequences=[np.array(corridor, dtype=np.uint8)],
-            distance_breakpoints=[],
+            corridor_distances=[],
         )
 
     assert "No trial motif matched at position 6. The next 20 cues: [3]" in _normalized(str(raised.value))
@@ -677,20 +703,20 @@ def test_decompose_reports_the_failure_position_of_a_corridor_built_from_the_fir
 
 def test_decompose_accumulates_trial_distances_of_a_single_sequence() -> None:
     """Verifies that one corridor decomposes into its trials with cumulative end distances."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}),
         cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8)],
-        distance_breakpoints=[],
+        corridor_distances=[],
     )
 
-    assert trial_types.tolist() == [0, 0, 0, 0]
-    assert trial_distances.tolist() == [60.0, 120.0, 180.0, 240.0]
+    assert [trial.trial_type for trial in trials] == [0, 0, 0, 0]
+    assert [trial.end_cm for trial in trials] == [60.0, 120.0, 180.0, 240.0]
 
 
 def test_decompose_decodes_every_trial_of_a_configuration_mixing_motif_lengths() -> None:
     """Verifies that a corridor made of short trials decomposes in full when a longer trial type is also configured."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(trial_names=["reward_trial", "long_trial"]),
         task_template=_build_task_template(
             trial_cue_sequences={
@@ -699,19 +725,19 @@ def test_decompose_decodes_every_trial_of_a_configuration_mixing_motif_lengths()
             }
         ),
         cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8)],
-        distance_breakpoints=[],
+        corridor_distances=[],
     )
 
     # The trial cap is the corridor length over the shortest configured motif, so every short trial decodes and
     # hitting the cap returns an ordinary trial count. A cap measured against the longest motif would truncate
     # the session with no error raised anywhere.
-    assert trial_types.tolist() == [0, 0, 0, 0]
-    assert trial_distances.tolist() == [60.0, 120.0, 180.0, 240.0]
+    assert [trial.trial_type for trial in trials] == [0, 0, 0, 0]
+    assert [trial.end_cm for trial in trials] == [60.0, 120.0, 180.0, 240.0]
 
 
 def test_decompose_matches_the_longer_motif_when_a_shorter_trial_is_its_prefix() -> None:
     """Verifies that a trial whose motif is a prefix of another trial's motif never consumes that longer trial."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(trial_names=["control_trial", "reward_trial"]),
         task_template=_build_task_template(
             trial_cue_sequences={
@@ -724,13 +750,13 @@ def test_decompose_matches_the_longer_motif_when_a_shorter_trial_is_its_prefix()
                 _repeating_cue_sequence(motif=[_GRATING_CODE, _CHECKER_CODE, _GRATING_CODE], repeats=2), dtype=np.uint8
             )
         ],
-        distance_breakpoints=[],
+        corridor_distances=[],
     )
 
     # The kernel takes the first motif that matches, so the motifs reach it longest-first. Offered the prefix
     # first, it eats two cues of every three-cue trial and the rest of the corridor stops decomposing altogether.
-    assert trial_types.tolist() == [0, 0]
-    assert trial_distances.tolist() == [3 * _CUE_LENGTH_CM, 6 * _CUE_LENGTH_CM]
+    assert [trial.trial_type for trial in trials] == [0, 0]
+    assert [trial.end_cm for trial in trials] == [3 * _CUE_LENGTH_CM, 6 * _CUE_LENGTH_CM]
 
 
 def test_decompose_reports_trial_types_in_the_configuration_declaration_order() -> None:
@@ -738,104 +764,102 @@ def test_decompose_reports_trial_types_in_the_configuration_declaration_order() 
     reward_motif = [_GRATING_CODE, _CHECKER_CODE]
     control_motif = [_CHECKER_CODE, _GRATING_CODE, _GRATING_CODE]
 
-    trial_types, _trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial", "control_trial"]),
         task_template=_build_task_template(
             {"reward_trial": ["grating", "checker"], "control_trial": ["checker", "grating", "grating"]}
         ),
         cue_sequences=[np.array([*reward_motif, *control_motif, *reward_motif], dtype=np.uint8)],
-        distance_breakpoints=[],
+        corridor_distances=[],
     )
 
     # The trial-sequence processor resolves each trial's corridor geometry by that same order, so indices counted
     # against an alphabetically sorted trial list would walk the wrong corridor for every trial declared out of
     # order.
-    assert trial_types.tolist() == [0, 1, 0]
+    assert [trial.trial_type for trial in trials] == [0, 1, 0]
 
 
 def test_decompose_accumulates_trial_distances_at_the_precision_of_the_declared_cue_lengths() -> None:
     """Verifies that a trial end is reported as the exact double sum of the cue lengths it spans."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template(
             trial_cue_sequences={"reward_trial": ["grating", "checker"]}, cue_length_cm=30.1
         ),
         cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 2), dtype=np.uint8)],
-        distance_breakpoints=[],
+        corridor_distances=[],
     )
 
-    assert trial_types.tolist() == [0, 0]
+    assert [trial.trial_type for trial in trials] == [0, 0]
     # Single precision cannot hold 60.2, and rounds the first trial end to 60.20000076293945 instead. These
     # distances are the coordinate against which the assembled dataset interpolates its trial columns, and the
     # matching encoder distance is a double, so a narrower accumulator drifts off the declared corridor.
-    assert trial_distances.tolist() == [60.2, 120.4]
+    assert [trial.end_cm for trial in trials] == [60.2, 120.4]
 
 
 def test_decompose_truncates_the_trial_spanning_a_distance_breakpoint() -> None:
     """Verifies that the trial interrupted by a corridor swap ends at the recorded breakpoint distance."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}),
         cue_sequences=[
             np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8),
             np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 2), dtype=np.uint8),
         ],
-        distance_breakpoints=[np.float64(90.0)],
+        corridor_distances=[np.float64(90.0)],
     )
 
-    assert trial_types.tolist() == [0, 0, 0, 0]
-    assert trial_distances.tolist() == [60.0, 90.0, 150.0, 210.0]
+    assert [trial.trial_type for trial in trials] == [0, 0, 0, 0]
+    assert [trial.end_cm for trial in trials] == [60.0, 90.0, 150.0, 210.0]
 
 
 def test_decompose_drops_the_trial_starting_at_a_distance_breakpoint() -> None:
     """Verifies that a corridor swap landing on a trial boundary contributes no zero-length trial."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}),
         cue_sequences=[
             np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8),
             np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 2), dtype=np.uint8),
         ],
-        distance_breakpoints=[np.float64(120.0)],
+        corridor_distances=[np.float64(120.0)],
     )
 
-    assert trial_types.tolist() == [0, 0, 0, 0]
-    assert trial_distances.tolist() == [60.0, 120.0, 180.0, 240.0]
+    assert [trial.trial_type for trial in trials] == [0, 0, 0, 0]
+    assert [trial.end_cm for trial in trials] == [60.0, 120.0, 180.0, 240.0]
 
 
 def test_decompose_reopens_the_accumulator_behind_the_cue_offset_after_a_corridor_swap() -> None:
     """Verifies that the trials following a corridor swap stay in the traveled-distance frame under a cue offset."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
         cue_sequences=[
             np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8),
             np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 2), dtype=np.uint8),
         ],
-        distance_breakpoints=[np.float64(90.0)],
+        corridor_distances=[np.float64(90.0)],
     )
 
-    assert trial_types.tolist() == [0, 0, 0, 0]
+    assert [trial.trial_type for trial in trials] == [0, 0, 0, 0]
     # Trial 1 completes after 50 cm because the first corridor is entered 10 cm in, and trial 2 is cut at the 90 cm
     # swap. The second corridor is entered 10 cm in as well, so its two trials complete from 80 cm traveled onwards.
-    assert trial_distances.tolist() == [50.0, 90.0, 140.0, 200.0]
+    assert [trial.end_cm for trial in trials] == [50.0, 90.0, 140.0, 200.0]
 
 
 def test_every_distance_stream_shares_the_traveled_frame_under_a_cue_offset() -> None:
-    """Verifies the four distance streams agree with each other when the animal starts partway into its first cue."""
-    cues, cue_distances, trigger_starts, trigger_ends, trial_starts = _process_trial_sequence(
+    """Verifies the distance streams agree with each other when the animal starts partway into its first cue."""
+    cues, cue_distances, trigger_starts, trigger_ends = _process_trial_sequence(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
-        trial_types=np.array([0, 0, 0], dtype=np.int32),
         # Trial 0 is entered 10 cm in, so it completes after 50 cm traveled. Each later trial takes its full 60.
-        trial_distances=np.array([50.0, 110.0, 170.0], dtype=np.float64),
+        trials=[_trial(0, 0.0, 50.0, opens_corridor=True), _trial(0, 50.0, 110.0), _trial(0, 110.0, 170.0)],
     )
 
     # A trial begins exactly where its own first cue does, which is the invariant tying the two distance frames
-    # together. The assembled dataset matches all four streams against one axis interpolated from the encoder's
-    # traveled distance, so a stream carrying corridor positions would sit a fixed offset away on the same rows.
-    assert trial_starts.tolist() == [0.0, 50.0, 110.0]
-    assert [cue_distances[index] for index in (0, 2, 4)] == trial_starts.tolist()
+    # together. The assembled dataset matches every stream against one axis interpolated from the encoder's traveled
+    # distance, so a stream carrying corridor positions would sit a fixed offset away on the same rows.
+    assert [cue_distances[index] for index in (0, 2, 4)] == [0.0, 50.0, 110.0]
     assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE] * 3
 
     # The trigger zone sits 30 cm into the corridor, which the first trial reaches after traveling only 20.
@@ -845,58 +869,151 @@ def test_every_distance_stream_shares_the_traveled_frame_under_a_cue_offset() ->
 
 def test_decomposition_reports_trial_ends_as_distances_traveled() -> None:
     """Verifies the decomposition reports how far the animal ran rather than how long the corridor was."""
-    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+    trials = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
         cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 3), dtype=np.uint8)],
-        distance_breakpoints=[],
+        corridor_distances=[],
     )
 
-    assert trial_types.tolist() == [0, 0, 0]
+    assert [trial.trial_type for trial in trials] == [0, 0, 0]
     # Each trial spans 60 cm of corridor, and the animal enters the first one 10 cm along. The assembled dataset
     # interpolates its trial columns against the encoder's traveled distance, so a corridor length would place
     # every boundary too late.
-    assert trial_distances.tolist() == [50.0, 110.0, 170.0]
+    assert [trial.end_cm for trial in trials] == [50.0, 110.0, 170.0]
 
 
 def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_trials() -> None:
-    """Verifies the cue, trigger zone, and trial start series a partially truncated trial sequence produces."""
-    cues, distances, trigger_starts, trigger_ends, trial_starts = _process_trial_sequence(
+    """Verifies the cue and trigger zone series of a corridor swap that cuts a trial short."""
+    cues, distances, trigger_starts, trigger_ends = _process_trial_sequence(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
-        trial_types=np.array([0, 0, 0, 0], dtype=np.int32),
-        trial_distances=np.array([60.0, 80.0, 150.0, 190.0], dtype=np.float64),
+        # The first corridor closes 20 cm into its second trial, and the second corridor opens at 70 cm.
+        trials=[
+            _trial(0, 0.0, 50.0, opens_corridor=True),
+            _trial(0, 50.0, 70.0, truncated=True),
+            _trial(0, 70.0, 120.0, opens_corridor=True),
+            _trial(0, 120.0, 180.0),
+        ],
     )
 
+    # The truncated trial holds only the cue the animal entered before the swap, and each corridor's first cue is
+    # entered 10 cm in.
     assert cues.tolist() == [1, 2, 1, 1, 2, 1, 2]
-    assert distances.tolist() == [0.0, 20.0, 50.0, 80.0, 100.0, 130.0, 160.0]
-    # Trial 0 and trial 2 are entered 10 cm into their first cue, so each reaches its declared trigger zone position
-    # after traveling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the corridor, so the same offset
-    # applies to it. Trial 1 is cut short before its zone begins and contributes no entry, and trial 3 follows a
-    # complete trial, so its zone sits at the full 30 cm.
-    assert trigger_starts.tolist() == [16.0, 96.0, 176.0]
-    assert trigger_ends.tolist() == [39.0, 119.0, 190.0]
-    assert trial_starts.tolist() == [0.0, 60.0, 80.0, 150.0]
+    assert distances.tolist() == [0.0, 20.0, 50.0, 70.0, 90.0, 120.0, 150.0]
+    # Each corridor's first trial reaches its zone 10 cm sooner. The truncated trial ends before its zone begins and
+    # contributes no entry.
+    assert trigger_starts.tolist() == [16.0, 86.0, 146.0]
+    assert trigger_ends.tolist() == [39.0, 109.0, 169.0]
 
 
 def test_process_trial_sequence_walks_each_trial_through_its_own_corridor() -> None:
     """Verifies that a mixed trial sequence resolves each trial's cues and trigger zone from that trial's geometry."""
-    cues, distances, trigger_starts, trigger_ends, trial_starts = _process_trial_sequence(
+    cues, distances, trigger_starts, trigger_ends = _process_trial_sequence(
         experiment_configuration=_build_experiment_configuration(["reward_trial", "control_trial"]),
         task_template=_build_task_template(
             {"reward_trial": ["grating", "checker"], "control_trial": ["checker", "grating", "grating"]}
         ),
-        trial_types=np.array([0, 1], dtype=np.int32),
-        trial_distances=np.array([60.0, 150.0], dtype=np.float64),
+        trials=[_trial(0, 0.0, 60.0, opens_corridor=True), _trial(1, 60.0, 150.0)],
     )
 
     # Walking every trial with the first configured trial type's corridor would fill the cue feather with cues the
     # animal never saw.
     assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE, _CHECKER_CODE, _GRATING_CODE, _GRATING_CODE]
     assert distances.tolist() == [0.0, 30.0, 60.0, 90.0, 120.0]
-    assert trial_starts.tolist() == [0.0, 60.0]
     assert trigger_starts.tolist() == [26.0, 86.0]
     assert trigger_ends.tolist() == [49.0, 109.0]
+
+
+def test_decomposition_keeps_every_trial_after_a_swap_whole_whatever_the_swap_distance() -> None:
+    """Verifies that a corridor opened at a distance double arithmetic cannot subtract back out keeps whole trials."""
+    template = _build_task_template({"long_trial": ["grating", "checker"] * 4}, cue_offset_cm=10.0)
+    configuration = _build_experiment_configuration(["long_trial"])
+    corridor = np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE] * 4, 5), dtype=np.uint8)
+
+    trials = _decompose_multiple_cue_sequences_into_trials(
+        experiment_configuration=configuration,
+        task_template=template,
+        cue_sequences=[corridor, corridor],
+        corridor_distances=[np.float64(981.4157612)],
+    )
+    cues, distances, trigger_starts, _trigger_ends = _process_trial_sequence(
+        experiment_configuration=configuration, task_template=template, trials=trials
+    )
+
+    # Subtracting the corridor's opening distance from its first trial's end leaves 229.9999999999999 in place of
+    # 230. Read as a truncation, it would enter the next trial 10 cm into its first cue and shift every later cue of
+    # the corridor 10 cm early.
+    assert [trial.truncated for trial in trials] == [
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    second_corridor = distances[cues.size - 40 :]
+    assert np.diff(second_corridor).tolist() == pytest.approx([20.0] + [30.0] * 38)
+    assert trigger_starts[-4] == pytest.approx(981.4157612 + 230.0 + 26.0)
+
+
+def test_decomposition_enters_a_corridor_opened_on_a_trial_boundary_partway_into_its_first_cue() -> None:
+    """Verifies that a swap landing on a trial boundary still applies the cue offset to the next corridor."""
+    template = _build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0)
+    configuration = _build_experiment_configuration(["reward_trial"])
+    corridor = np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8)
+
+    trials = _decompose_multiple_cue_sequences_into_trials(
+        experiment_configuration=configuration,
+        task_template=template,
+        cue_sequences=[corridor, corridor],
+        corridor_distances=[np.float64(110.0)],
+    )
+    _cues, distances, _trigger_starts, _trigger_ends = _process_trial_sequence(
+        experiment_configuration=configuration, task_template=template, trials=trials
+    )
+
+    # The first corridor completes two trials and closes exactly at the second one's end, so it drops the trial that
+    # would start there. The second corridor is entered 10 cm into its first cue like any other.
+    assert [trial.end_cm for trial in trials] == [50.0, 110.0, 160.0, 220.0, 280.0, 340.0]
+    assert distances.tolist() == [0.0, 20.0, 50.0, 80.0, 110.0, 130.0, 160.0, 190.0, 220.0, 250.0, 280.0, 310.0]
+
+
+def test_cue_onsets_follow_the_template_in_every_corridor_for_arbitrary_swap_distances() -> None:
+    """Verifies the cue series against independently computed corridor geometry over many random swap distances."""
+    template = _build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0)
+    configuration = _build_experiment_configuration(["reward_trial"])
+    corridor = np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 20), dtype=np.uint8)
+    generator = np.random.default_rng(seed=20261026)
+
+    for _ in range(300):
+        swaps = generator.uniform(low=1.0, high=600.0, size=int(generator.integers(1, 4)))
+        trials = _decompose_multiple_cue_sequences_into_trials(
+            experiment_configuration=configuration,
+            task_template=template,
+            cue_sequences=[corridor] * (swaps.size + 1),
+            corridor_distances=[np.float64(swap) for swap in swaps],
+        )
+        _cues, distances, _trigger_starts, _trigger_ends = _process_trial_sequence(
+            experiment_configuration=configuration, task_template=template, trials=trials
+        )
+
+        # Each corridor's cues start at its onset, the first one 10 cm short because the animal enters it 10 cm in.
+        # A closed corridor lists the cues the animal entered before its swap, and the last one lists all of them.
+        local_onsets = np.concatenate((np.zeros(1), 20.0 + 30.0 * np.arange(corridor.size - 1)))
+        openings = np.concatenate((np.zeros(1), np.cumsum(swaps)))
+        expected = np.concatenate(
+            [
+                opening + local_onsets[local_onsets < swap]
+                for opening, swap in zip(openings, [*swaps, np.inf], strict=True)
+            ]
+        )
+        assert distances.size == expected.size
+        assert distances == pytest.approx(expected, abs=1e-9)
 
 
 def test_decompose_cue_sequence_kernel_prefers_the_longest_matching_motif() -> None:
